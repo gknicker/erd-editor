@@ -36,6 +36,10 @@ import {
   formatTable as formatTableKotlin,
 } from './kotlin';
 import {
+  createCode as createCodePrisma,
+  formatTable as formatTablePrisma,
+} from './prisma';
+import {
   createCode as createCodeScala,
   formatTable as formatTableScala,
 } from './scala';
@@ -90,6 +94,8 @@ export function createGeneratorCode(state: RootState): string {
       return createCodeDBML(state);
     case Language.AML:
       return createCodeAML(state);
+    case Language.Prisma:
+      return createCodePrisma(state);
   }
 
   return '';
@@ -159,6 +165,10 @@ export function createGeneratorCodeTable(
       break;
     case Language.AML:
       formatTableAML(state, { buffer, table });
+      buffer.push('');
+      break;
+    case Language.Prisma:
+      formatTablePrisma(state, { buffer, table });
       buffer.push('');
       break;
   }

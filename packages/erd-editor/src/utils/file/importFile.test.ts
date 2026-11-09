@@ -16,6 +16,7 @@ import {
   importDiffJSON,
   importGraphQL,
   importJSON,
+  importPrisma,
   importSchemaSQL,
   setImportFileCallback,
 } from '@/utils/file/importFile';
@@ -157,6 +158,21 @@ describe('importFile', () => {
         type: 'aml',
         op: 'set',
         accept: '.aml',
+      });
+      expect(harness.inputs).toHaveLength(0);
+      expect(harness.clicks).toBe(0);
+    });
+
+    it('short-circuits importPrisma with a prisma/set descriptor', () => {
+      const callback = vi.fn();
+      setImportFileCallback(callback);
+
+      importPrisma(harness.app);
+
+      expect(callback).toHaveBeenCalledWith({
+        type: 'prisma',
+        op: 'set',
+        accept: '.prisma',
       });
       expect(harness.inputs).toHaveLength(0);
       expect(harness.clicks).toBe(0);
@@ -533,6 +549,92 @@ describe('importFile', () => {
 
       expect(harness.dispatch).not.toHaveBeenCalled();
       expect(harness.emitted).toHaveLength(1);
+    });
+  });
+
+  describe('importPrisma', () => {
+    const prisma = 'model User {\n  id Int @id\n}';
+
+    it('creates and clicks a file input accepting the prisma extension', () => {
+      importPrisma(harness.app);
+
+      const [input] = harness.inputs;
+      expect(input.getAttribute('type')).toBe('file');
+      expect(input.getAttribute('accept')).toBe('.prisma');
+      expect(harness.clicks).toBe(1);
+    });
+
+    it.each(['schema.prisma', 'schema.PRISMA'])(
+      'dispatches loadSchemaPrismaAction$ for %s',
+      async name => {
+        importPrisma(harness.app);
+        const [input] = harness.inputs;
+        attachFile(input, name, prisma);
+
+        await change(input);
+
+        expect(harness.dispatch).toHaveBeenCalledTimes(1);
+        expect(typeof harness.dispatch.mock.calls[0][0]).toBe('function');
+        expect(harness.emitted).toHaveLength(0);
+      }
+    );
+
+    it('does nothing when no file is selected', async () => {
+      importPrisma(harness.app);
+
+      await change(harness.inputs[0]);
+
+      expect(harness.dispatch).not.toHaveBeenCalled();
+      expect(harness.emitted).toHaveLength(0);
+    });
+
+    it('emits a toast when the extension is not prisma', async () => {
+      importPrisma(harness.app);
+      const [input] = harness.inputs;
+      attachFile(input, 'schema.sql', prisma);
+
+      await change(input);
+
+      expect(harness.dispatch).not.toHaveBeenCalled();
+      expect(harness.emitted).toHaveLength(1);
+      expect(harness.emitted[0].type).toBe('openToast');
+    });
+
+    it('rejects a name ending in prisma without the dot', async () => {
+      importPrisma(harness.app);
+      const [input] = harness.inputs;
+      attachFile(input, 'schemaprisma', prisma);
+
+      await change(input);
+
+      expect(harness.dispatch).not.toHaveBeenCalled();
+      expect(harness.emitted).toHaveLength(1);
+    });
+
+    it('ignores a non-string FileReader result', async () => {
+      const readers: any[] = [];
+      class FakeFileReader {
+        result: unknown = null;
+        onload: (() => void) | null = null;
+        constructor() {
+          readers.push(this);
+        }
+        readAsText() {
+          this.result = new ArrayBuffer(4);
+          queueMicrotask(() => this.onload?.());
+        }
+      }
+      vi.stubGlobal('FileReader', FakeFileReader);
+
+      importPrisma(harness.app);
+      const [input] = harness.inputs;
+      attachFile(input, 'schema.prisma', prisma);
+
+      await change(input);
+
+      expect(readers).toHaveLength(1);
+      expect(harness.dispatch).not.toHaveBeenCalled();
+      vi.unstubAllGlobals();
     });
   });
 

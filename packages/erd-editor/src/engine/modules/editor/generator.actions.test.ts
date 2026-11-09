@@ -9,7 +9,12 @@ import {
   vi,
 } from 'vite-plus/test';
 
-import { ColumnOption, OrderType, RelationshipType } from '@/constants/schema';
+import {
+  ColumnOption,
+  Database,
+  OrderType,
+  RelationshipType,
+} from '@/constants/schema';
 import { Clock } from '@/engine/clock';
 import {
   dragstartColumnAction,
@@ -35,6 +40,7 @@ import {
   loadSchemaAMLAction$,
   loadSchemaDBMLAction$,
   loadSchemaGraphQLAction$,
+  loadSchemaPrismaAction$,
   loadSchemaSQLAction$,
   moveAllAction$,
   pasteEntitiesAction$,
@@ -71,6 +77,7 @@ import {
   removeRelationshipAction,
 } from '@/engine/modules/relationship/atom.actions';
 import {
+  changeDatabaseAction,
   changeDatabaseNameAction,
   changeZoomLevelAction,
   scrollToAction,
@@ -914,12 +921,71 @@ describe('loadSchemaAMLAction$', () => {
   });
 });
 
+describe('loadSchemaPrismaAction$', () => {
+  const prisma = `datasource db {
+  provider = "postgresql"
+}
+model Post {
+  id   Int   @id
+  tags Tag[]
+}
+model Tag {
+  id    Int    @id
+  posts Post[]
+}`;
+
+  it('imports the schema, its join table and relationships, and sorts the tables', () => {
+    store.dispatchSync(changeDatabaseNameAction({ value: 'keep-me' }));
+
+    store.dispatchSync(loadSchemaPrismaAction$(prisma));
+
+    const tables = store.state.doc.tableIds.map(
+      id => store.state.collections.tableEntities[id].name
+    );
+    expect(tables).toEqual(['Post', 'Tag', '_PostToTag']);
+    expect(store.state.doc.relationshipIds).toHaveLength(2);
+    expect(store.state.settings.databaseName).toBe('keep-me');
+  });
+
+  it("switches the document to the provider's dialect", () => {
+    store.dispatchSync(changeDatabaseAction({ value: Database.MySQL }));
+
+    store.dispatchSync(loadSchemaPrismaAction$(prisma));
+
+    expect(store.state.settings.database).toBe(Database.PostgreSQL);
+  });
+
+  it("keeps the editor's dialect for a file that names no provider", () => {
+    store.dispatchSync(changeDatabaseAction({ value: Database.SQLite }));
+
+    store.dispatchSync(loadSchemaPrismaAction$('model A {\n  id Int @id\n}'));
+
+    expect(store.state.settings.database).toBe(Database.SQLite);
+  });
+
+  it('emits clear, loadJson and sortTable', () => {
+    expect(typesOf(store, loadSchemaPrismaAction$(prisma))).toEqual([
+      'editor.clear',
+      'editor.loadJson',
+      'table.sort',
+    ]);
+  });
+
+  it('loads an empty document for text it cannot read as Prisma', () => {
+    seedTable(store, 't1');
+
+    store.dispatchSync(loadSchemaPrismaAction$('CREATE TABLE users (id INT);'));
+
+    expect(store.state.doc.tableIds).toEqual([]);
+  });
+});
+
 /**
  * An import is a brand-new document, so both view pairs come from the parser at
  * their defaults: the live origin and the frozen legacy pair are left out of the
  * settings an importer carries over, and the rest of them survive the import.
  */
-describe('the four importers open the new document at the origin', () => {
+describe('the importers open the new document at the origin', () => {
   it.each([
     [
       'loadSchemaSQLAction$',
@@ -937,6 +1003,11 @@ describe('the four importers open the new document at the origin', () => {
       'Table users {\n  id int\n}',
     ],
     ['loadSchemaAMLAction$', loadSchemaAMLAction$, 'users\n  id int pk'],
+    [
+      'loadSchemaPrismaAction$',
+      loadSchemaPrismaAction$,
+      'model users {\n  id Int @id\n}',
+    ],
   ])('%s', (_, load, source) => {
     store.dispatchSync(changeDatabaseNameAction({ value: 'keep-me' }));
     store.state.settings.scrollLeft = -300;
@@ -1811,6 +1882,7 @@ describe('actions$', () => {
         'loadSchemaAMLAction$',
         'loadSchemaDBMLAction$',
         'loadSchemaGraphQLAction$',
+        'loadSchemaPrismaAction$',
         'loadSchemaSQLAction$',
         'moveAllAction$',
         'pasteEntitiesAction$',

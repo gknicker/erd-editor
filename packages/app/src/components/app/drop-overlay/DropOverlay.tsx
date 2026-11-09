@@ -14,7 +14,8 @@ const DropOverlay: React.FC<DropOverlayProps> = () => (
           Drop to import
         </Text>
         <Text size="2" color="gray">
-          Backups, .erd, .vuerd and .json documents, SQL, DBML, AML and GraphQL
+          Backups, .erd, .vuerd and .json documents, SQL, DBML, AML, GraphQL and
+          Prisma
         </Text>
       </div>
     </div>

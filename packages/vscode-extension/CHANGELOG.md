@@ -1,5 +1,19 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- Import a Prisma schema: bring in a `schema.prisma` file and get its models, fields, keys,
+  indexes, enums and relations as a diagram, including the join tables behind implicit
+  many-to-many relations. The diagram takes the database of the schema's datasource, so `@db.*`
+  native types keep their meaning.
+- Generate Prisma code: pick Prisma under Generator code to get models named after the tables,
+  `@db.*` native types, enums, relations named after their foreign keys, and the list fields of
+  implicit many-to-many relations.
+- A coding agent can import a Prisma schema through the new `erd_import_prisma` tool of
+  `@dineug/erd-editor-mcp`.
+
 ## [3.0.1] - 2026-09-28
 
 ### Fixed

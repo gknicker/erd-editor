@@ -65,6 +65,10 @@ export const menus: Menu[] = [
     name: 'GraphQL',
     value: Language.GraphQL,
   },
+  {
+    name: 'Prisma',
+    value: Language.Prisma,
+  },
 ];
 
 export function createLanguageMenus({ store }: AppContext) {

@@ -171,6 +171,26 @@ describe('commands over a Bridge', () => {
     });
   });
 
+  it('round-trips a host import file payload for prisma', () => {
+    const bridge = new Bridge();
+    const listener = vi.fn();
+    bridge.registerCommand(hostImportFileCommand, listener);
+
+    bridge.executeAction(
+      Bridge.executeCommand(hostImportFileCommand, {
+        type: 'prisma',
+        op: 'set',
+        accept: '.prisma',
+      })
+    );
+
+    expect(listener).toHaveBeenCalledWith({
+      type: 'prisma',
+      op: 'set',
+      accept: '.prisma',
+    });
+  });
+
   it('round-trips the payload-less host initial command', () => {
     const bridge = new Bridge();
     const listener = vi.fn();
@@ -337,6 +357,26 @@ describe('commands over a Bridge', () => {
       type: 'aml',
       op: 'set',
       value: 'users\n  id int pk',
+    });
+  });
+
+  it('round-trips a webview import file payload for prisma', () => {
+    const bridge = new Bridge();
+    const listener = vi.fn();
+    bridge.registerCommand(webviewImportFileCommand, listener);
+
+    bridge.executeAction(
+      Bridge.executeCommand(webviewImportFileCommand, {
+        type: 'prisma',
+        op: 'set',
+        value: 'model User {\n  id Int @id\n}',
+      })
+    );
+
+    expect(listener).toHaveBeenCalledWith({
+      type: 'prisma',
+      op: 'set',
+      value: 'model User {\n  id Int @id\n}',
     });
   });
 });

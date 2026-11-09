@@ -30,7 +30,7 @@
 - **A command's `type` string is its identity and equals its export name** (`commands.test.ts` asserts it). Listeners are keyed by that string, not by token, so two commands sharing a string receive each other's payloads.
 - **Payloads must survive `JSON.stringify` / `JSON.parse`** — IntelliJ carries every action as a string. Binary is base64-encoded by the caller (`webview-client`), never here.
 - `executeAction` checks only that the value is a plain object with a string `type`; payload shape is never validated.
-- The import `type` union (`json | sql | graphql | dbml | aml`) is written twice, in `hostImportFileCommand` and `webviewImportFileCommand` — widen both. The build then fails until `webview-client`'s import `switch` and `vscode-extension`'s `IMPORT_FILE_TYPES` gain a case, which is intended.
+- The import `type` union (`json | sql | graphql | dbml | aml | prisma`) is written twice, in `hostImportFileCommand` and `webviewImportFileCommand` — widen both. The build then fails until `webview-client`'s import `switch` and `vscode-extension`'s `IMPORT_FILE_TYPES` gain a case, which is intended.
 
 ### Testing Requirements
 

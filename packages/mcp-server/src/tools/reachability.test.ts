@@ -87,6 +87,7 @@ describe('every change type is reachable or excluded with a reason', () => {
         'erd_import_dbml',
         'erd_import_graphql',
         'erd_import_json',
+        'erd_import_prisma',
         'erd_import_sql',
       ].sort()
     );

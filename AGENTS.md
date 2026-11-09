@@ -31,7 +31,7 @@
 | Directory | Purpose |
 | --- | --- |
 | `packages/` | The 17 workspace packages, each with its own `AGENTS.md` |
-| `data/` | Import fixtures for hand-testing (SQL, GraphQL SDL, DBML, AML v1/v2, `test.json`); `schema-sql-parser`'s tests read `sakila.sql` |
+| `data/` | Import fixtures for hand-testing (SQL, GraphQL SDL, DBML, AML v1/v2, Prisma, `test.json`); `schema-sql-parser`'s tests read `sakila.sql` |
 | `docker/` | A `docker-compose.yml` per SQL vendor for running generated DDL; Databricks and Snowflake are cloud-only and have none |
 | `functions/` | Cloudflare Pages Functions for erd-editor.io: `api/auth/[[route]].ts` only re-exports `packages/app/src/server/auth/pages.ts` (see `packages/app/AGENTS.md`) |
 | `json-schema/` | `schema.json` for `.erd` / `.vuerd` documents (see Contracts) |

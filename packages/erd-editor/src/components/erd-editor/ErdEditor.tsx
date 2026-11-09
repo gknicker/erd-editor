@@ -92,6 +92,7 @@ export interface ErdEditorElement extends ErdEditorProps, HTMLElement {
   setSchemaGraphQL: (value: string) => void;
   setSchemaDBML: (value: string) => void;
   setSchemaAML: (value: string) => void;
+  setSchemaPrisma: (value: string) => void;
   getSchemaSQL: (databaseVendor?: DatabaseVendor) => string;
   getSharedStore: (
     config?: SharedStoreConfig & {

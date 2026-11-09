@@ -11,6 +11,7 @@ export type Lang =
   | 'graphql'
   | 'java'
   | 'kotlin'
+  | 'prisma'
   | 'python'
   | 'scala'
   | 'sql'
@@ -31,4 +32,5 @@ export const LanguageToLangMap: Record<number, Lang> = {
   [Language.Drizzle]: 'typescript',
   [Language.DBML]: 'sql',
   [Language.AML]: 'sql',
+  [Language.Prisma]: 'prisma',
 };

@@ -53,11 +53,11 @@ editor's own history.
   recognize, so an awkward dump imports partially rather than failing outright
 - **GraphQL SDL import** — object types become tables, scalars map to the diagram's own dialect,
   and the fields pointing at another type become the relationships
-- **DBML and AML import** — `.dbml` files written for dbdiagram.io or dbdocs.io, and `.aml` files
-  written for [Azimutt](https://azimutt.app)
+- **DBML, AML and Prisma import** — `.dbml` files written for dbdiagram.io or dbdocs.io, `.aml`
+  files written for [Azimutt](https://azimutt.app), and `schema.prisma` files
 - **SQL DDL export** — Databricks, MariaDB, MSSQL, MySQL, Oracle, PostgreSQL, Snowflake, SQLite
 - **Code generation** — TypeScript, GraphQL, C#, Java, JPA, Kotlin, Scala, Go,
-  SQLAlchemy, TypeORM, Sequelize, Drizzle, DBML, AML
+  SQLAlchemy, TypeORM, Sequelize, Drizzle, DBML, AML, Prisma
 - **Visualization** — a force-directed view of how the tables actually relate
 - **Export** — JSON, SQL and PNG, written into the vault where your attachments go
 - **Quick search** — `Ctrl`/`Cmd`+`K` to jump to any table, or run any editor command

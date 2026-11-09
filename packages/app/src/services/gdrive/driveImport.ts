@@ -25,7 +25,7 @@ export type DriveImportDeps = {
   drive: Pick<DriveClient, 'createFile'>;
   /** The folder the uploads go in, asked for only once there is one to make. */
   folderId: () => Promise<string>;
-  /** SQL, DBML, AML or GraphQL to a document; the default loads the editor on demand. */
+  /** SQL, DBML, AML, GraphQL or Prisma to a document; the default loads the editor on demand. */
   convert?: (source: SourceImport) => Promise<string>;
   now?: () => number;
 };

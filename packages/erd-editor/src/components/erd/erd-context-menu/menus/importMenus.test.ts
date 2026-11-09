@@ -37,10 +37,12 @@ describe('importMenus', () => {
       'GraphQL',
       'DBML',
       'AML',
+      'Prisma',
     ]);
     expect(result.map(menu => menu.icon)).toEqual([
       'braces',
       'database',
+      'code',
       'code',
       'code',
       'code',
@@ -91,6 +93,17 @@ describe('importMenus', () => {
     createImportMenus(app, onClose)[4].onClick();
 
     expect(requests).toEqual([{ type: 'aml', op: 'set', accept: '.aml' }]);
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('requests a prisma import and closes the menu', () => {
+    const onClose = vi.fn();
+
+    createImportMenus(app, onClose)[5].onClick();
+
+    expect(requests).toEqual([
+      { type: 'prisma', op: 'set', accept: '.prisma' },
+    ]);
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 

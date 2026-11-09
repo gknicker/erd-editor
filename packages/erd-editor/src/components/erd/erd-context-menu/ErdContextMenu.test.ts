@@ -322,6 +322,7 @@ describe('ErdContextMenu / ERD type', () => {
       'GraphQL',
       'DBML',
       'AML',
+      'Prisma',
     ]);
 
     await click(items[0]);

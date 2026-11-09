@@ -380,6 +380,13 @@ describe('ErdEditor', () => {
         accept: '.aml',
       });
 
+    const importPrisma = () =>
+      Bridge.executeCommand(hostImportFileCommand, {
+        type: 'prisma',
+        op: 'set',
+        accept: '.prisma',
+      });
+
     it('filters the dialog by the extensions of the requested type', async () => {
       const { webview } = await bootstrap();
       window.showOpenDialog.mockResolvedValue([
@@ -502,6 +509,54 @@ describe('ErdEditor', () => {
 
       expect(window.showInformationMessage).toHaveBeenCalledWith(
         'Just import the aml file'
+      );
+      expect(webview.postMessage).not.toHaveBeenCalled();
+    });
+
+    it('offers the prisma extension in its own filter', async () => {
+      const { webview } = await bootstrap();
+      window.showOpenDialog.mockResolvedValue(undefined);
+
+      webview.__receive(importPrisma());
+      await flush();
+
+      expect(window.showOpenDialog).toHaveBeenCalledWith({
+        filters: { Prisma: ['prisma'] },
+      });
+    });
+
+    it('forwards a prisma file', async () => {
+      const { webview } = await bootstrap();
+      const uri = Uri.file('/workspace/schema.prisma');
+      window.showOpenDialog.mockResolvedValue([uri]);
+      workspace.fs.readFile.mockResolvedValue(
+        encoder.encode('model User {\n  id Int @id\n}')
+      );
+
+      webview.__receive(importPrisma());
+      await flush();
+
+      expect(webview.postMessage).toHaveBeenCalledWith({
+        type: 'webviewImportFileCommand',
+        payload: {
+          type: 'prisma',
+          op: 'set',
+          value: 'model User {\n  id Int @id\n}',
+        },
+      });
+    });
+
+    it('refuses a file that is not prisma', async () => {
+      const { webview } = await bootstrap();
+      window.showOpenDialog.mockResolvedValue([
+        Uri.file('/workspace/schema.sql'),
+      ]);
+
+      webview.__receive(importPrisma());
+      await flush();
+
+      expect(window.showInformationMessage).toHaveBeenCalledWith(
+        'Just import the prisma file'
       );
       expect(webview.postMessage).not.toHaveBeenCalled();
     });

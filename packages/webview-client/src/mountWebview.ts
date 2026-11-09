@@ -114,6 +114,9 @@ export function mountWebview(host: WebviewHost): WebviewClient {
         case 'aml':
           op === 'set' && editor.setSchemaAML(value);
           break;
+        case 'prisma':
+          op === 'set' && editor.setSchemaPrisma(value);
+          break;
         default: {
           // The host has already read the file by the time we get here, so an
           // unhandled type is a silent loss. type is never in this arm, so

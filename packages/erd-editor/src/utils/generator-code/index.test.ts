@@ -34,7 +34,8 @@ function createFixture(): { state: RootState; table: Table } {
   return { state, table };
 }
 
-const expectedByLanguage: Array<[string, number, string[]]> = [
+/** Name, language, the document's code, and the table's where that differs. */
+const expectedByLanguage: Array<[string, number, string[], string[]?]> = [
   [
     'GraphQL',
     Language.GraphQL,
@@ -180,6 +181,33 @@ const expectedByLanguage: Array<[string, number, string[]]> = [
     ['', 'Table "user" {', '  "created_at" INT [not null]', '}', ''],
   ],
   ['AML', Language.AML, ['', 'user', '  created_at INT', '']],
+  [
+    'Prisma',
+    Language.Prisma,
+    [
+      '',
+      'datasource db {',
+      '  provider = "mysql"',
+      '}',
+      '',
+      'model User {',
+      '  createdAt Int @map("created_at")',
+      '',
+      '  @@map("user")',
+      '}',
+      '',
+    ],
+    // The datasource belongs to the document, not to one of its models.
+    [
+      '',
+      'model User {',
+      '  createdAt Int @map("created_at")',
+      '',
+      '  @@map("user")',
+      '}',
+      '',
+    ],
+  ],
 ];
 
 describe('generator-code/index', () => {
@@ -205,12 +233,12 @@ describe('generator-code/index', () => {
   describe('createGeneratorCodeTable', () => {
     it.each(expectedByLanguage)(
       'generates %s for a single table',
-      (_name, language, expected) => {
+      (_name, language, expected, tableExpected) => {
         const { state, table } = createFixture();
         state.settings.language = language;
 
         expect(createGeneratorCodeTable(state, table).split('\n')).toEqual(
-          expected
+          tableExpected ?? expected
         );
       }
     );

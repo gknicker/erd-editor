@@ -61,6 +61,7 @@ function fakeEditor() {
     setSchemaGraphQL: vi.fn(),
     setSchemaDBML: vi.fn(),
     setSchemaAML: vi.fn(),
+    setSchemaPrisma: vi.fn(),
     setPresetTheme: vi.fn(),
     getSharedStore: () => sharedStore,
   });
@@ -198,6 +199,7 @@ describe('mountWebview', () => {
     send('graphql', 'set', 'type T { id: ID }');
     send('dbml', 'set', 'Table t {}');
     send('aml', 'set', 't\n  id uuid pk');
+    send('prisma', 'set', 'model T {\n  id Int @id\n}');
 
     expect(editor.element.value).toBe('{"a":1}');
     expect(editor.element.setDiffValue).toHaveBeenCalledWith('{"b":2}');
@@ -209,6 +211,9 @@ describe('mountWebview', () => {
     );
     expect(editor.element.setSchemaDBML).toHaveBeenCalledWith('Table t {}');
     expect(editor.element.setSchemaAML).toHaveBeenCalledWith('t\n  id uuid pk');
+    expect(editor.element.setSchemaPrisma).toHaveBeenCalledWith(
+      'model T {\n  id Int @id\n}'
+    );
   });
 
   it('resolves an auto appearance through the host and refreshes only while it stays auto', () => {

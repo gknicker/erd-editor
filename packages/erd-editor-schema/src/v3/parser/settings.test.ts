@@ -284,6 +284,12 @@ describe('createAndMergeSettings', () => {
       );
     });
 
+    it('keeps the Prisma language', () => {
+      expect(
+        createAndMergeSettings({ language: Language.Prisma }).language
+      ).toBe(Language.Prisma);
+    });
+
     it('ignores numbers outside the enum lists', () => {
       const settings = createAndMergeSettings({
         database: 999,

@@ -14,7 +14,7 @@ const fixture = readToolSurfaceFixture();
 
 /**
  * The tools that advertise no result schema: the read tools answer plain
- * text, added by hand. The 60 toolkit tools declare theirs; the recording has none.
+ * text, added by hand. The 61 toolkit tools declare theirs; the recording has none.
  */
 const PLAIN_TEXT_TOOLS: ReadonlySet<string> = new Set([
   'erd_read',
@@ -26,6 +26,7 @@ const PLAIN_TEXT_TOOLS: ReadonlySet<string> = new Set([
 const ADDED_TOOLS: readonly string[] = [
   'erd_batch',
   'erd_get',
+  'erd_import_prisma',
   'erd_list',
   'erd_move_tables',
 ];
@@ -55,21 +56,33 @@ const ADDED_ARGS: Readonly<Record<string, readonly string[]>> = {
   erd_read: ['tableIds', 'tableNames'],
 };
 
-/** The recorded tools as the server lists them, the arguments added since left out. */
+/** The values an enum argument of a recorded tool gained after the recording. */
+const ADDED_ENUM_VALUES: Readonly<
+  Record<string, Readonly<Record<string, readonly string[]>>>
+> = {
+  erd_set_language: { value: ['Prisma'] },
+};
+
+/** The recorded tools as the server lists them, what was added since left out. */
 const recorded = () =>
   live
     .filter(({ name }) => !ADDED_TOOLS.includes(name))
     .map(tool => ({
       ...tool,
-      args: tool.args.filter(
-        ({ name }) => !ADDED_ARGS[tool.name]?.includes(name)
-      ),
+      args: tool.args
+        .filter(({ name }) => !ADDED_ARGS[tool.name]?.includes(name))
+        .map(arg => {
+          const added = ADDED_ENUM_VALUES[tool.name]?.[arg.name];
+          return added && arg.enum
+            ? { ...arg, enum: arg.enum.filter(value => !added.includes(value)) }
+            : arg;
+        }),
     }));
 
 describe('the tool surface against the SDK-based server recording', () => {
-  it('holds the 59 recorded tools and the 4 added since', () => {
+  it('holds the 59 recorded tools and the 5 added since', () => {
     expect(fixture).toHaveLength(59);
-    expect(tools).toHaveLength(63);
+    expect(tools).toHaveLength(64);
     expect(fixture.filter(({ name }) => ADDED_TOOLS.includes(name))).toEqual(
       []
     );
@@ -93,6 +106,17 @@ describe('the tool surface against the SDK-based server recording', () => {
     }
   });
 
+  it('lists every enum value added since the recording', () => {
+    for (const [name, args] of Object.entries(ADDED_ENUM_VALUES)) {
+      for (const [arg, added] of Object.entries(args)) {
+        const listedEnum = live
+          .find(tool => tool.name === name)!
+          .args.find(entry => entry.name === arg)!.enum;
+        expect(listedEnum).toEqual(expect.arrayContaining([...added]));
+      }
+    }
+  });
+
   it('advertises a result schema for every tool but the read tools, where the recording has none', () => {
     expect(outputSchemas(fixture).every(tool => !tool.hasOutputSchema)).toBe(
       true
@@ -103,7 +127,7 @@ describe('the tool surface against the SDK-based server recording', () => {
         hasOutputSchema: !PLAIN_TEXT_TOOLS.has(name),
       }))
     );
-    expect(live.filter(tool => tool.hasOutputSchema)).toHaveLength(60);
+    expect(live.filter(tool => tool.hasOutputSchema)).toHaveLength(61);
   });
 
   it('takes an object for its arguments, in every tool', () => {

@@ -20,6 +20,7 @@ import {
   loadSchemaAMLAction$,
   loadSchemaDBMLAction$,
   loadSchemaGraphQLAction$,
+  loadSchemaPrismaAction$,
   loadSchemaSQLAction$,
 } from '@/engine/modules/editor/generator.actions';
 import { FocusType } from '@/engine/modules/editor/state';
@@ -525,6 +526,12 @@ export const SEED_SCENARIOS: Readonly<Record<string, () => PeerScenario>> = {
   importAml: () =>
     edit('importAml', [
       loadSchemaAMLAction$('accounts\n  id int pk\n  email varchar'),
+    ]),
+  importPrisma: () =>
+    edit('importPrisma', [
+      loadSchemaPrismaAction$(
+        'datasource db {\n  provider = "postgresql"\n}\nmodel accounts {\n  id    Int     @id\n  email String?\n}'
+      ),
     ]),
   importJson: () => edit('importJson', [loadJsonAction$(createImportValue())]),
 };

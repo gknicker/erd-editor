@@ -134,6 +134,7 @@ describe('GeneratorCodeContextMenu', () => {
       'AML',
       'DBML',
       'GraphQL',
+      'Prisma',
     ]);
     expect(checkedNameOf(submenu)).toEqual(['GraphQL']);
   });

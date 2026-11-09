@@ -7,12 +7,13 @@ import {
   loadSchemaAMLAction$,
   loadSchemaDBMLAction$,
   loadSchemaGraphQLAction$,
+  loadSchemaPrismaAction$,
   loadSchemaSQLAction$,
 } from '@/engine/modules/editor/generator.actions';
 import { openDiffViewerAction, openToastAction } from '@/utils/emitter';
 
 type ImportOptions = {
-  type: 'json' | 'sql' | 'graphql' | 'dbml' | 'aml';
+  type: 'json' | 'sql' | 'graphql' | 'dbml' | 'aml' | 'prisma';
   op: 'set' | 'diff';
   accept: string;
 };
@@ -25,6 +26,7 @@ const GRAPHQL_EXTENSION = /\.(graphql|gql|graphqls)$/i;
 const GRAPHQL_ACCEPT = '.graphql,.gql,.graphqls';
 const DBML_EXTENSION = /\.dbml$/i;
 const AML_EXTENSION = /\.aml$/i;
+const PRISMA_EXTENSION = /\.prisma$/i;
 
 let performImportFileExtra: ImportFileCallback | null = null;
 
@@ -223,6 +225,46 @@ export function importAML({ store, emitter }: AppContext) {
       }
 
       store.dispatch(loadSchemaAMLAction$(value));
+    };
+  });
+  input.click();
+}
+
+export function importPrisma({ store, emitter }: AppContext) {
+  if (performImportFileExtra) {
+    performImportFileExtra({
+      type: 'prisma',
+      op: 'set',
+      accept: '.prisma',
+    });
+    return;
+  }
+
+  const input = document.createElement('input');
+  input.setAttribute('type', 'file');
+  input.setAttribute('accept', '.prisma');
+  input.addEventListener('change', () => {
+    const file = input.files?.[0];
+    if (!file) return;
+
+    if (!PRISMA_EXTENSION.test(file.name)) {
+      emitter.emit(
+        openToastAction({
+          message: <Toast description="Just import the prisma file" />,
+        })
+      );
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.readAsText(file);
+    reader.onload = () => {
+      const value = reader.result;
+      if (!isString(value)) {
+        return;
+      }
+
+      store.dispatch(loadSchemaPrismaAction$(value));
     };
   });
   input.click();

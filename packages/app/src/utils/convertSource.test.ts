@@ -13,6 +13,7 @@ function stubEditor(fail?: string) {
     setSchemaDBML: vi.fn(),
     setSchemaAML: vi.fn(),
     setSchemaGraphQL: vi.fn(),
+    setSchemaPrisma: vi.fn(),
   };
   if (fail) {
     Reflect.set(editor, fail, () => {
@@ -33,6 +34,7 @@ describe('convertSource', () => {
     ['dbml', 'setSchemaDBML'],
     ['aml', 'setSchemaAML'],
     ['graphql', 'setSchemaGraphQL'],
+    ['prisma', 'setSchemaPrisma'],
   ] as const)('parses %s with %s and gives the value back', (type, method) => {
     const editor = stubEditor();
 

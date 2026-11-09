@@ -6,8 +6,8 @@
     "dist (reachable from exports)": {
       "bytes": 1142812,
       "gzip": 276422,
-      "budgetGzip": 328242,
-      "budgetNote": "315,962 B measured after ./agent.js left the exports and ./peer.js took its place (feat/ai, 2026-09-23): dist/peer/index.js carries createPeerStore and the catalog barrels, while the tool registry, validation, read and snapshot left for mcp-server (-8,643 B against the 324,605 B measured with ./agent.js and ./peer.js both in the exports, -7,443 B against a25b835f). Same 12,280 B margin."
+      "budgetGzip": 344043,
+      "budgetNote": "331,763 B measured with the Prisma importer and generator (2026-11-07): the converter ships in the store-hooks chunk and again in the export-png worker, whose store imports every module's actions$, and the generator adds Shiki's prisma grammar to the shiki worker (329,148 B before the generator, 323,147 B while only the element imported the converter). Same 12,280 B margin."
     }
   }
 }

@@ -139,5 +139,9 @@ export const TOOL_SCENARIOS: Readonly<Record<string, Record<string, unknown>>> =
       value: 'Table accounts {\n  id int [pk]\n  email varchar\n}',
     },
     erd_import_aml: { value: 'accounts\n  id int pk\n  email varchar' },
+    erd_import_prisma: {
+      value:
+        'datasource db {\n  provider = "postgresql"\n}\nmodel accounts {\n  id    Int     @id\n  email String?\n}',
+    },
     erd_import_json: { value: createImportValue() },
   };

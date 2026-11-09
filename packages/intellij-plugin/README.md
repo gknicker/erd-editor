@@ -41,9 +41,12 @@ opens its own file chooser for both; the file does not have to be inside the pro
 - **AML import** — bring in an `.aml` file written for [Azimutt](https://azimutt.app), in either the
   v2 or the legacy v1 spelling. Entities, attributes, indexes, enums and every relation arrow
   arrive; a check, a struct type and a view are skipped rather than refused
+- **Prisma import** — bring in a `schema.prisma` file. Models and views, fields, keys, indexes, enums
+  and relations arrive, with the tables Prisma creates for implicit many-to-many relations; the
+  diagram takes the datasource's database, so its `@db.*` native types keep their meaning
 - **SQL DDL export** — MariaDB, MSSQL, MySQL, Oracle, PostgreSQL, SQLite
 - **Code generation** — TypeScript, GraphQL, C#, Java, JPA, Kotlin, Scala, Go, SQLAlchemy,
-  TypeORM, Sequelize, Drizzle, DBML, AML
+  TypeORM, Sequelize, Drizzle, DBML, AML, Prisma
 - **Visualization** — a force-directed view of how the tables actually relate
 - **Export** — `.erd.json`, `.sql`, `.png`
 - **Quick search** to jump to any table, **time travel** through this session's edit history, and

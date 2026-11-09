@@ -3,7 +3,7 @@ import '@dineug/erd-editor';
 import type { SourceImport } from '@/utils/importFile';
 
 /**
- * The document a SQL, DBML, AML or GraphQL source parses to. The app has no
+ * The document a SQL, DBML, AML, GraphQL or Prisma source parses to. The app has no
  * parser of its own, so an editor that is never attached parses it: its store
  * lays the tables out as it goes, and nothing of it renders or outlives this.
  */
@@ -23,6 +23,9 @@ export function convertSource({ type, value }: SourceImport): string {
         break;
       case 'graphql':
         editor.setSchemaGraphQL(value);
+        break;
+      case 'prisma':
+        editor.setSchemaPrisma(value);
         break;
     }
 

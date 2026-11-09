@@ -1,4 +1,4 @@
-import type { RootState } from '@dineug/erd-editor/peer.js';
+import { Database, type RootState } from '@dineug/erd-editor/peer.js';
 import { afterEach, describe, expect, it } from 'vite-plus/test';
 
 import { comparable, settle } from '@/__test-utils__/mcp';
@@ -35,6 +35,7 @@ const SCHEMA_IMPORTS: Array<[string, string]> = [
   ['erd_import_graphql', 'Account'],
   ['erd_import_dbml', 'accounts'],
   ['erd_import_aml', 'accounts'],
+  ['erd_import_prisma', 'accounts'],
 ];
 
 function refusal(call: () => unknown): ToolError {
@@ -109,6 +110,29 @@ describe('an import replaces the document on both sides (AC-E13)', () => {
 
     expect(session.agent.state.settings.databaseName).toBe('imported');
     expect(session.other.state.settings.databaseName).toBe('imported');
+  });
+
+  it("takes the Prisma datasource's database on both sides, and one undo gives the seed's back", async () => {
+    const session = open();
+    await quiet();
+    const { agent, other } = session;
+    const seeded = agent.state.settings.database;
+    // The scenario's datasource names PostgreSQL, so the seed must be another.
+    expect(seeded).not.toBe(Database.PostgreSQL);
+
+    runTool(agent, 'erd_import_prisma', TOOL_SCENARIOS.erd_import_prisma);
+    await quiet();
+
+    expect(agent.state.settings.database).toBe(Database.PostgreSQL);
+    expect(other.state.settings.database).toBe(Database.PostgreSQL);
+
+    agent.undo();
+    await quiet();
+
+    expect(agent.state.settings.database).toBe(seeded);
+    expect(other.state.settings.database).toBe(seeded);
+    expect(tableNames(other.state)).toEqual(['users', 'orders', 'empty']);
+    expect(comparable(other.value)).toEqual(comparable(agent.value));
   });
 
   it('brings the seed back on both sides with one undo', async () => {

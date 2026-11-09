@@ -18,11 +18,11 @@ the [IntelliJ plugin](https://plugins.jetbrains.com/plugin/23594-erd-editor) and
 
 - Visual schema design — tables, columns, memos, and four relationship cardinalities
   (zero-one, zero-N, one-only, one-N)
-- Import — a `.sql` dump, a GraphQL SDL schema from any tool that emits one, a `.dbml` file, or
-  an `.aml` file
+- Import — a `.sql` dump, a GraphQL SDL schema from any tool that emits one, a `.dbml` file, an
+  `.aml` file, or a `schema.prisma` file
 - SQL DDL export — Databricks, MariaDB, MSSQL, MySQL, Oracle, PostgreSQL, Snowflake and SQLite
 - Code generation — TypeScript, GraphQL, C#, Java, JPA, Kotlin, Scala, Go,
-  SQLAlchemy, TypeORM, Sequelize, Drizzle, DBML, AML
+  SQLAlchemy, TypeORM, Sequelize, Drizzle, DBML, AML, Prisma
 - Export — `.erd.json`, `.sql`, `.png`
 - Force-directed visualization of table relationships
 - Quick search, undo / redo, remappable keyboard shortcuts, and a built-in theme builder
@@ -126,7 +126,7 @@ erd-editor {
 
 | Attribute | Property | Description |
 | --- | --- | --- |
-| `readonly` | `readonly` | Blocks editing and suppresses the `change` event. Assigning `value`, `setSchemaSQL()`, `setSchemaGraphQL()`, `setSchemaDBML()`, `setSchemaAML()` and `clear()` are ignored while it is set — load with `setInitialValue()` instead. Viewport actions and the SQL/code output settings still apply. |
+| `readonly` | `readonly` | Blocks editing and suppresses the `change` event. Assigning `value`, `setSchemaSQL()`, `setSchemaGraphQL()`, `setSchemaDBML()`, `setSchemaAML()`, `setSchemaPrisma()` and `clear()` are ignored while it is set — load with `setInitialValue()` instead. Viewport actions and the SQL/code output settings still apply. |
 | `system-dark-mode` | `systemDarkMode` | Follows the OS color scheme |
 | `enable-theme-builder` | `enableThemeBuilder` | Shows the built-in theme builder |
 
@@ -146,6 +146,7 @@ erd-editor {
 | `setSchemaGraphQL(value: string)` | Parse a GraphQL SDL string and **replace** the current document with it. Object types become tables, scalars map to the document's own dialect, and relationships are read from the fields that point at another type. Lands in the undo history; an empty string is ignored. |
 | `setSchemaDBML(value: string)` | Parse a DBML string and **replace** the current document with it. Tables, columns, indexes and every `Ref` spelling are read; a `Project`, `TableGroup` or sticky `Note` is skipped, and text it cannot read loads an empty document rather than being refused. Lands in the undo history; an empty string is ignored. |
 | `setSchemaAML(value: string)` | Parse an [AML](https://azimutt.app) string and **replace** the current document with it. Entities, attributes, indexes and every relation arrow are read, in the v2 and the legacy v1 spelling; a check, a struct type and a view are skipped, and text it cannot read loads an empty document rather than being refused. Lands in the undo history; an empty string is ignored. |
+| `setSchemaPrisma(value: string)` | Parse a [Prisma schema](https://www.prisma.io/docs/orm/prisma-schema) string and **replace** the current document with it. Models and views become tables under their `@@map` names; fields, native types, keys, indexes, enums and relations are read, and the tables Prisma creates for implicit many-to-many relations are added. A datasource's provider sets the document's database, since its `@db.*` types mean nothing elsewhere; without one the document's own is kept. Generators and MongoDB composite types are skipped, and text it cannot read loads an empty document rather than being refused. Lands in the undo history; an empty string is ignored. |
 | `setDiffValue(value: string)` | Open the diff viewer against another document. |
 | `setPresetTheme(options)` | Set `appearance`, `grayColor` and `accentColor`. |
 | `setTheme(theme)` | Override individual theme tokens. |
@@ -225,6 +226,8 @@ setImportFileCallback(async ({ type, op, accept }) => {
     editor.setSchemaDBML(text);
   } else if (type === 'aml') {
     editor.setSchemaAML(text);
+  } else if (type === 'prisma') {
+    editor.setSchemaPrisma(text);
   }
 });
 ```

@@ -3,7 +3,7 @@ import { isPlainObject } from 'es-toolkit';
 import type { NewSchemaEntity } from '@/services/indexeddb/modules/schema';
 import { isBackup, parseBackup } from '@/utils/backup';
 
-export type SourceType = 'sql' | 'dbml' | 'aml' | 'graphql';
+export type SourceType = 'sql' | 'dbml' | 'aml' | 'graphql' | 'prisma';
 
 /** A text only the editor can parse, into the document the schema is stored as. */
 export type SourceImport = {
@@ -39,6 +39,7 @@ const SOURCE_TYPES = new Map<string, SourceType>([
   ['graphql', 'graphql'],
   ['gql', 'graphql'],
   ['graphqls', 'graphql'],
+  ['prisma', 'prisma'],
 ]);
 
 export const IMPORT_ACCEPT = [
@@ -81,7 +82,7 @@ export function isEditorDocument(json: unknown): boolean {
 }
 
 /**
- * What a file holds: a SQL, DBML, AML or GraphQL source by its extension, and
+ * What a file holds: a SQL, DBML, AML, GraphQL or Prisma source by its extension, and
  * anything else by its content, a backup whatever its name, else an editor
  * document. Backup times later than now are taken as now.
  */

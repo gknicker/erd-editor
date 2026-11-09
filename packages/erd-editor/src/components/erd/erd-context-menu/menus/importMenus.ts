@@ -5,6 +5,7 @@ import {
   importDBML,
   importGraphQL,
   importJSON,
+  importPrisma,
   importSchemaSQL,
 } from '@/utils/file/importFile';
 
@@ -56,6 +57,14 @@ export function createImportMenus(
       name: 'AML',
       onClick: () => {
         importAML(app);
+        onClose();
+      },
+    },
+    {
+      icon: 'code',
+      name: 'Prisma',
+      onClick: () => {
+        importPrisma(app);
         onClose();
       },
     },

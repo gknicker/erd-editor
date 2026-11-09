@@ -46,6 +46,7 @@ import type { GeometrySource } from '@/utils/draw-relationship/geometrySource';
 import { schemaAMLParserToSchemaJson } from '@/utils/schema-aml-parser';
 import { schemaDBMLParserToSchemaJson } from '@/utils/schema-dbml-parser';
 import { schemaGraphQLParserToSchemaJson } from '@/utils/schema-graphql-parser';
+import { schemaPrismaParserToSchemaJson } from '@/utils/schema-prisma-parser';
 import { schemaSQLParserToSchemaJson } from '@/utils/schema-sql-parser';
 import {
   ClipboardMemo,
@@ -622,6 +623,28 @@ export const loadSchemaAMLAction$ = (value: string): GeneratorAction =>
     yield sortTableAction();
   };
 
+export const loadSchemaPrismaAction$ = (value: string): GeneratorAction =>
+  function* ({ settings }, ctx) {
+    yield loadJsonAction$(
+      schemaPrismaParserToSchemaJson(value, ctx, schema => {
+        schema.settings = {
+          ...schema.settings,
+          ...omit(cloneDeep(settings), [
+            'width',
+            'height',
+            'originX',
+            'originY',
+            'scrollTop',
+            'scrollLeft',
+            'zoomLevel',
+          ]),
+        };
+        return schema;
+      })
+    );
+    yield sortTableAction();
+  };
+
 export const dragstartColumnAction$ = ($mod: boolean): GeneratorAction =>
   function* ({ editor: { focusTable } }) {
     if (!focusTable || !focusTable.columnId) return;
@@ -819,6 +842,7 @@ export const actions$ = {
   loadSchemaGraphQLAction$,
   loadSchemaDBMLAction$,
   loadSchemaAMLAction$,
+  loadSchemaPrismaAction$,
   dragstartColumnAction$,
   dragoverColumnAction$,
   columnKeyHoverStartAction$,

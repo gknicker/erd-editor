@@ -25,7 +25,8 @@ const toSafeString = (value: any): string =>
  */
 const schemaTool = (
   name: string,
-  load$: (value: string) => GeneratorAction
+  load$: (value: string) => GeneratorAction,
+  snapshotPaths: readonly string[] = DOCUMENT_PATHS
 ): ActionTool => ({
   name,
   kind: 'generator',
@@ -34,7 +35,7 @@ const schemaTool = (
   stream: false,
   expectedBatches: 1,
   expectedHistory: 1,
-  snapshotPaths: DOCUMENT_PATHS,
+  snapshotPaths,
   args: VALUE,
   refine: ({ value }) =>
     isEmpty(toSafeString(value))
@@ -66,6 +67,12 @@ export const importTools: readonly ActionTool[] = [
   schemaTool('erd_import_graphql', editorActions$.loadSchemaGraphQLAction$),
   schemaTool('erd_import_dbml', editorActions$.loadSchemaDBMLAction$),
   schemaTool('erd_import_aml', editorActions$.loadSchemaAMLAction$),
+  // A datasource names the database the schema is written for, which the
+  // import makes the document's, so that setting changes with the tables.
+  schemaTool('erd_import_prisma', editorActions$.loadSchemaPrismaAction$, [
+    'settings.database',
+    ...DOCUMENT_PATHS,
+  ]),
   {
     name: 'erd_import_json',
     kind: 'generator',

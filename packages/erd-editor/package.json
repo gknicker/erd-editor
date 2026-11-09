@@ -91,6 +91,7 @@
     "@dineug/schema-sql-parser": "workspace:*",
     "@dineug/vite-plugin-r-html": "workspace:*",
     "@playwright/test": "^1.62.1",
+    "@prisma/prisma-schema-wasm": "8.1.0-2.59be4fda12412a79eeb9c2ae727b6aa723593323",
     "@storybook/addon-docs": "^10.5.8",
     "@storybook/addon-links": "^10.5.8",
     "@storybook/html-vite": "^10.5.8",

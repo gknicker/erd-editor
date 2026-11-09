@@ -364,6 +364,10 @@ export const TOOL_COPY: Readonly<Record<string, ToolCopy>> = {
   erd_import_graphql: importer('a GraphQL SDL'),
   erd_import_dbml: importer('DBML'),
   erd_import_aml: importer('AML'),
+  erd_import_prisma: {
+    description: `${importer('a Prisma schema').description} A datasource provider also sets the document's database.`,
+    args: { value: 'The schema.prisma source text.' },
+  },
   erd_import_json: {
     description:
       'Replaces the whole document with an erd-editor JSON document, such as another .erd.json file. erd_undo restores the previous one.',

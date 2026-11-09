@@ -38,6 +38,7 @@ const IMPORT_FILE_TYPES: Record<
   graphql: { label: 'GraphQL', extensions: ['graphql', 'gql', 'graphqls'] },
   dbml: { label: 'DBML', extensions: ['dbml'] },
   aml: { label: 'AML', extensions: ['aml'] },
+  prisma: { label: 'Prisma', extensions: ['prisma'] },
 };
 
 const THEME_KEYS = [

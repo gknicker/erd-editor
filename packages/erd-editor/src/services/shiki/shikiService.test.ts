@@ -9,6 +9,7 @@ const LANGS: Lang[] = [
   'graphql',
   'java',
   'kotlin',
+  'prisma',
   'python',
   'scala',
   'sql',

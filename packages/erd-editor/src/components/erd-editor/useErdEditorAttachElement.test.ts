@@ -28,6 +28,7 @@ import {
   ErdEditorProps,
 } from '@/components/erd-editor/ErdEditor';
 import { useErdEditorAttachElement } from '@/components/erd-editor/useErdEditorAttachElement';
+import { Database } from '@/constants/schema';
 import {
   dragSelectRectAction,
   editTableAction,
@@ -185,6 +186,7 @@ describe('useErdEditorAttachElement', () => {
     expect(typeof ctx.setSchemaGraphQL).toBe('function');
     expect(typeof ctx.setSchemaDBML).toBe('function');
     expect(typeof ctx.setSchemaAML).toBe('function');
+    expect(typeof ctx.setSchemaPrisma).toBe('function');
     expect(typeof ctx.getSchemaSQL).toBe('function');
     expect(typeof ctx.getSharedStore).toBe('function');
     expect(typeof ctx.setDiffValue).toBe('function');
@@ -479,6 +481,41 @@ describe('useErdEditorAttachElement', () => {
     ctx.setSchemaAML('users\n  id int pk');
 
     ctx.setSchemaAML('type uid int');
+
+    expect(app.store.state.doc.tableIds).toEqual([]);
+  });
+
+  it('imports Prisma and ignores blank input', async () => {
+    const { app, ctx } = await setup();
+
+    ctx.setSchemaPrisma('model User {\n  id Int @id\n  @@map("users")\n}');
+    const tableIds = [...app.store.state.doc.tableIds];
+    expect(tableIds.length).toBe(1);
+    expect(app.store.state.collections.tableEntities[tableIds[0]].name).toBe(
+      'users'
+    );
+
+    ctx.setSchemaPrisma('   ');
+    expect(app.store.state.doc.tableIds).toEqual(tableIds);
+  });
+
+  it('takes the dialect a Prisma datasource names', async () => {
+    const { app, ctx } = await setup();
+
+    ctx.setSchemaPrisma(
+      'datasource db {\n  provider = "sqlserver"\n}\nmodel User {\n  id Int @id\n}'
+    );
+
+    expect(app.store.state.settings.database).toBe(Database.MSSQL);
+  });
+
+  it('loads an empty document when the Prisma declares no model', async () => {
+    const { app, ctx } = await setup();
+    ctx.setSchemaPrisma('model User {\n  id Int @id\n}');
+
+    ctx.setSchemaPrisma(
+      'generator client {\n  provider = "prisma-client-js"\n}'
+    );
 
     expect(app.store.state.doc.tableIds).toEqual([]);
   });

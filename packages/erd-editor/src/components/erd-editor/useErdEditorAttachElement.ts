@@ -21,6 +21,7 @@ import {
   loadSchemaAMLAction$,
   loadSchemaDBMLAction$,
   loadSchemaGraphQLAction$,
+  loadSchemaPrismaAction$,
   loadSchemaSQLAction$,
 } from '@/engine/modules/editor/generator.actions';
 import { createSharedStore, SharedStore } from '@/engine/shared-store';
@@ -335,6 +336,13 @@ export function useErdEditorAttachElement({ props, ctx, app, root }: Props) {
     if (isEmpty(safeValue)) return;
 
     store.dispatchSync(loadSchemaAMLAction$(safeValue));
+  };
+
+  ctx.setSchemaPrisma = value => {
+    const safeValue = toSafeString(value);
+    if (isEmpty(safeValue)) return;
+
+    store.dispatchSync(loadSchemaPrismaAction$(safeValue));
   };
 
   ctx.getSchemaSQL = databaseVendor => {

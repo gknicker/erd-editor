@@ -171,6 +171,7 @@ const EDITOR_GENERATORS: Record<string, string> = {
   loadSchemaGraphQLAction$: 'wrapped by erd_import_graphql',
   loadSchemaDBMLAction$: 'wrapped by erd_import_dbml',
   loadSchemaAMLAction$: 'wrapped by erd_import_aml',
+  loadSchemaPrismaAction$: 'wrapped by erd_import_prisma',
   dragstartColumnAction$: 'starts a column drag',
   dragoverColumnAction$:
     'moves the dragged columns under a pointer; erd_move_column names the target',
@@ -256,7 +257,7 @@ describe('generator or atom (AC-E4)', () => {
       reason.startsWith('wrapped by')
     );
 
-    expect(wrapped).toHaveLength(5);
+    expect(wrapped).toHaveLength(6);
     for (const [name, reason] of wrapped) {
       const tool = toolByName.get(reason.replace('wrapped by ', ''))!;
       const generator = editorActions$[name as keyof typeof editorActions$];

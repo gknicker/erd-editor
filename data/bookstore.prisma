@@ -1,0 +1,157 @@
+// The bookstore of erd-editor's data/bookstore.dbml (also data/bookstore.aml and
+// data/bookstore.graphql), written the way a
+// Prisma project would: PascalCase models mapped onto the snake_case tables, camelCase fields
+// mapped onto their columns, native types where the default would differ, and the explicit
+// join model the DBML spells out as book_authors.
+
+datasource db {
+  provider = "postgresql"
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+/// Where an order is in its life.
+enum OrderStatus {
+  pending   /// Awaiting payment
+  paid
+  shipped
+  cancelled
+
+  @@map("order_status")
+}
+
+enum MemberTier {
+  bronze
+  silver
+  gold
+
+  @@map("member_tier")
+}
+
+/// People who wrote something we sell
+model Author {
+  id       Int          @id @default(autoincrement())
+  name     String       @db.VarChar(120)
+  born     DateTime?    @db.Date
+  homepage String?      @db.VarChar(255)
+  /// Free-form, shown on the author page
+  bio      String?
+  books    BookAuthor[]
+
+  @@index([name], map: "idx_authors_name")
+  @@map("authors")
+}
+
+model Publisher {
+  id          Int    @id @default(autoincrement())
+  name        String @unique @db.VarChar(120)
+  countryCode String @default("KR") @map("country_code") @db.Char(2)
+  books       Book[]
+
+  @@map("publishers")
+}
+
+/// One row per edition.
+/// A reprint with a new ISBN is a new row.
+model Book {
+  id          Int          @id @default(autoincrement())
+  publisherId Int          @map("publisher_id")
+  /// ISBN-13, no dashes
+  isbn        String       @unique @db.Char(13)
+  title       String       @db.VarChar(255)
+  subtitle    String?      @db.VarChar(255)
+  price       Decimal      @default(0) @db.Decimal(10, 2)
+  publishedOn DateTime?    @map("published_on") @db.Date
+  pageCount   Int?         @map("page_count") @db.SmallInt
+  inPrint     Boolean      @default(true) @map("in_print")
+  createdAt   DateTime     @default(now()) @map("created_at") @db.Timestamp(6)
+  publisher   Publisher    @relation(fields: [publisherId], references: [id])
+  authors     BookAuthor[]
+  orderLines  OrderLine[]
+  reviews     Review[]
+
+  @@index([publisherId, publishedOn], map: "idx_books_publisher_published")
+  @@index([title])
+  @@map("books")
+}
+
+model BookAuthor {
+  bookId   Int    @map("book_id")
+  authorId Int    @map("author_id")
+  /// Order on the cover
+  position Int    @default(1) @db.SmallInt
+  book     Book   @relation(fields: [bookId], references: [id])
+  author   Author @relation(fields: [authorId], references: [id])
+
+  @@id([bookId, authorId])
+  @@map("book_authors")
+}
+
+model Member {
+  id          Int            @id @default(autoincrement())
+  email       String         @unique @db.VarChar(255)
+  displayName String         @map("display_name") @db.VarChar(60)
+  tier        MemberTier     @default(bronze)
+  joinedAt    DateTime       @default(now()) @map("joined_at") @db.Timestamp(6)
+  newsletter  Boolean        @default(false)
+  profile     MemberProfile?
+  orders      Order[]
+  reviews     Review[]
+
+  @@map("members")
+}
+
+model MemberProfile {
+  memberId Int       @id @map("member_id")
+  phone    String?   @db.VarChar(30)
+  address  String?   @db.VarChar(255)
+  birthday DateTime? @db.Date
+  member   Member    @relation(fields: [memberId], references: [id])
+
+  @@map("member_profiles")
+}
+
+model Order {
+  id       Int         @id @default(autoincrement())
+  memberId Int         @map("member_id")
+  status   OrderStatus @default(pending)
+  total    Decimal     @default(0) @db.Decimal(10, 2)
+  placedAt DateTime    @default(now()) @map("placed_at") @db.Timestamp(6)
+  note     String?
+  member   Member      @relation(fields: [memberId], references: [id])
+  lines    OrderLine[]
+
+  @@index([memberId, placedAt], map: "idx_orders_member_placed")
+  @@index([status])
+  @@map("orders")
+}
+
+model OrderLine {
+  orderId   Int     @map("order_id")
+  lineNo    Int     @map("line_no") @db.SmallInt
+  bookId    Int     @map("book_id")
+  quantity  Int     @default(1) @db.SmallInt
+  unitPrice Decimal @map("unit_price") @db.Decimal(10, 2)
+  order     Order   @relation(fields: [orderId], references: [id])
+  book      Book    @relation(fields: [bookId], references: [id])
+
+  @@id([orderId, lineNo])
+  @@map("order_lines")
+}
+
+model Review {
+  id       Int      @id @default(autoincrement())
+  bookId   Int      @map("book_id")
+  memberId Int      @map("member_id")
+  /// 1 to 5
+  rating   Int      @db.SmallInt
+  body     String?
+  postedAt DateTime @default(now()) @map("posted_at") @db.Timestamp(6)
+  book     Book     @relation(fields: [bookId], references: [id])
+  member   Member   @relation(fields: [memberId], references: [id])
+
+  @@unique([bookId, memberId], map: "uq_reviews_book_member")
+  @@map("reviews")
+}

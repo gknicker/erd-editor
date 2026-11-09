@@ -347,6 +347,7 @@ describe('createScopeActions / Import and Export', () => {
       'GraphQL',
       'DBML',
       'AML',
+      'Prisma',
     ]);
 
     find(entries, 'json').perform?.(app);
@@ -354,6 +355,7 @@ describe('createScopeActions / Import and Export', () => {
     find(entries, 'GraphQL').perform?.(app);
     find(entries, 'DBML').perform?.(app);
     find(entries, 'AML').perform?.(app);
+    find(entries, 'Prisma').perform?.(app);
 
     expect(onImport).toHaveBeenNthCalledWith(1, {
       type: 'json',
@@ -380,6 +382,11 @@ describe('createScopeActions / Import and Export', () => {
       op: 'set',
       accept: '.aml',
     });
+    expect(onImport).toHaveBeenNthCalledWith(6, {
+      type: 'prisma',
+      op: 'set',
+      accept: '.prisma',
+    });
   });
 
   it('finds the GraphQL import entry by its sdl keywords', () => {
@@ -398,6 +405,12 @@ describe('createScopeActions / Import and Export', () => {
     const entries = find(scope(), 'Import').next ?? [];
 
     expect(names(searchActions(entries, 'azimutt'))).toContain('AML');
+  });
+
+  it('finds the Prisma import entry by its orm keywords', () => {
+    const entries = find(scope(), 'Import').next ?? [];
+
+    expect(names(searchActions(entries, 'orm'))).toContain('Prisma');
   });
 
   it('exports the document as json named after the database', async () => {

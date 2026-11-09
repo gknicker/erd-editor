@@ -28,6 +28,7 @@ describe('classifyImportFile', () => {
     ['shop.graphql', 'graphql'],
     ['shop.gql', 'graphql'],
     ['shop.graphqls', 'graphql'],
+    ['shop.prisma', 'prisma'],
   ])('reads %s as a %s source named after the file', (fileName, type) => {
     expect(
       classifyImportFile(fileName, 'create table a (id int);', NOW)
@@ -237,6 +238,7 @@ describe('IMPORT_ACCEPT', () => {
       '.graphql',
       '.gql',
       '.graphqls',
+      '.prisma',
     ]);
   });
 });

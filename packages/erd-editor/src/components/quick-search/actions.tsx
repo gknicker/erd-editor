@@ -37,6 +37,7 @@ import {
   importDBML,
   importGraphQL,
   importJSON,
+  importPrisma,
   importSchemaSQL,
 } from '@/utils/file/importFile';
 import { createSchemaSQL } from '@/utils/schema-sql';
@@ -129,6 +130,14 @@ export function createScopeActions(app: AppContext): Action[] {
           keywords: 'aml azimutt markup language schema',
           perform: app => {
             importAML(app);
+          },
+        },
+        {
+          icon: <Icon name="code" size={16} />,
+          name: 'Prisma',
+          keywords: 'prisma schema.prisma orm model',
+          perform: app => {
+            importPrisma(app);
           },
         },
       ],

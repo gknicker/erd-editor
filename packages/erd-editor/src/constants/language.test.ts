@@ -20,6 +20,7 @@ describe('LanguageToLangMap', () => {
       [Language.Drizzle]: 'typescript',
       [Language.DBML]: 'sql',
       [Language.AML]: 'sql',
+      [Language.Prisma]: 'prisma',
     });
   });
 
