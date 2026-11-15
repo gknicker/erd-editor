@@ -1,5 +1,4 @@
 import { query, schemaV3Parser } from '@dineug/erd-editor-schema';
-import { DateTime } from 'luxon';
 
 import type { GCIds } from '@/services/schema-gc';
 import { arrayHas } from '@/utils/arrayHas';
@@ -21,7 +20,7 @@ export class SchemaGCService {
     const hasMemoIds = arrayHas(memoIds);
     const hasIndexIds = arrayHas(indexIds);
     const hasRelationshipIds = arrayHas(relationshipIds);
-    const isGC = createIsGC(DateTime.now());
+    const isGC = createIsGC(Date.now());
 
     const tableCollection = query(collections).collection('tableEntities');
     const tableColumnCollection = query(collections).collection(
@@ -141,14 +140,22 @@ type EntityType = {
   };
 };
 
+/**
+ * When an entity written at updateAt has gone more than GC_DAYS whole days
+ * untouched: GC_DAYS + 1 local calendar days on, at the same wall time, so a
+ * day a clock change makes 23 or 25 hours long still counts as one.
+ */
+function collectableAt(updateAt: number): number {
+  const at = new Date(updateAt);
+  at.setDate(at.getDate() + GC_DAYS + 1);
+  return at.getTime();
+}
+
 const createIsGC =
-  (now: DateTime) =>
+  (now: number) =>
   (has: (value: string) => boolean) =>
   ({ id, meta }: EntityType) => {
     if (has(id)) return false;
 
-    const days = Math.floor(
-      now.diff(DateTime.fromMillis(meta.updateAt), 'days').toObject().days ?? 0
-    );
-    return GC_DAYS < days;
+    return collectableAt(meta.updateAt) <= now;
   };

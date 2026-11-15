@@ -1,4 +1,11 @@
-import { describe, expect, it } from 'vite-plus/test';
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from 'vite-plus/test';
 
 import { SchemaGCService } from '@/services/schema-gc/schemaGCService';
 
@@ -236,6 +243,47 @@ describe('SchemaGCService', () => {
     const result = await new SchemaGCService().run(source);
 
     expect(result.memoIds).toEqual(['m-4days']);
+  });
+
+  describe('across a clock change', () => {
+    // A day counts as a local calendar day, 23 or 25 hours long, so these two
+    // fall on opposite sides of the line from elapsed hours divided by 24.
+    let zone: string | undefined;
+
+    beforeEach(() => {
+      zone = process.env.TZ;
+      process.env.TZ = 'America/New_York';
+      vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+      if (zone === undefined) delete process.env.TZ;
+      else process.env.TZ = zone;
+    });
+
+    const collect = async (updateAt: number, at: number) => {
+      vi.setSystemTime(at);
+      const source = JSON.stringify({
+        version: '3.0.0',
+        collections: { memoEntities: toEntities([memo('m', updateAt)]) },
+      });
+      return (await new SchemaGCService().run(source)).memoIds;
+    };
+
+    it('collects after four calendar days spanning a 23 hour day, 95 hours on', async () => {
+      // Mar 8 12:00 EST to Mar 12 12:00 EDT.
+      expect(
+        await collect(Date.UTC(2024, 2, 8, 17), Date.UTC(2024, 2, 12, 16))
+      ).toEqual(['m']);
+    });
+
+    it('keeps it short of four calendar days spanning a 25 hour day, 96.5 hours on', async () => {
+      // Nov 1 12:00 EDT to Nov 5 11:30 EST.
+      expect(
+        await collect(Date.UTC(2024, 10, 1, 16), Date.UTC(2024, 10, 5, 16, 30))
+      ).toEqual([]);
+    });
   });
 
   it('rejects when the source is not valid JSON', async () => {

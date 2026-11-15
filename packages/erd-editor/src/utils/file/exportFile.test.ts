@@ -1,4 +1,3 @@
-import { DateTime } from 'luxon';
 import {
   afterEach,
   beforeEach,
@@ -30,8 +29,9 @@ const pngRequest = () => ({
 
 const FIXED_TIME = new Date(2024, 2, 9, 4, 5, 6);
 
+// FIXED_TIME in local time, every field zero-padded.
 function nowPrefix() {
-  return DateTime.now().toFormat(`yyyy-MM-dd'T'HH_mm_ss`);
+  return '2024-03-09T04_05_06';
 }
 
 async function readBlob(blob: Blob) {

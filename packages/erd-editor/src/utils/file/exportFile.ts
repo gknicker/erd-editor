@@ -1,5 +1,3 @@
-import { DateTime } from 'luxon';
-
 import {
   createDocumentPng,
   type DocumentPngOptions,
@@ -32,8 +30,17 @@ function performExportBuiltin(blob: Blob, options: ExportOptions) {
   a.click();
 }
 
+const pad = (value: number, length = 2) => String(value).padStart(length, '0');
+
+/** The local time as yyyy-MM-dd'T'HH_mm_ss, which a file name can carry. */
+function toFileTimestamp(date: Date): string {
+  const day = `${pad(date.getFullYear(), 4)}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+  const time = `${pad(date.getHours())}_${pad(date.getMinutes())}_${pad(date.getSeconds())}`;
+  return `${day}T${time}`;
+}
+
 function createName(suffix: string, name?: string) {
-  const prefix = DateTime.now().toFormat(`yyyy-MM-dd'T'HH_mm_ss`);
+  const prefix = toFileTimestamp(new Date());
   return name?.trim()
     ? `${name}-${prefix}${suffix}`
     : `unnamed-${prefix}${suffix}`;
