@@ -20,7 +20,7 @@ import {
   StreamRegroupColorActionTypes,
   StreamRegroupMoveActionTypes,
   StreamRegroupScrollActionTypes,
-} from '@/engine/actions';
+} from '@/engine/action-types';
 import { EngineContext } from '@/engine/context';
 import { createHistory, History, HistoryOptions } from '@/engine/history';
 import { pushHistory } from '@/engine/history.actions';

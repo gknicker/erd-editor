@@ -4,7 +4,7 @@ import { omit } from 'es-toolkit';
 import { isEmpty } from 'es-toolkit/compat';
 import { debounceTime, map, Observable, Subject, Subscription } from 'rxjs';
 
-import { ChangeActionTypes } from '@/engine/actions';
+import { ChangeActionTypes } from '@/engine/action-types';
 import {
   createEngineContext,
   type InjectEngineContext,

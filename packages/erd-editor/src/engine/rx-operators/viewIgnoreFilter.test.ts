@@ -6,7 +6,7 @@ import {
   ChangeActionTypes,
   ReadonlyIgnoreActionTypes,
   ViewIgnoreActionTypes,
-} from '@/engine/actions';
+} from '@/engine/action-types';
 import { SceneView, ViewKind } from '@/engine/modules/editor/state';
 import { createSceneView } from '@/engine/modules/editor/view';
 import { viewIgnoreFilter } from '@/engine/rx-operators/viewIgnoreFilter';

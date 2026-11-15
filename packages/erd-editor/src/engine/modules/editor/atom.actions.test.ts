@@ -15,7 +15,7 @@ import {
 } from 'vite-plus/test';
 
 import { CanvasType, Show } from '@/constants/schema';
-import { ChangeActionTypes, SharedActionTypes } from '@/engine/actions';
+import { ChangeActionTypes, SharedActionTypes } from '@/engine/action-types';
 import { Clock } from '@/engine/clock';
 import {
   changeHasHistoryAction,

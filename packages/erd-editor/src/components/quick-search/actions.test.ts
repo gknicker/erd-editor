@@ -25,7 +25,7 @@ import { menus as bracketMenus } from '@/components/schema-sql/schema-sql-contex
 import { START_X, START_Y } from '@/constants/layout';
 import { CanvasType } from '@/constants/schema';
 import { TablePlacement } from '@/constants/tablePlacement';
-import { ChangeActionTypes } from '@/engine/actions';
+import { ChangeActionTypes } from '@/engine/action-types';
 import { changeViewportAction } from '@/engine/modules/editor/atom.actions';
 import { ViewKind, VisualizationMode } from '@/engine/modules/editor/state';
 import {

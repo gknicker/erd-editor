@@ -1,7 +1,7 @@
 import { schemaV3Parser } from '@dineug/erd-editor-schema';
 import { createStore as runStore, Store as StoreType } from '@dineug/r-html';
 
-import { RootActionMap } from '@/engine/actions';
+import { RootActionMap } from '@/engine/action-types';
 import { EngineContext } from '@/engine/context';
 import { editorReducers } from '@/engine/modules/editor/atom.actions';
 import { createEditor } from '@/engine/modules/editor/state';

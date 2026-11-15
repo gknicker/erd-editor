@@ -5,7 +5,7 @@ import { map, merge, Observable, Subject, Subscription } from 'rxjs';
 import {
   SharedActionTypes,
   SharedFollowingActionTypes,
-} from '@/engine/actions';
+} from '@/engine/action-types';
 import {
   getLWWAction,
   mergeLWWAction,

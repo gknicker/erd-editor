@@ -2,7 +2,7 @@ import { AnyAction } from '@dineug/r-html';
 import { Subject } from 'rxjs';
 import { describe, expect, it, vi } from 'vite-plus/test';
 
-import { ReadonlyIgnoreActionTypes } from '@/engine/actions';
+import { ReadonlyIgnoreActionTypes } from '@/engine/action-types';
 import { readonlyIgnoreFilter } from '@/engine/rx-operators/readonlyIgnoreFilter';
 import { Tag } from '@/engine/tag';
 

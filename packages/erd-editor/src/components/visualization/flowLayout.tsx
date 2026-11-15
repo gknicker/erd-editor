@@ -9,7 +9,10 @@ import {
 import Toast from '@/components/primitives/toast/Toast';
 import { CANVAS_ZOOM_MAX } from '@/constants/schema';
 import { TablePlacement } from '@/constants/tablePlacement';
-import { SharedStreamActionTypes, StreamActionTypes } from '@/engine/actions';
+import {
+  SharedStreamActionTypes,
+  StreamActionTypes,
+} from '@/engine/action-types';
 import { ActionType } from '@/engine/modules/editor/actions';
 import { type SceneView, ViewKind } from '@/engine/modules/editor/state';
 import {

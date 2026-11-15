@@ -7,7 +7,7 @@ import {
   OrderType,
   RelationshipType,
 } from '@/constants/schema';
-import { ChangeActionTypes, SharedActionTypes } from '@/engine/actions';
+import { ChangeActionTypes, SharedActionTypes } from '@/engine/action-types';
 import { pushStreamHistoryMap } from '@/engine/history.actions';
 import {
   CreateEntityInput,

@@ -2,7 +2,7 @@ import { AnyAction } from '@dineug/r-html';
 import { isNil } from 'es-toolkit';
 import { Observable } from 'rxjs';
 
-import { ViewIgnoreActionTypes } from '@/engine/actions';
+import { ViewIgnoreActionTypes } from '@/engine/action-types';
 import { SceneView } from '@/engine/modules/editor/state';
 import { notEmptyActions } from '@/engine/rx-operators/notEmptyActions';
 import { arrayHas } from '@/utils/arrayHas';

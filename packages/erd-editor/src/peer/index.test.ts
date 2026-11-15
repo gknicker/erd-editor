@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vite-plus/test';
 import { COLUMN_MIN_WIDTH, MEMO_MIN_HEIGHT } from '@/constants/layout';
 import { Database, Show } from '@/constants/schema';
 import { DatabaseVendorList } from '@/constants/sql/database';
-import { ChangeActionTypes } from '@/engine/actions';
+import { ChangeActionTypes } from '@/engine/action-types';
 import { createEngineContext } from '@/engine/context';
 import { actions$ as editorActions$ } from '@/engine/modules/editor/generator.actions';
 import { FocusType } from '@/engine/modules/editor/state';

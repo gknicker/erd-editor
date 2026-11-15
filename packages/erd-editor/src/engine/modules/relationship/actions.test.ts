@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vite-plus/test';
 
-import { ChangeActionTypes } from '@/engine/actions';
+import { ChangeActionTypes } from '@/engine/action-types';
 import { ActionType } from '@/engine/modules/relationship/actions';
 import {
   actions,

@@ -26,7 +26,7 @@ export {
   ChangeActionTypes,
   SharedFollowingActionTypes,
   StreamActionTypes,
-} from '@/engine/actions';
+} from '@/engine/action-types';
 export { createEngineContext, type EngineContext } from '@/engine/context';
 export type { GeneratorAction } from '@/engine/generator.actions';
 export { actions$ as editorActions$ } from '@/engine/modules/editor/generator.actions';

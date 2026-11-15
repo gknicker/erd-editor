@@ -8,7 +8,7 @@ import {
   StreamRegroupColorActionTypes,
   StreamRegroupMoveActionTypes,
   StreamRegroupScrollActionTypes,
-} from '@/engine/actions';
+} from '@/engine/action-types';
 import { pushStreamHistoryMap } from '@/engine/history.actions';
 import {
   groupByStreamActions,

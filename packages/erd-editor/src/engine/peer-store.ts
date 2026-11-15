@@ -6,7 +6,7 @@ import {
 } from '@dineug/r-html';
 import { isEmpty } from 'es-toolkit/compat';
 
-import { ChangeActionTypes, StreamActionTypes } from '@/engine/actions';
+import { ChangeActionTypes, StreamActionTypes } from '@/engine/action-types';
 import { createEngineContext } from '@/engine/context';
 import { createHistory, type History } from '@/engine/history';
 import {
