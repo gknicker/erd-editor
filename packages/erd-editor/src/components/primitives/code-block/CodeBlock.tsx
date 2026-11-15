@@ -112,12 +112,19 @@ const CodeBlock: FC<CodeBlockProps> = (props, ctx) => {
         lang: props.lang,
         theme: props.theme,
       })
-      .then(highlight => {
-        if (requestId !== highlightRequestId) return;
+      .then(
+        highlight => {
+          if (requestId !== highlightRequestId) return;
 
-        state.highlight = highlight;
-        setBackgroundColor();
-      });
+          state.highlight = highlight;
+          setBackgroundColor();
+        },
+        // A grammar that did not load leaves the plain text the preview holds.
+        error => {
+          if (requestId !== highlightRequestId) return;
+          console.warn('[shiki] the code could not be highlighted', error);
+        }
+      );
   };
 
   onBeforeMount(() => {

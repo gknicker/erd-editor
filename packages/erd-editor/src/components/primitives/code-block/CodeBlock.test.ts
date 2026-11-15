@@ -265,6 +265,26 @@ describe('CodeBlock', () => {
     expect(getTextarea(mounted).value).toBe('SELECT 1;');
   });
 
+  it('keeps the plain text and warns when the highlight fails', async () => {
+    const codeToHtml = vi.fn<ShikiService['codeToHtml']>(async () => {
+      throw new Error('offline');
+    });
+    setShikiService({ codeToHtml } as unknown as ShikiService);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    mounted = await mountAndFlush(
+      html`<${CodeBlock} value=${'SELECT 1;'} lang=${'sql'} />`
+    );
+
+    expect(warn).toHaveBeenCalledWith(
+      '[shiki] the code could not be highlighted',
+      expect.any(Error)
+    );
+    expect(getPreview(mounted).textContent).toBe('SELECT 1;');
+    expect(getTextarea(mounted).value).toBe('SELECT 1;');
+    warn.mockRestore();
+  });
+
   it('highlights through the shiki service and adopts its background color', async () => {
     const { service, codeToHtml } = createShikiService();
     setShikiService(service);
