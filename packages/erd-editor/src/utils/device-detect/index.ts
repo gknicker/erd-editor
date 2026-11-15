@@ -1,34 +1,52 @@
-import getAgent, { getAccurateAgent } from '@egjs/agent';
+type Brand = { brand: string };
 
-const agent = getAgent();
+type UserAgentData = {
+  brands?: ReadonlyArray<Brand>;
+  /** What early Chromium named brands. */
+  uaList?: ReadonlyArray<Brand>;
+  platform?: string;
+};
 
-let isMacintosh = agent.os.name === 'mac';
-let isIOS = agent.os.name === 'ios';
-let isAndroid = agent.os.name === 'android';
-let isWindows = agent.os.name === 'window';
+const WINDOWS = /win32|windows/;
+const APPLE = /iphone|ipad|ipod|macos|macintel|mac os x/;
 
-let isChrome = agent.browser.name === 'chrome';
-let isSafari = agent.browser.name === 'safari';
-let isFirefox = agent.browser.name === 'firefox';
+/**
+ * Whether a lower-cased platform or user agent names an Apple system. The
+ * first system named decides, so the Windows names, listed ahead of Apple's in
+ * @egjs/agent's presets, which this reproduces, rule an Apple one out.
+ */
+const namesApple = (text: string) => !WINDOWS.test(text) && APPLE.test(text);
 
-getAccurateAgent(agent => {
-  isMacintosh = agent.os.name === 'mac';
-  isIOS = agent.os.name === 'ios';
-  isAndroid = agent.os.name === 'android';
-  isWindows = agent.os.name === 'window';
+/**
+ * What @egjs/agent reported as mac or ios, without it: the client hints platform
+ * where there are brands, else the user agent. Both are synchronous, in workers
+ * too, so this gives at once what its getAccurateAgent refined to later.
+ */
+function detectAppleDevice(): boolean {
+  if (typeof navigator === 'undefined' || !navigator) return false;
 
-  isChrome = agent.browser.name === 'chrome';
-  isSafari = agent.browser.name === 'safari';
-  isFirefox = agent.browser.name === 'firefox';
-});
+  const data = (navigator as Navigator & { userAgentData?: UserAgentData })
+    .userAgentData;
+  const hinted = data?.brands ?? data?.uaList;
+  if (!data || !hinted?.length) {
+    return namesApple((navigator.userAgent || '').toLowerCase());
+  }
 
-export const hasAppleDevice = () => isMacintosh || isIOS;
+  // Any AppleWebKit brand made the agent call the host mac or ios, whatever
+  // the platform said and whether or not a Chromium brand stood beside it.
+  const brands = data.uaList ?? data.brands ?? [];
+  if (brands.some(({ brand }) => brand.toLowerCase().includes('applewebkit'))) {
+    return true;
+  }
 
-export const hasMacintosh = () => isMacintosh;
-export const hasIOS = () => isIOS;
-export const hasAndroid = () => isAndroid;
-export const hasWindows = () => isWindows;
+  return namesApple((data.platform || navigator.platform || '').toLowerCase());
+}
 
-export const hasChrome = () => isChrome;
-export const hasSafari = () => isSafari;
-export const hasFirefox = () => isFirefox;
+let appleDevice: boolean | undefined;
+
+/**
+ * Whether the command key stands in for control here. Read on first use and
+ * kept, so importing this does no work in a realm that never asks.
+ */
+export const hasAppleDevice = (): boolean =>
+  (appleDevice ??= detectAppleDevice());

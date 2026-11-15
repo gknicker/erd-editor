@@ -260,9 +260,6 @@ importers:
       '@easylogic/colorpicker':
         specifier: ^1.10.11
         version: 1.10.11
-      '@egjs/agent':
-        specifier: ^2.4.3
-        version: 2.4.3
       '@radix-ui/colors':
         specifier: ^3.0.0
         version: 3.0.0
@@ -1996,9 +1993,6 @@ packages:
     peerDependenciesMeta:
       redis:
         optional: true
-
-  '@egjs/agent@2.4.3':
-    resolution: {integrity: sha512-XvksSENe8wPeFlEVouvrOhKdx8HMniJ3by7sro2uPF3M6QqWwjzVcmvwoPtdjiX8O1lfRoLhQMp1a7NGlVTdIA==}
 
   '@emnapi/core@1.11.2':
     resolution: {integrity: sha512-TC8MkTuZUtcTSiFeuC0ksCh9QIJ5+F21MvZ4Wn4ORfYaFJ/0dsiudv5tVkejgwZlwQ39jL9WWDe2lz8x0WglOA==}
@@ -9281,8 +9275,6 @@ snapshots:
     transitivePeerDependencies:
       - bufferutil
       - utf-8-validate
-
-  '@egjs/agent@2.4.3': {}
 
   '@emnapi/core@1.11.2':
     dependencies:
