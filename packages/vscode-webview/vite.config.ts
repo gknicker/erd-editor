@@ -43,6 +43,9 @@ export default defineConfig({
     modulePreload: false,
     rolldownOptions: {
       output: {
+        // One page bundle, as before the editor split off its on-demand
+        // chunks: read from disk a split saves nothing (AGENTS.md).
+        codeSplitting: false,
         hashCharacters: 'hex',
         entryFileNames: 'static/js/bundle.[hash:8].js',
         chunkFileNames: 'static/js/[name].[hash:8].js',

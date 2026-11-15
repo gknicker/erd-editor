@@ -79,6 +79,27 @@ function noBrowserExternal(): Plugin {
   };
 }
 
+/**
+ * Fails the build where a script other than main.js is emitted. Obsidian
+ * installs main.js, manifest.json and styles.css alone, so a chunk split off
+ * for a dynamic import, or shared between two, never reaches a vault.
+ */
+function singleMainJs(): Plugin {
+  return {
+    name: 'single-main-js',
+    generateBundle(_, bundle) {
+      const extra = Object.values(bundle).filter(
+        output => output.type === 'chunk' && output.fileName !== 'main.js'
+      );
+      if (extra.length) {
+        this.error(
+          `main.js would load ${extra.map(output => output.fileName).join(', ')}, which Obsidian never installs`
+        );
+      }
+    },
+  };
+}
+
 /** Puts manifest.json and styles.css beside main.js, so dist is the plugin folder. */
 function pluginFiles(): Plugin {
   const files = ['manifest.json', 'styles.css'].map(name =>
@@ -156,6 +177,7 @@ export default defineConfig({
     base64InlineWorkers(),
     pluginFiles(),
     noBrowserExternal(),
+    singleMainJs(),
   ],
 
   worker: {
@@ -184,7 +206,9 @@ export default defineConfig({
         ...builtinModules,
         ...builtinModules.map(name => `node:${name}`),
       ],
-      output: { exports: 'default' },
+      // The editor loads its color picker and code generators on demand, and
+      // main.js has to carry them: singleMainJs fails a build that splits.
+      output: { exports: 'default', codeSplitting: false },
     },
   },
 
