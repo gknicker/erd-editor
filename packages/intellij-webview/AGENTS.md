@@ -1,5 +1,5 @@
 <!-- Parent: ../../AGENTS.md -->
-<!-- Generated: 2026-08-27 | Updated: 2026-09-27 -->
+<!-- Generated: 2026-08-27 | Updated: 2026-11-10 -->
 
 # intellij-webview
 
@@ -15,7 +15,7 @@ The bundle the IntelliJ plugin (`packages/intellij-plugin`) embeds. `src/main.ts
 | `src/env.d.ts` | Ambient `window.cefQuery` / `cefQueryCancel` types and `declare module '*.css'` |
 | `src/webview.css` | Body sizing and the `prefers-color-scheme` background shown before the editor mounts |
 | `index.html` | Build entry at the package root (`publicDir: false`) |
-| `vite.config.ts` | `base: '/'`, the out-of-package `outDir`, `sourcemap: false`, `stripCrossorigin`, the `worker` block, `run.tasks.build` |
+| `vite.config.ts` | `base: '/'`, the out-of-package `outDir`, `sourcemap: false`, `stripCrossorigin`, `codeSplitting: false` on the page (one bundle: the editor's on-demand color picker and code generators would otherwise load as chunks through the IDE's scheme handler, where a worker's dynamic import is measured to fail, for nothing, since the IDE reads the files from disk), the `worker` block, `run.tasks.build` |
 
 ## For AI Agents
 

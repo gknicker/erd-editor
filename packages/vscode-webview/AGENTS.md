@@ -1,5 +1,5 @@
 <!-- Parent: ../../AGENTS.md -->
-<!-- Generated: 2026-08-27 | Updated: 2026-09-19 -->
+<!-- Generated: 2026-08-27 | Updated: 2026-11-10 -->
 
 # vscode-webview
 
@@ -14,7 +14,7 @@ The bundle inside the VSCode webview iframe — the client half of `vuerd-vscode
 | `src/main.ts` | The adapter: `acquireVsCodeApi()`, `getSystemTheme` and its `MutationObserver`, `#loading` removal, `await whenWorkerSourcesReady()`, one `mountWebview` call |
 | `src/workerSources.ts` | Runtime of the same-origin rewrite: `registerWorkerSource` fetches each worker script, `workerBlobUrl` returns its blob URL, `whenWorkerSourcesReady` settles once every read has |
 | `index.html` | Entry at the package root: the `{{extension-base-url}}` `<base>` and the `#loading` placeholder |
-| `vite.config.ts` | `base: './'`, the out-of-package `outDir` with `emptyOutDir`, `modulePreload: false`, the `worker` block, `sameOriginDependencyWorkers` and the local `stripCrossorigin` plugin, `run.tasks.build` |
+| `vite.config.ts` | `base: './'`, the out-of-package `outDir` with `emptyOutDir`, `modulePreload: false`, `codeSplitting: false` on the page (one bundle, as before the editor loaded its color picker and code generators on demand: the webview reads the files from disk, so their chunks would save nothing), the `worker` block, `sameOriginDependencyWorkers` and the local `stripCrossorigin` plugin, `run.tasks.build` |
 | `src/env.d.ts` | `@types/vscode-webview` (`acquireVsCodeApi`) and `vite/client` (`*.css`) |
 
 ## For AI Agents

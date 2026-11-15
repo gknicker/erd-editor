@@ -1,5 +1,5 @@
 <!-- Parent: ../../AGENTS.md -->
-<!-- Generated: 2026-08-27 | Updated: 2026-09-25 -->
+<!-- Generated: 2026-08-27 | Updated: 2026-11-10 -->
 
 # app
 
@@ -31,7 +31,7 @@
 | `src/utils/broadcastChannel.ts` | The cross-tab protocol: `dispatch` does not echo to the posting tab, `dispatchAll` does |
 | `src/utils/crypto.ts` | AES-GCM over `crypto.subtle`, so relays carry ciphertext only |
 | `src/assets/bookstore.dbml` | The "Open sample" schema, imported `?raw` on demand |
-| `vite.config.ts` | react / PWA / legacy plugins, the gtag snippet (added from script, never on `/gdrive` or `/api/auth`), `gdriveDevServer` (the auth relay under `vp dev`), `policyPages` (`/privacy` and `/terms` under `vp dev`), `static/**` output names, the `worker` output block, this package's own `run.tasks` |
+| `vite.config.ts` | react / PWA / legacy plugins, the gtag snippet (added from script, never on `/gdrive` or `/api/auth`), `gdriveDevServer` (the auth relay under `vp dev`), `policyPages` (`/privacy` and `/terms` under `vp dev`), `static/**` output names, the `worker` output block, `optimizeDeps.entries` (Vite's default `**/*.html` plus `../erd-editor/dist/workers/*.js`: a dependency `vp dev` first meets in an editor worker, elk or shiki's, is optimized mid-session and reloads the page, losing the document being edited), this package's own `run.tasks` |
 | `public/_routes.json` | Sends `/api/*` alone to Pages Functions, so static requests spend no Functions quota |
 | `public/privacy.html`, `public/terms.html`, `public/support.html` | The Privacy Policy, Terms of Service and support page at `/privacy`, `/terms` and `/support`: static, scriptless, themed by `prefers-color-scheme` |
 | `public/_headers` | Pages response headers: `/gdrive` refuses to be framed |

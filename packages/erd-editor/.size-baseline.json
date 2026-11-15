@@ -6,8 +6,8 @@
     "dist (reachable from exports)": {
       "bytes": 1142812,
       "gzip": 276422,
-      "budgetGzip": 328242,
-      "budgetNote": "315,962 B measured after ./agent.js left the exports and ./peer.js took its place (feat/ai, 2026-09-23): dist/peer/index.js carries createPeerStore and the catalog barrels, while the tool registry, validation, read and snapshot left for mcp-server (-8,643 B against the 324,605 B measured with ./agent.js and ./peer.js both in the exports, -7,443 B against a25b835f). Same 12,280 B margin."
+      "budgetGzip": 298287,
+      "budgetNote": "286,007 B measured after the bundle work of 2026-11-10: the action lists left the creator registry, which was deleted; engine.js reaches no importer; luxon and @egjs/agent left the dependencies; the color picker library and the code generators load on demand, and the shiki worker loads each grammar on first use (-30,478 B against the 316,485 B measured before it). pnpm consumer-cost shows what an installing app ships, dependencies included, which this cannot. Same 12,280 B margin."
     }
   }
 }

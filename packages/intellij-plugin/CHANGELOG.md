@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### Changed
+
+- The editor ships less code: its main script is 5% smaller, and the background workers that
+  hold the open document, export PNG images and clean up deleted schema entries are 60%, 27% and
+  79% smaller. Syntax highlighting now prepares a language's grammar the first time a panel
+  shows it, rather than all of them at once.
+
 ## [0.9.0] - 2026-09-28
 
 ### Added

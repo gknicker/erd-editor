@@ -1,5 +1,5 @@
 <!-- Parent: ../../AGENTS.md -->
-<!-- Generated: 2026-09-26 | Updated: 2026-09-27 -->
+<!-- Generated: 2026-09-26 | Updated: 2026-11-10 -->
 
 # obsidian-plugin
 
@@ -26,7 +26,7 @@ The Obsidian plugin: a `TextFileView` that puts `<erd-editor>` in a tab for `.er
 | `src/hub/types.ts` | `HubTab`, `HubVault`, `VaultFile`, `CreateOutcome` — what `main.ts` and `ErdView.ts` implement |
 | `src/hub/imports.test.ts` | Holds `src/hub/` to no runtime import of `obsidian` and effect to its named entries |
 | `src/__test-utils__/hub.ts` | `createHubHarness` (a registry and handler over a memory disk and a vault double), `FakeTab`, connection doubles, `servePeer` (the shipping `serveConnection` on a real socket) |
-| `vite.config.ts` | CommonJS library build into `dist/`, `inlineUrlWorkers` with the shared `base64InlineWorkers`, `pluginFiles`, `noBrowserExternal`, `run.tasks.build` and `run.tasks.test` |
+| `vite.config.ts` | CommonJS library build into `dist/`, `inlineUrlWorkers` with the shared `base64InlineWorkers`, `pluginFiles`, `noBrowserExternal`, `singleMainJs` with `codeSplitting: false` (Obsidian installs `main.js`, `manifest.json` and `styles.css` alone, so the chunks the editor's on-demand color picker and code generators would split into, and the runtime chunk main.js would then require, never reach a vault), `run.tasks.build` and `run.tasks.test` |
 | `vitest.config.ts` | Node environment; coverage over `src/hub/**`, `src/keys.ts`, `src/settings.ts` and `src/tabSave.ts`, perFile 80% on all four metrics |
 | `manifest.json` / `versions.json` | Obsidian's plugin metadata; the release repository copies both to its root |
 | `styles.css` | The tab layout and the containment override |
