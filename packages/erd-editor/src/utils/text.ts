@@ -1,6 +1,6 @@
 import { css } from '@dineug/r-html';
 
-import { TextFontFamily } from '@/styles/fonts.styles';
+import { TextFontFamily } from '@/constants/fonts';
 import { typography } from '@/styles/typography.styles';
 
 const TEXT_PADDING = 2;

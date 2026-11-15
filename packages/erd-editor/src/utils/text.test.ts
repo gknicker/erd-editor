@@ -7,7 +7,7 @@ import {
   vi,
 } from 'vite-plus/test';
 
-import { TextFontFamily } from '@/styles/fonts.styles';
+import { TextFontFamily } from '@/constants/fonts';
 
 const TEXT_PADDING = 2;
 

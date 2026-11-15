@@ -2,12 +2,12 @@ import { noop } from 'es-toolkit';
 import type { KonvaEventObject } from 'konva/lib/Node';
 
 import { ICON_VIEW_BOX } from '@/components/primitives/icon/icons';
+import { CodeFontFamily, TextFontFamily } from '@/constants/fonts';
 import {
   CELL_FONT_SIZE,
   TABLE_BORDER,
   TABLE_PADDING,
 } from '@/constants/layout';
-import { CodeFontFamily, TextFontFamily } from '@/styles/fonts.styles';
 import { isMouseEvent } from '@/utils/domEvent';
 
 /** A pointer event as konva hands it to a listener bound on a scene node. */

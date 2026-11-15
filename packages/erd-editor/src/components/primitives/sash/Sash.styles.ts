@@ -1,6 +1,6 @@
 import { css } from '@dineug/r-html';
 
-export const SASH_SIZE = 5;
+import { SASH_SIZE } from '@/constants/layout';
 
 export const sash = css`
   position: absolute;

@@ -169,3 +169,6 @@ export const VIEW_RELATIONSHIP_STROKE_WIDTH = 1;
  * clear of the neighbouring corridor at the router's usual separation.
  */
 export const RELATIONSHIP_HIT_STROKE_WIDTH = 8;
+
+/** The thickness of a resize sash, the band a memo or a panel is dragged by. */
+export const SASH_SIZE = 5;

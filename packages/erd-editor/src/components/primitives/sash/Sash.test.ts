@@ -3,10 +3,8 @@ import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
 
 import { flush, mountAndFlush, Mounted } from '@/__test-utils__/index';
 import Sash, { Cursor, SashType } from '@/components/primitives/sash/Sash';
-import {
-  sash as sashStyle,
-  SASH_SIZE,
-} from '@/components/primitives/sash/Sash.styles';
+import { sash as sashStyle } from '@/components/primitives/sash/Sash.styles';
+import { SASH_SIZE } from '@/constants/layout';
 
 let mounted: Mounted | null = null;
 

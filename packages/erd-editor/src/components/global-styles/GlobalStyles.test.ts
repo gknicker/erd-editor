@@ -4,7 +4,7 @@ import { afterEach, beforeAll, describe, expect, it } from 'vite-plus/test';
 import { adoptedSheets, SCOPE_CLASS } from '@/__test-utils__/adoptedCss';
 import { mountAndFlush, Mounted } from '@/__test-utils__/index';
 import GlobalStyles from '@/components/global-styles/GlobalStyles';
-import { CodeFontFamily, TextFontFamily } from '@/styles/fonts.styles';
+import { CodeFontFamily, TextFontFamily } from '@/constants/fonts';
 
 let mounted: Mounted | null = null;
 

@@ -3,6 +3,7 @@ import { join } from 'node:path';
 
 import { describe, expect, it } from 'vite-plus/test';
 
+import { TextFontFamily } from '@/constants/fonts';
 import {
   createOffscreenToWidth,
   FONT_PROBE_TEXTS,
@@ -10,7 +11,6 @@ import {
   sameFontProbe,
   SCENE_FONT,
 } from '@/services/export-png/textWidth';
-import { TextFontFamily } from '@/styles/fonts.styles';
 
 const TEXT_SOURCE = readFileSync(
   join(process.cwd(), 'src', 'utils', 'text.ts'),

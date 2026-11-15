@@ -1,4 +1,4 @@
-import { TextFontFamily } from '@/styles/fonts.styles';
+import { TextFontFamily } from '@/constants/fonts';
 
 /** How the editor measures a string, which is what a table reserves room by. */
 export type ToWidth = (text: string) => number;

@@ -1,21 +1,7 @@
-import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
+import { describe, expect, it } from 'vite-plus/test';
 
 import { Palette } from '@/themes/radix-ui-theme';
 import { SharedColors, toSharedColor } from '@/utils/sharedColor';
-
-/**
- * The eight hues sharedColor.ts reads, missing the seventh: a palette a
- * future radix-ui-theme.config could plausibly ship, one hue short of the set.
- */
-const PALETTE_MISSING_A_HUE = {
-  tomato: { tomato9: '#111111' },
-  gold: { gold9: '#222222' },
-  grass: { grass9: '#333333' },
-  teal: { teal9: '#444444' },
-  iris: { iris9: '#555555' },
-  purple: { purple9: '#666666' },
-  pink: { pink9: '#888888' },
-};
 
 describe('SharedColors', () => {
   it('lists eight distinct opaque colors', () => {
@@ -47,31 +33,21 @@ describe('SharedColors', () => {
     expect(SharedColors).not.toContain(Palette.cyan.cyan9);
   });
 
-  describe('a palette missing a hue', () => {
-    afterEach(() => {
-      vi.doUnmock('@/themes/radix-ui-theme');
-      vi.resetModules();
-    });
+  it('is step 9 of the eight light scales the theme palette carries', () => {
+    const hues = [
+      'tomato',
+      'gold',
+      'grass',
+      'teal',
+      'iris',
+      'purple',
+      'plum',
+      'pink',
+    ] as const;
 
-    it('falls back to an empty string for the slot that hue would fill', async () => {
-      vi.resetModules();
-      vi.doMock('@/themes/radix-ui-theme', () => ({
-        Palette: PALETTE_MISSING_A_HUE,
-      }));
-
-      const { SharedColors: withGap } = await import('@/utils/sharedColor');
-
-      expect(withGap).toEqual([
-        '#111111',
-        '#222222',
-        '#333333',
-        '#444444',
-        '#555555',
-        '#666666',
-        '',
-        '#888888',
-      ]);
-    });
+    expect(SharedColors).toEqual(
+      hues.map(hue => (Palette[hue] as Record<string, string>)[`${hue}9`])
+    );
   });
 });
 

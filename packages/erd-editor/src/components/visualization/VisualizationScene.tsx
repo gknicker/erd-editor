@@ -22,8 +22,8 @@ import {
   TABLE_RADIUS,
   type VisualizationState,
 } from '@/components/visualization/visualizationView';
+import { TextFontFamily } from '@/constants/fonts';
 import { renderKonva } from '@/konva/host';
-import { TextFontFamily } from '@/styles/fonts.styles';
 import { isMultiTouch } from '@/utils/domEvent';
 import type { DragMove } from '@/utils/globalEventObservable';
 

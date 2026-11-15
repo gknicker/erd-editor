@@ -35,6 +35,7 @@ import {
   TABLE_RADIUS,
   type VisualizationState,
 } from '@/components/visualization/visualizationView';
+import { TextFontFamily } from '@/constants/fonts';
 import { addRelationshipAction } from '@/engine/modules/relationship/atom.actions';
 import {
   addTableAction,
@@ -46,7 +47,6 @@ import {
 } from '@/engine/modules/table-column/atom.actions';
 import { whenDrawn } from '@/konva/batchDraw';
 import { renderScene } from '@/konva/scene/renderScene';
-import { TextFontFamily } from '@/styles/fonts.styles';
 import type { Theme } from '@/themes/tokens';
 
 type Fixture = {

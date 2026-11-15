@@ -1,21 +1,29 @@
-import { get } from 'es-toolkit/compat';
+import {
+  gold,
+  grass,
+  iris,
+  pink,
+  plum,
+  purple,
+  teal,
+  tomato,
+} from '@radix-ui/colors';
 
-import { Palette } from '@/themes/radix-ui-theme';
-
-const SharedColorHues = [
-  'tomato',
-  'gold',
-  'grass',
-  'teal',
-  'iris',
-  'purple',
-  'plum',
-  'pink',
-] as const;
-
-export const SharedColors: ReadonlyArray<string> = SharedColorHues.map(
-  hue => get(Palette, `${hue}.${hue}9`) ?? ''
-);
+/**
+ * Step 9 of eight light scales, in the order a hash picks from. Imported scale
+ * by scale rather than read off the theme's Palette, whose module evaluates the
+ * whole palette as it loads, in the export worker too, which draws these.
+ */
+export const SharedColors: ReadonlyArray<string> = [
+  tomato.tomato9,
+  gold.gold9,
+  grass.grass9,
+  teal.teal9,
+  iris.iris9,
+  purple.purple9,
+  plum.plum9,
+  pink.pink9,
+];
 
 export function toSharedColor(id: string): string {
   let hash = 0;

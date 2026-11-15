@@ -1,5 +1,6 @@
 import { FC } from '@dineug/r-html';
 
+import { SASH_SIZE } from '@/constants/layout';
 import { ValuesType } from '@/internal-types';
 import { drag$, DragMove } from '@/utils/globalEventObservable';
 
@@ -35,14 +36,14 @@ const Sash: FC<SashProps> = (props, ctx) => {
     const top = props.top ?? 0;
     return top === 0 && props.type === SashType.vertical
       ? top
-      : top - styles.SASH_SIZE / 2;
+      : top - SASH_SIZE / 2;
   };
 
   const centerLeft = () => {
     const left = props.left ?? 0;
     return left === 0 && props.type === SashType.horizontal
       ? left
-      : left - styles.SASH_SIZE / 2;
+      : left - SASH_SIZE / 2;
   };
 
   const handleMousedown = (event: MouseEvent) => {

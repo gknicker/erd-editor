@@ -10,11 +10,11 @@ import {
   type ScenePointerEvent,
   setSceneCursor,
 } from '@/components/erd/canvas/sceneTokens';
-import { SASH_SIZE } from '@/components/primitives/sash/Sash.styles';
 import {
   MEMO_BORDER,
   MEMO_MIN_HEIGHT,
   MEMO_MIN_WIDTH,
+  SASH_SIZE,
 } from '@/constants/layout';
 import { resizeMemoAction } from '@/engine/modules/memo/atom.actions';
 import type { Memo, ValuesType } from '@/internal-types';

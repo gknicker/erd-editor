@@ -5,11 +5,8 @@ import {
   adoptedSheets,
   SCOPE_CLASS,
 } from '@/__test-utils__/adoptedCss';
-import {
-  CodeFontFamily,
-  fontsStyle,
-  TextFontFamily,
-} from '@/styles/fonts.styles';
+import { CodeFontFamily, TextFontFamily } from '@/constants/fonts';
+import { fontsStyle } from '@/styles/fonts.styles';
 
 /** The family list a stack declares, whatever the whitespace around its commas. */
 const families = (stack: string) => stack.split(',').map(part => part.trim());
