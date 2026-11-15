@@ -232,11 +232,11 @@ export default defineConfig(({ mode }) => {
       },
     },
 
-    // erd-editor의 elk 워커가 동적으로 집는 commonjs 번들. dev 서버 스캐너는
-    // 워커 엔트리를 걷지 않아서, 여기 적지 않으면 첫 정렬에서 의존성을 새로
-    // 발견하고 페이지를 통째로 리로드한다 — 편집 중인 문서가 날아간다.
+    // dev 서버 스캐너는 html만 걷고 워커 엔트리는 걷지 않는다. 워커에서 처음
+    // 만나는 의존성(elk, shiki와 그 문법들)은 첫 사용 때 새로 발견돼 페이지를
+    // 통째로 리로드한다 — 편집 중인 문서가 날아간다. 그래서 워커도 걷게 한다.
     optimizeDeps: {
-      include: ['@dineug/erd-editor > elkjs/lib/elk.bundled.js'],
+      entries: ['**/*.html', '../erd-editor/dist/workers/*.js'],
     },
 
     /**

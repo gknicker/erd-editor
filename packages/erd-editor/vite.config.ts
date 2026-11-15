@@ -52,11 +52,11 @@ export default defineConfig({
       '@': join(import.meta.dirname, 'src'),
     },
   },
-  // ELK is a commonjs bundle a browser cannot load as it stands, so a dev
-  // server pre-bundles it. Named here rather than discovered, because Vite's
-  // scanner does not walk a worker entry and a discovery mid-page reloads it.
+  // Vite's scanner walks the html pages alone, and a dependency it first meets
+  // in a worker is optimized mid-session, which stalls and reloads the page;
+  // the worker entries join its default, ELK and shiki's grammars with them.
   optimizeDeps: {
-    include: ['elkjs/lib/elk.bundled.js'],
+    entries: ['**/*.html', 'src/**/*.shared-worker.ts'],
   },
   // A worker entry is bundled by a pass of its own, inheriting no plugin from
   // the block below. The export worker pulls the scene, which is jsx, so left
