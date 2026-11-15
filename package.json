@@ -31,6 +31,7 @@
     "check": "vp check && tsc --noEmit && node --test tools/vite-config.test.ts && node scripts/check-task-inputs.mjs",
     "size": "node scripts/check-bundle-size.mjs",
     "peer-graph": "node scripts/check-peer-graph.mjs",
+    "consumer-cost": "node scripts/measure-consumer-cost.mjs",
     "cache:clear": "vp cache clean",
     "prepare": "vp config"
   },
