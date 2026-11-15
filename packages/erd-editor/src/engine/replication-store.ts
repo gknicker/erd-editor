@@ -11,9 +11,10 @@ import {
 } from '@/engine/context';
 import {
   changeViewportAction,
+  initialClearAction,
+  initialLoadJsonAction,
   validationIdsAction,
 } from '@/engine/modules/editor/atom.actions';
-import { initialLoadJsonAction$ } from '@/engine/modules/editor/generator.actions';
 import { actionsFilter } from '@/engine/rx-operators';
 import { createStore } from '@/engine/store';
 import { createHooks } from '@/engine/store-hooks';
@@ -82,9 +83,12 @@ export function createReplicationStore(
 
   const setInitialValue = (value: string) => {
     const safeValue = toSafeString(value);
-    store.dispatchSync(
-      initialLoadJsonAction$(isEmpty(safeValue) ? '{}' : safeValue)
-    );
+    // The two atom actions initialLoadJsonAction$ yields, dispatched as they
+    // are: its module holds the schema importers, which a replica never runs.
+    store.dispatchSync([
+      initialClearAction(),
+      initialLoadJsonAction({ value: isEmpty(safeValue) ? '{}' : safeValue }),
+    ]);
     schemaGCService.run(toJson(store.state)).then(gcIds => {
       const isChange =
         gcIds.tableIds.length ||
