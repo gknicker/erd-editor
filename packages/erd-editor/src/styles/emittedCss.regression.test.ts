@@ -36,7 +36,7 @@ function selectorOf(cssText: string): string {
   return cssText.slice(0, cssText.indexOf('{')).trim();
 }
 
-/** Every rule adopted when all 60 modules share one module registry. */
+/** Every rule adopted when all 57 modules share one module registry. */
 let cumulative: string[] = [];
 /** The css.global half of cumulative, which the bucket keeps in front. */
 let globalRules: string[] = [];
@@ -50,7 +50,8 @@ let erdEditorScope = '';
 let codeBlockRootScope = '';
 let codeBlockClipboardScope = '';
 let colorPickerScope = '';
-let sashScope = '';
+let uniqueScope = '';
+let orderTypeScope = '';
 
 beforeAll(async () => {
   vi.resetModules();
@@ -64,12 +65,16 @@ beforeAll(async () => {
     await import('@/components/primitives/code-block/CodeBlock.styles');
   const colorPicker =
     await import('@/components/primitives/color-picker/ColorPicker.styles');
-  const sash = await import('@/components/primitives/sash/Sash.styles');
+  const indexesIndex =
+    await import('@/components/erd/table-properties/table-properties-indexes/indexes-index/IndexesIndex.styles');
+  const indexesColumn =
+    await import('@/components/erd/table-properties/table-properties-indexes/indexes-column/IndexesColumn.styles');
   erdEditorScope = `.${String(erdEditor.root)}`;
   codeBlockRootScope = `.${String(codeBlock.root)}`;
   codeBlockClipboardScope = `.${String(codeBlock.clipboard)}`;
   colorPickerScope = `.${String(colorPicker.container)}`;
-  sashScope = `.${String(sash.sash)}`;
+  uniqueScope = `.${String(indexesIndex.unique)}`;
+  orderTypeScope = `.${String(indexesColumn.orderType)}`;
 
   const sheets = adoptedSheets(addCSSHost);
   globalRules = sheets.filter(isGlobalSheet).flat();
@@ -117,27 +122,27 @@ describe('selector-list scope widening', () => {
 });
 
 describe('rule-count invariance', () => {
-  it('loads 59 style modules', () => {
+  it('loads 57 style modules', () => {
     // A new style module is meant to move this number, which is why it is
-    // pinned rather than derived. P6-51 took six with the dom scene and the
-    // off-canvas marker one more; four came back with the chrome since.
-    expect(modulePaths).toHaveLength(59);
+    // pinned rather than derived. P6-51 took six, the marker one more, the
+    // chrome gave four back, and the dead DOM sash and an empty module took two.
+    expect(modulePaths).toHaveLength(57);
   });
 
-  it('adopts 625 rules, none of them a duplicate', () => {
+  it('adopts 621 rules, none of them a duplicate', () => {
     // Pinned rather than derived, so a rule added or lost anywhere in the
     // package has to be accounted for here.
-    expect(cumulative).toHaveLength(625);
-    expect(new Set(cumulative).size).toBe(625);
+    expect(cumulative).toHaveLength(621);
+    expect(new Set(cumulative).size).toBe(621);
   });
 
-  it('splits into 327 global rules ahead of 298 component rules', () => {
+  it('splits into 327 global rules ahead of 294 component rules', () => {
     // A shadow root applies its own styleSheets before its adoptedStyleSheets,
     // so the only thing keeping the reset ahead of the components is the bucket,
     // which is what this asserts positionally. Both halves move independently.
-    expect(sheetsOfEachKind).toEqual({ global: 5, component: 164 });
+    expect(sheetsOfEachKind).toEqual({ global: 5, component: 163 });
     expect(globalRules).toHaveLength(327);
-    expect(componentRules).toHaveLength(298);
+    expect(componentRules).toHaveLength(294);
     expect(cumulative).toEqual([...globalRules, ...componentRules]);
   });
 
@@ -152,19 +157,20 @@ describe('rule-count invariance', () => {
     );
 
     // Identifiers are content hashes now, so a rule's text is the same whether its module is
-    // rendered alone or with the other 58 — which is exactly what makes this comparison mean
+    // rendered alone or with the other 56 — which is exactly what makes this comparison mean
     // "nothing was lost to dedup" rather than "the class names differ".
-    expect(union.size).toBe(625);
+    expect(union.size).toBe(621);
     expect(droppedByLoadingTogether).toEqual([]);
   });
 
-  it('gives two templates with the same root declarations their own class', () => {
-    // The identifier is the hash of the whole canonical text, not of the root
-    // declaration block, so two templates that declare the same one property get
-    // a class and an adopted rule each rather than sharing one.
-    expect(colorPickerScope).not.toBe(sashScope);
-    expect(cumulative).toContain(`${colorPickerScope} { position: absolute; }`);
-    expect(cumulative).toContain(`${sashScope} { position: absolute; }`);
+  it('gives two templates with the same whole text one class and one rule', () => {
+    // The identifier hashes the whole canonical text, so two modules writing
+    // one template share a class and a rule; one root under different nested
+    // rules hashes apart, which r-html's compileToRules spec pins.
+    expect(uniqueScope).toBe(orderTypeScope);
+    expect(
+      cumulative.filter(rule => rule === `${uniqueScope} { cursor: pointer; }`)
+    ).toHaveLength(1);
   });
 });
 

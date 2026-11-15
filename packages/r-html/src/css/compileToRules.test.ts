@@ -383,6 +383,15 @@ describe('the identifier is a stable function of content', () => {
     );
   });
 
+  it('gives different identifiers to the same root declarations under different nested rules', () => {
+    expect(identifierOf('position:absolute;&.a{width:1px}')).not.toBe(
+      identifierOf('position:absolute;&.b{width:1px}')
+    );
+    expect(identifierOf('position:absolute;&.a{width:1px}')).not.toBe(
+      identifierOf('position:absolute;')
+    );
+  });
+
   it('gives different identifiers to different values', () => {
     expect(identifierOf('.a{color:red}')).not.toBe(
       identifierOf('.a{color:blue}')

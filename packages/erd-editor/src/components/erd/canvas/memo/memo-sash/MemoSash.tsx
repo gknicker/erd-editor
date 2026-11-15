@@ -39,11 +39,7 @@ export const MemoSashPosition = {
 } as const;
 export type MemoSashPosition = ValuesType<typeof MemoSashPosition>;
 
-/**
- * The three shapes a sash takes, spelled out rather than imported from the DOM
- * Sash primitive: that module reaches the window through drag$, which a scene
- * drawn in a worker has none of.
- */
+/** The three shapes a sash takes: a side band, a top band, or a corner. */
 const SashShape = {
   vertical: 'vertical',
   horizontal: 'horizontal',
@@ -53,8 +49,7 @@ type SashShape = ValuesType<typeof SashShape>;
 
 /**
  * The pointer a sash asks the stage container for under it, and holds for its
- * drag. Sash styles gave the sides theirs through a class and each corner one
- * of its own, and a konva node has no cursor of its own to carry them.
+ * drag: each side and each corner its own, as a konva node carries no cursor.
  */
 const CURSORS: Record<MemoSashPosition, string> = {
   left: 'ew-resize',
