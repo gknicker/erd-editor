@@ -35,12 +35,19 @@ export default defineConfig({
     plugins: () => [rHtmlPlugins],
   },
   resolve: {
-    // The spawn alias goes first: alias entries match in order, and the bare
-    // @ entry would otherwise claim this specifier too.
+    // The inline twins go first: alias entries match in order, and the bare
+    // @ entry would otherwise claim these specifiers too.
     alias: [
       {
         find: '@/workers/spawn',
         replacement: join(packageDir, 'src/workers/spawn.inline.ts'),
+      },
+      {
+        find: '@/components/generator-code/loadGenerators',
+        replacement: join(
+          packageDir,
+          'src/components/generator-code/loadGenerators.inline.ts'
+        ),
       },
       { find: '@', replacement: join(packageDir, 'src') },
     ],

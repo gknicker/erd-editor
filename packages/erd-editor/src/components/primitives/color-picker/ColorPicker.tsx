@@ -1,11 +1,32 @@
 import { createRef, FC, observable, onMounted, ref } from '@dineug/r-html';
-// @ts-ignore
-import ColorPickerUI from '@easylogic/colorpicker';
+import type {
+  ColorPickerInstance,
+  default as ColorPickerUI,
+} from '@easylogic/colorpicker';
 
 import { Viewport } from '@/engine/modules/editor/state';
 import { useUnmounted } from '@/hooks/useUnmounted';
 
 import * as styles from './ColorPicker.styles';
+
+let library: Promise<typeof ColorPickerUI> | null = null;
+
+/**
+ * The picker library, loaded the first time a picker opens: the largest
+ * dependency the page carries, for a control most sessions never show. A load
+ * that fails is not kept, so the next picker asks again.
+ */
+function loadColorPickerUI(): Promise<typeof ColorPickerUI> {
+  library ??= import('@easylogic/colorpicker').then(
+    module => module.default,
+    error => {
+      library = null;
+      throw error;
+    }
+  );
+
+  return library;
+}
 
 export type ColorPickerProps = {
   x: number;
@@ -26,19 +47,43 @@ const ColorPicker: FC<ColorPickerProps> = (props, ctx) => {
 
   onMounted(() => {
     const $container = container.value;
-    const colorPicker = ColorPickerUI.create({
-      container: $container,
-      type: 'sketch',
-      position: 'inline',
-      color: props.color || '',
-      onChange: (color: string) => {
-        props.onChange?.(color);
-      },
-      onLastUpdate: (color: string) => {
-        props.onLastUpdate?.(color);
-      },
+    let colorPicker: ColorPickerInstance | null = null;
+    let unmounted = false;
+
+    // Registered before the library arrives, so a picker closed while it
+    // loads is never created.
+    addUnsubscribe(() => {
+      unmounted = true;
+      if (!colorPicker) return;
+      colorPicker.destroy();
+      $container.removeChild(colorPicker.$root.el);
     });
 
+    loadColorPickerUI().then(
+      ColorPickerUI => {
+        if (unmounted) return;
+        colorPicker = ColorPickerUI.create({
+          container: $container,
+          type: 'sketch',
+          position: 'inline',
+          color: props.color || '',
+          onChange: (color: string) => {
+            props.onChange?.(color);
+          },
+          onLastUpdate: (color: string) => {
+            props.onLastUpdate?.(color);
+          },
+        });
+        fitViewport($container);
+      },
+      error => {
+        console.warn('[color-picker] the picker could not be loaded', error);
+      }
+    );
+  });
+
+  /** Moves the picker back inside the viewport, once it has a size to fit. */
+  const fitViewport = ($container: HTMLDivElement) => {
     if (props.viewport) {
       const rect = $container.getBoundingClientRect();
       const width = props.x + rect.width;
@@ -57,12 +102,7 @@ const ColorPicker: FC<ColorPickerProps> = (props, ctx) => {
         }
       }
     }
-
-    addUnsubscribe(() => {
-      colorPicker.destroy();
-      $container.removeChild(colorPicker.$root.el);
-    });
-  });
+  };
 
   return () => (
     <div

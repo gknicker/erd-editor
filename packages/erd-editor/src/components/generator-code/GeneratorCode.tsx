@@ -3,6 +3,7 @@ import { FC, observable, onBeforeMount, watch } from '@dineug/r-html';
 
 import { useAppContext } from '@/components/appContext';
 import GeneratorCodeContextMenu from '@/components/generator-code/generator-code-context-menu/GeneratorCodeContextMenu';
+import { loadGenerators } from '@/components/generator-code/loadGenerators';
 import CodeBlock from '@/components/primitives/code-block/CodeBlock';
 import { useContextMenuRootProvider } from '@/components/primitives/context-menu/context-menu-root/contextMenuRootContext';
 import Toast from '@/components/primitives/toast/Toast';
@@ -11,10 +12,6 @@ import { useUnmounted } from '@/hooks/useUnmounted';
 import { arrayHas } from '@/utils/arrayHas';
 import { copyToClipboard } from '@/utils/clipboard';
 import { openToastAction } from '@/utils/emitter';
-import {
-  createGeneratorCode,
-  createGeneratorCodeTable,
-} from '@/utils/generator-code';
 import { delay } from '@/utils/promise';
 
 import * as styles from './GeneratorCode.styles';
@@ -39,21 +36,39 @@ const GeneratorCode: FC<GeneratorCodeProps> = (props, ctx) => {
     code: '',
   });
 
+  let unmounted = false;
+  addUnsubscribe(() => {
+    unmounted = true;
+  });
+
+  // Every call waits on the one load, whose callbacks run in the order they
+  // were added, and reads the store when it runs: the latest state wins.
   const setCode = () => {
-    const { store } = app.value;
+    loadGenerators().then(
+      ({ createGeneratorCode, createGeneratorCodeTable }) => {
+        if (unmounted) return;
+        const { store } = app.value;
 
-    if (props.tableId) {
-      const { collections } = store.state;
-      const table = query(collections)
-        .collection('tableEntities')
-        .selectById(props.tableId);
+        if (props.tableId) {
+          const { collections } = store.state;
+          const table = query(collections)
+            .collection('tableEntities')
+            .selectById(props.tableId);
 
-      if (table) {
-        state.code = createGeneratorCodeTable(store.state, table);
+          if (table) {
+            state.code = createGeneratorCodeTable(store.state, table);
+          }
+        } else {
+          state.code = createGeneratorCode(store.state);
+        }
+      },
+      error => {
+        console.warn(
+          '[generator-code] the generators could not be loaded',
+          error
+        );
       }
-    } else {
-      state.code = createGeneratorCode(store.state);
-    }
+    );
   };
 
   const handleCopy = () => {

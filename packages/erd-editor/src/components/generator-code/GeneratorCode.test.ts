@@ -1,6 +1,7 @@
 import { FC, html, observable } from '@dineug/r-html';
 import {
   afterEach,
+  beforeAll,
   beforeEach,
   describe,
   expect,
@@ -11,6 +12,7 @@ import {
 import {
   createTestAppContext,
   flush,
+  mount,
   mountAndFlush,
   Mounted,
 } from '@/__test-utils__/index';
@@ -123,6 +125,17 @@ function openContextMenu(m: Mounted, x = 30, y = 40) {
   rootOf(m).dispatchEvent(event);
   return event;
 }
+
+beforeAll(async () => {
+  // The panel loads its generators the first time it opens, and an opening
+  // after that renders its code within a flush, which the specs time by.
+  const warm = mount(
+    html`<${GeneratorCode} isDarkMode=${false} />`,
+    createSeededApp()
+  );
+  await vi.waitFor(() => expect(codeOf(warm).textContent).not.toBe(''));
+  warm.unmount();
+});
 
 beforeEach(() => {
   writeText = vi.fn(async () => {});

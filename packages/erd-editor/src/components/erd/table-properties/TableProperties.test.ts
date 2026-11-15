@@ -1,6 +1,7 @@
 import { html } from '@dineug/r-html';
 import {
   afterEach,
+  beforeAll,
   beforeEach,
   describe,
   expect,
@@ -87,6 +88,10 @@ function seed(app: AppContext) {
 
 let app: AppContext;
 let mounted: Mounted | null = null;
+
+// The Code Generator tab loads its generators on demand. Their first load here
+// transforms that module graph cold, which runs past a spec's wait; warm it once.
+beforeAll(() => import('@/utils/generator-code'));
 
 beforeEach(() => {
   app = createTestAppContext();
@@ -187,7 +192,10 @@ describe('TableProperties', () => {
       expect(mounted.container.querySelector('input[type="checkbox"]')).toBe(
         null
       );
-      expect(scopeOf(mounted)?.textContent).toContain('type Users {');
+      // The panel receives its generators after this flush, not within it.
+      await vi.waitFor(() =>
+        expect(scopeOf(mounted!)?.textContent).toContain('type Users {')
+      );
     });
 
     it('returns to the Indexes tab', async () => {
