@@ -13,19 +13,26 @@ import {
   StreamRegroupScrollActionTypes,
   ViewIgnoreActionTypes,
 } from '@/engine/action-types';
-import { actions } from '@/engine/actions';
 import {
   pushStreamHistoryMap,
   pushUndoHistoryMap,
 } from '@/engine/history.actions';
 import { ActionType as EditorActionType } from '@/engine/modules/editor/actions';
+import { actions as editorActions } from '@/engine/modules/editor/atom.actions';
 import { ActionType as IndexActionType } from '@/engine/modules/index/actions';
+import { actions as indexActions } from '@/engine/modules/index/atom.actions';
 import { ActionType as IndexColumnActionType } from '@/engine/modules/index-column/actions';
+import { actions as indexColumnActions } from '@/engine/modules/index-column/atom.actions';
 import { ActionType as MemoActionType } from '@/engine/modules/memo/actions';
+import { actions as memoActions } from '@/engine/modules/memo/atom.actions';
 import { ActionType as RelationshipActionType } from '@/engine/modules/relationship/actions';
+import { actions as relationshipActions } from '@/engine/modules/relationship/atom.actions';
 import { ActionType as SettingsActionType } from '@/engine/modules/settings/actions';
+import { actions as settingsActions } from '@/engine/modules/settings/atom.actions';
 import { ActionType as TableActionType } from '@/engine/modules/table/actions';
+import { actions as tableActions } from '@/engine/modules/table/atom.actions';
 import { ActionType as TableColumnActionType } from '@/engine/modules/table-column/actions';
+import { actions as tableColumnActions } from '@/engine/modules/table-column/atom.actions';
 
 const allActionTypes = new Set<string>([
   ...Object.values(EditorActionType),
@@ -39,9 +46,16 @@ const allActionTypes = new Set<string>([
 ]);
 
 const atomActionTypes = new Set<string>(
-  Object.values(actions)
-    .map((creator: any) => creator?.type)
-    .filter((type): type is string => typeof type === 'string')
+  [
+    editorActions,
+    indexActions,
+    indexColumnActions,
+    memoActions,
+    relationshipActions,
+    settingsActions,
+    tableActions,
+    tableColumnActions,
+  ].flatMap(barrel => Object.values(barrel).map(creator => creator.type))
 );
 
 const READONLY_IGNORED = [

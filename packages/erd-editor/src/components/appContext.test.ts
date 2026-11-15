@@ -33,7 +33,6 @@ describe('createAppContext', () => {
     expect(app.toWidth('abcd')).toBe(28);
     expect(app.clock).toBeInstanceOf(Clock);
     expect(app.store).toBeTruthy();
-    expect(app.actions).toBeTruthy();
     expect(app.emitter).toBeTruthy();
     expect(app.shortcut$).toBeTruthy();
     expect(app.keydown$).toBeTruthy();

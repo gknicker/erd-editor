@@ -6,7 +6,6 @@ import {
 } from '@dineug/r-html';
 import { Subject } from 'rxjs';
 
-import { Actions, actions } from '@/engine/actions';
 import {
   createEngineContext,
   EngineContext,
@@ -23,7 +22,6 @@ import {
 } from '@/utils/keyboard-shortcut';
 
 export type AppContext = EngineContext & {
-  actions: Actions;
   store: RxStore;
   keyBindingMap: KeyBindingMap;
   shortcut$: Subject<{ type: KeyBindingName; event: KeyboardEvent }>;
@@ -62,7 +60,6 @@ export function createAppContext(
 
   return Object.freeze({
     ...engineContext,
-    actions,
     store,
     keyBindingMap,
     shortcut$,

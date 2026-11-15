@@ -9,7 +9,6 @@ import {
 } from 'vite-plus/test';
 
 import { ColumnOption, RelationshipType } from '@/constants/schema';
-import { actions as rootActions } from '@/engine/actions';
 import { Clock } from '@/engine/clock';
 import { addRelationshipAction } from '@/engine/modules/relationship/atom.actions';
 import {
@@ -431,13 +430,5 @@ describe('relationship/generator.actions registry', () => {
   it('exposes the relationship generator through actions$', () => {
     expect(Object.keys(actions$)).toEqual(['addRelationshipAction$']);
     expect(actions$.addRelationshipAction$).toBe(addRelationshipAction$);
-  });
-
-  it('reaches the root action registry beside the atom action it wraps', () => {
-    expect(
-      Object.keys(rootActions).filter(key => key.startsWith('addRelationship'))
-    ).toEqual(['addRelationshipAction', 'addRelationshipAction$']);
-    expect(rootActions.addRelationshipAction$).toBe(addRelationshipAction$);
-    expect(rootActions.addRelationshipAction).toBe(addRelationshipAction);
   });
 });
