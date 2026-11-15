@@ -1207,6 +1207,7 @@
         "type": "string",
         "required": true,
         "enum": [
+          "columnAlternateKey",
           "columnAutoIncrement",
           "columnComment",
           "columnDataType",
@@ -1214,6 +1215,7 @@
           "columnNotNull",
           "columnPrimaryKey",
           "columnUnique",
+          "hideReferentialAction",
           "relationship",
           "tableComment"
         ]

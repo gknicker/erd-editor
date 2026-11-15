@@ -7,19 +7,25 @@ import {
   vi,
 } from 'vite-plus/test';
 
-import { createDocumentPng } from '@/services/export-png';
+import { createDocumentPng, createDocumentSvg } from '@/services/export-png';
+import { writeDictionaryCsv } from '@/utils/dictionary-csv';
 import {
+  exportCode,
+  exportCSV,
   exportJSON,
   exportPNG,
   exportSchemaSQL,
+  exportSVG,
   setExportFileCallback,
 } from '@/utils/file/exportFile';
 
 vi.mock('@/services/export-png', () => ({
   createDocumentPng: vi.fn(),
+  createDocumentSvg: vi.fn(),
 }));
 
 const createDocumentPngMock = vi.mocked(createDocumentPng);
+const createDocumentSvgMock = vi.mocked(createDocumentSvg);
 
 const pngRequest = () => ({
   doc: '{"version":"3.0.0"}',
@@ -28,11 +34,7 @@ const pngRequest = () => ({
 });
 
 const FIXED_TIME = new Date(2024, 2, 9, 4, 5, 6);
-
-// FIXED_TIME in local time, every field zero-padded.
-function nowPrefix() {
-  return '2024-03-09T04_05_06';
-}
+const STAMP = '2024-03-09T04_05_06';
 
 async function readBlob(blob: Blob) {
   return await blob.text();
@@ -43,6 +45,7 @@ describe('exportFile', () => {
     vi.useFakeTimers();
     vi.setSystemTime(FIXED_TIME);
     createDocumentPngMock.mockReset();
+    createDocumentSvgMock.mockReset();
   });
 
   afterEach(() => {
@@ -62,7 +65,7 @@ describe('exportFile', () => {
       const [blob, options] = calls[0];
       expect(await readBlob(blob)).toBe('{"a":1}');
       expect(blob.type).toBe('application/json');
-      expect(options.fileName).toBe(`my-schema-${nowPrefix()}.erd.json`);
+      expect(options.fileName).toBe(`my-schema-${STAMP}.erd.json`);
     });
 
     it('falls back to "unnamed" when no name is given', () => {
@@ -71,7 +74,7 @@ describe('exportFile', () => {
 
       exportJSON('{}');
 
-      expect(calls[0].fileName).toBe(`unnamed-${nowPrefix()}.erd.json`);
+      expect(calls[0].fileName).toBe(`unnamed-${STAMP}.erd.json`);
     });
 
     it('falls back to "unnamed" when the name is only whitespace', () => {
@@ -80,7 +83,7 @@ describe('exportFile', () => {
 
       exportJSON('{}', '   ');
 
-      expect(calls[0].fileName).toBe(`unnamed-${nowPrefix()}.erd.json`);
+      expect(calls[0].fileName).toBe(`unnamed-${STAMP}.erd.json`);
     });
 
     it('keeps the untrimmed name when it has non-whitespace content', () => {
@@ -89,7 +92,29 @@ describe('exportFile', () => {
 
       exportJSON('{}', ' a ');
 
-      expect(calls[0].fileName).toBe(` a -${nowPrefix()}.erd.json`);
+      expect(calls[0].fileName).toBe(` a -${STAMP}.erd.json`);
+    });
+  });
+
+  describe('file name', () => {
+    it('writes two-digit fields as they stand and drops the milliseconds', () => {
+      vi.setSystemTime(new Date(2025, 11, 31, 23, 59, 58, 999));
+      const calls: Array<{ fileName: string }> = [];
+      setExportFileCallback((_blob, options) => calls.push(options));
+
+      exportJSON('{}', 'a');
+
+      expect(calls[0].fileName).toBe('a-2025-12-31T23_59_58.erd.json');
+    });
+
+    it('pads a year below 1000 to four digits', () => {
+      vi.setSystemTime(new Date(987, 0, 2, 3, 4, 5));
+      const calls: Array<{ fileName: string }> = [];
+      setExportFileCallback((_blob, options) => calls.push(options));
+
+      exportJSON('{}', 'a');
+
+      expect(calls[0].fileName).toBe('a-0987-01-02T03_04_05.erd.json');
     });
   });
 
@@ -103,7 +128,73 @@ describe('exportFile', () => {
       const [blob, options] = calls[0];
       expect(await readBlob(blob)).toBe('CREATE TABLE a;');
       expect(blob.type).toBe('');
-      expect(options.fileName).toBe(`db-${nowPrefix()}.sql`);
+      expect(options.fileName).toBe(`db-${STAMP}.sql`);
+    });
+  });
+
+  describe('exportCode', () => {
+    it('names the code by the database and the extension it is handed, untyped as SQL is', async () => {
+      const calls: Array<[Blob, { fileName: string }]> = [];
+      setExportFileCallback((blob, options) => calls.push([blob, options]));
+
+      exportCode('export interface A {}\n', '.ts', 'shop');
+      exportCode('{}', '.json', '  ');
+
+      const [blob, options] = calls[0];
+      expect(await readBlob(blob)).toBe('export interface A {}\n');
+      expect(blob.type).toBe('');
+      expect(options.fileName).toBe(`shop-${STAMP}.ts`);
+      expect(calls[1][1].fileName).toBe(`unnamed-${STAMP}.json`);
+    });
+  });
+
+  describe('exportCSV', () => {
+    it('writes the codec text byte for byte as text/csv, its byte order mark and CRLF included', async () => {
+      const calls: Array<[Blob, { fileName: string }]> = [];
+      setExportFileCallback((blob, options) => calls.push([blob, options]));
+
+      exportCSV(
+        writeDictionaryCsv('word', [
+          {
+            name: 'Member',
+            abbreviation: 'MBR',
+            englishName: 'member',
+            description: 'One who joined, "the" member',
+            synonyms: '',
+            forbiddenWords: '',
+          },
+        ]),
+        'word',
+        'shop'
+      );
+
+      const [blob, options] = calls[0];
+      expect(blob.type).toBe('text/csv');
+      expect(
+        Array.from(new Uint8Array(await blob.arrayBuffer())).slice(0, 3)
+      ).toEqual([0xef, 0xbb, 0xbf]);
+      expect(await readBlob(blob)).toBe(
+        '\uFEFFname,abbreviation,englishName,description,synonyms,forbiddenWords\r\n' +
+          'Member,MBR,member,"One who joined, ""the"" member",,\r\n'
+      );
+      expect(options.fileName).toBe(`shop-${STAMP}-words.csv`);
+    });
+
+    it('names each sheet its own file, unnamed while the database has no name', () => {
+      const calls: Array<{ fileName: string }> = [];
+      setExportFileCallback((_blob, options) => calls.push(options));
+
+      exportCSV('', 'term', 'shop');
+      exportCSV('', 'domain', 'shop');
+      exportCSV('', 'word');
+      exportCSV('', 'term', '  ');
+
+      expect(calls.map(({ fileName }) => fileName)).toEqual([
+        `shop-${STAMP}-terms.csv`,
+        `shop-${STAMP}-domains.csv`,
+        `unnamed-${STAMP}-words.csv`,
+        `unnamed-${STAMP}-terms.csv`,
+      ]);
     });
   });
 
@@ -119,7 +210,7 @@ describe('exportFile', () => {
 
       expect(createDocumentPngMock).toHaveBeenCalledWith(request);
       expect(calls[0][0]).toBe(png);
-      expect(calls[0][1].fileName).toBe(`diagram-${nowPrefix()}.png`);
+      expect(calls[0][1].fileName).toBe(`diagram-${STAMP}.png`);
     });
 
     it('renders from the document rather than from anything on screen', async () => {
@@ -147,6 +238,32 @@ describe('exportFile', () => {
     });
   });
 
+  describe('exportSVG', () => {
+    it('writes the svg the document renderer produced as an svg file', async () => {
+      createDocumentSvgMock.mockResolvedValue('<svg/>');
+      const calls: Array<[Blob, { fileName: string }]> = [];
+      setExportFileCallback((blob, options) => calls.push([blob, options]));
+
+      const request = pngRequest();
+      await exportSVG(request, 'diagram');
+
+      expect(createDocumentSvgMock).toHaveBeenCalledWith(request);
+      const [blob, options] = calls[0];
+      expect(blob.type).toBe('image/svg+xml');
+      expect(await readBlob(blob)).toBe('<svg/>');
+      expect(options.fileName).toBe(`diagram-${STAMP}.svg`);
+    });
+
+    it('rejects rather than writing a file when the render fails', async () => {
+      createDocumentSvgMock.mockRejectedValue(new Error('no scene'));
+      const callback = vi.fn();
+      setExportFileCallback(callback);
+
+      await expect(exportSVG(pngRequest())).rejects.toThrow('no scene');
+      expect(callback).not.toHaveBeenCalled();
+    });
+  });
+
   describe('built-in export', () => {
     it('creates an anchor with an object URL and clicks it', async () => {
       const anchor = document.createElement('a');
@@ -166,7 +283,7 @@ describe('exportFile', () => {
         '{"a":1}'
       );
       expect(anchor.getAttribute('href')).toBe('blob:mock-url');
-      expect(anchor.download).toBe(`built-in-${nowPrefix()}.erd.json`);
+      expect(anchor.download).toBe(`built-in-${STAMP}.erd.json`);
       expect(click).toHaveBeenCalledTimes(1);
     });
 
@@ -183,7 +300,7 @@ describe('exportFile', () => {
       exportSchemaSQL('select 1;');
 
       expect(callback).not.toHaveBeenCalled();
-      expect(anchor.download).toBe(`unnamed-${nowPrefix()}.sql`);
+      expect(anchor.download).toBe(`unnamed-${STAMP}.sql`);
     });
   });
 });

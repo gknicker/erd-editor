@@ -1,0 +1,48 @@
+import { isNil, isNumber, isPlainObject, isString } from 'es-toolkit';
+
+import { assign, entryId } from '@/helper';
+import { DeepPartial } from '@/internal-types';
+import { TableGroup } from '@/v3/schema/tableGroup.entity';
+
+export const createTableGroup = (): TableGroup => ({
+  id: '',
+  name: '',
+  color: '',
+  ui: {
+    x: 200,
+    y: 100,
+    width: 400,
+    height: 300,
+    zIndex: 1,
+  },
+});
+
+export function createAndMergeTableGroupEntities(
+  json?: DeepPartial<Record<string, TableGroup>>
+): Record<string, TableGroup> {
+  const entities: Record<string, TableGroup> = {};
+  if (!isPlainObject(json) || isNil(json)) return entities;
+
+  for (const [key, value] of Object.entries(json)) {
+    if (!isPlainObject(value)) continue;
+    const target = createTableGroup();
+    const assignString = assign(isString, target, value);
+    const uiAssignNumber = assign(isNumber, target.ui, value.ui);
+
+    target.id = entryId(key, value);
+    assignString('name');
+    assignString('color');
+
+    uiAssignNumber('x');
+    uiAssignNumber('y');
+    uiAssignNumber('width');
+    uiAssignNumber('height');
+    uiAssignNumber('zIndex');
+
+    if (target.id) {
+      entities[target.id] = target;
+    }
+  }
+
+  return entities;
+}

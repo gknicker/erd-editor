@@ -1,7 +1,7 @@
 import { ERDEditorSchemaV3 } from '@dineug/erd-editor-schema';
 import { describe, expect, it } from 'vite-plus/test';
 
-import { CANVAS_SIZE_MAX, CANVAS_SIZE_MIN, Database } from '@/constants/schema';
+import { Database } from '@/constants/schema';
 import { createEngineContext } from '@/engine/context';
 import { Column } from '@/internal-types';
 import { schemaDBMLParserToSchemaJson } from '@/utils/schema-dbml-parser';
@@ -118,28 +118,11 @@ describe('schemaDBMLParserToSchemaJson', () => {
     ]);
   });
 
-  describe('canvas size', () => {
-    it('grows with the table count', () => {
-      const source = Array.from(
-        { length: 40 },
-        (_, index) => `Table t${index} { id int }`
-      ).join('\n');
+  it('writes no canvas size, the sort reading its width off the tables', () => {
+    const { settings } = parse(SIMPLE);
 
-      expect(parse(source).settings.width).toBe(4000);
-    });
-
-    it('never falls below the minimum', () => {
-      expect(parse(SIMPLE).settings.width).toBe(CANVAS_SIZE_MIN);
-    });
-
-    it('never rises above the maximum', () => {
-      const source = Array.from(
-        { length: 300 },
-        (_, index) => `Table t${index} { id int }`
-      ).join('\n');
-
-      expect(parse(source).settings.height).toBe(CANVAS_SIZE_MAX);
-    });
+    expect(settings).not.toHaveProperty('width');
+    expect(settings).not.toHaveProperty('height');
   });
 
   describe('the prepare callback', () => {
@@ -150,15 +133,6 @@ describe('schemaDBMLParserToSchemaJson', () => {
       });
 
       expect(schema.settings.databaseName).toBe('shop');
-    });
-
-    it('keeps the canvas size the importer computed', () => {
-      const schema = parse(SIMPLE, incoming => {
-        incoming.settings.databaseName = 'shop';
-        return incoming;
-      });
-
-      expect(schema.settings.width).toBe(CANVAS_SIZE_MIN);
     });
 
     it('reaches the columns, so the dialect decides an enum column', () => {
@@ -204,7 +178,6 @@ Table orders { state status }`;
       const schema = parse(null as unknown as string);
 
       expect(schema.doc.tableIds).toEqual([]);
-      expect(schema.settings.width).toBe(CANVAS_SIZE_MIN);
     });
   });
 
@@ -269,6 +242,91 @@ Table orders { state status }`;
           .filter(column => column.name === 'posts')
           .map(column => column.dataType)
       ).toEqual(['Post']);
+    });
+  });
+
+  describe('table groups as dbdiagram.io writes them', () => {
+    // Its group again is what @dbml/parse refuses, a table already in a
+    // group and one that is not declared, and empty is one it takes.
+    const GROUPED_DBML = `Table ecommerce.merchants {
+  id int [pk]
+}
+
+Table ecommerce.products {
+  id int [pk]
+  merchant_id int [ref: > ecommerce.merchants.id]
+}
+
+Table users as U {
+  id int [pk]
+}
+
+Table countries {
+  code int [pk]
+}
+
+TableGroup e_commerce [color: #345, note: 'Contains tables related to e-commerce', owner: "sales"] {
+  ecommerce.merchants
+  "ecommerce"."products"
+
+  Note: '''
+  The marketplace
+  '''
+}
+
+TableGroup people {
+  U // the alias of users
+}
+
+TableGroup again {
+  users
+  missing
+}
+
+TableGroup empty {
+}`;
+
+    const groupsOf = (schema: Schema) =>
+      schema.doc.tableGroupIds.map(
+        id => schema.collections.tableGroupEntities[id]
+      );
+
+    it('writes each group with a table into the document, its name and color kept', () => {
+      expect(
+        groupsOf(parse(GROUPED_DBML)).map(({ name, color }) => ({
+          name,
+          color,
+        }))
+      ).toEqual([
+        { name: 'e_commerce', color: '#345' },
+        { name: 'people', color: '' },
+      ]);
+    });
+
+    it('writes the group of each table it puts in one, and none on the rest', () => {
+      const schema = parse(GROUPED_DBML);
+      const [eCommerce, people] = schema.doc.tableGroupIds;
+
+      expect(
+        Object.fromEntries(
+          schema.doc.tableIds.map(id => {
+            const { name, groupId } = schema.collections.tableEntities[id];
+            return [name, groupId ?? ''];
+          })
+        )
+      ).toEqual({
+        ecommerce_merchants: eCommerce,
+        ecommerce_products: eCommerce,
+        users: people,
+        countries: '',
+      });
+    });
+
+    it('writes no group list for a file with no group in it', () => {
+      const schema = JSON.parse(schemaDBMLParserToSchemaJson(SIMPLE, ctx));
+
+      expect(schema.doc.tableGroupIds).toBeUndefined();
+      expect(schema.collections.tableGroupEntities).toBeUndefined();
     });
   });
 });

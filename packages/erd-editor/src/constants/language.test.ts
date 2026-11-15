@@ -20,6 +20,14 @@ describe('LanguageToLangMap', () => {
       [Language.Drizzle]: 'typescript',
       [Language.DBML]: 'sql',
       [Language.AML]: 'sql',
+      [Language.Mermaid]: 'mermaid',
+      [Language.PHP]: 'php',
+      [Language.Doctrine]: 'php',
+      [Language.Rust]: 'rust',
+      [Language.SeaORM]: 'rust',
+      [Language.Swift]: 'swift',
+      [Language.Zod]: 'typescript',
+      [Language.JSONSchema]: 'json',
     });
   });
 
@@ -81,6 +89,32 @@ describe('LanguageToLangMap', () => {
     expect(LanguageToLangMap[Language.AML]).toBe(
       LanguageToLangMap[Language.DBML]
     );
+  });
+
+  it('renders Mermaid with the Mermaid highlighter', () => {
+    expect(LanguageToLangMap[Language.Mermaid]).toBe('mermaid');
+  });
+
+  it('renders SeaORM with the same highlighter as Rust', () => {
+    expect(LanguageToLangMap[Language.SeaORM]).toBe('rust');
+    expect(LanguageToLangMap[Language.SeaORM]).toBe(
+      LanguageToLangMap[Language.Rust]
+    );
+  });
+
+  it('renders Swift with the Swift highlighter', () => {
+    expect(LanguageToLangMap[Language.Swift]).toBe('swift');
+  });
+
+  it('renders Zod with the same highlighter as TypeScript', () => {
+    expect(LanguageToLangMap[Language.Zod]).toBe('typescript');
+    expect(LanguageToLangMap[Language.Zod]).toBe(
+      LanguageToLangMap[Language.TypeScript]
+    );
+  });
+
+  it('renders JSON Schema with the JSON highlighter', () => {
+    expect(LanguageToLangMap[Language.JSONSchema]).toBe('json');
   });
 
   it('returns undefined for a language flag that does not exist', () => {

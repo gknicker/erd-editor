@@ -1,5 +1,6 @@
 import {
   createRef,
+  DOMTemplateLiterals,
   FC,
   innerHTML,
   nextTick,
@@ -9,6 +10,7 @@ import {
   watch,
 } from '@dineug/r-html';
 
+import { useI18n } from '@/components/localeContext';
 import Icon from '@/components/primitives/icon/Icon';
 import type { Lang } from '@/constants/language';
 import { useUnmounted } from '@/hooks/useUnmounted';
@@ -28,10 +30,16 @@ export type CodeBlockProps = {
   lang: Lang;
   theme?: 'dark' | 'light';
   onCopy?: (value: string) => void;
+  /**
+   * Buttons after the copy button in the top corner, shown with or without a
+   * hover; --code-block-background there holds the colour the code sits on.
+   */
+  tools?: DOMTemplateLiterals | null;
 };
 
 const CodeBlock: FC<CodeBlockProps> = (props, ctx) => {
   const preview = createRef<HTMLDivElement>();
+  const i18n = useI18n(ctx);
   const { addUnsubscribe } = useUnmounted();
 
   const state = observable({
@@ -142,9 +150,11 @@ const CodeBlock: FC<CodeBlockProps> = (props, ctx) => {
 
   return () => {
     const value = getValue();
+    const { t } = i18n.value;
 
+    // Code reads left to right in every language, its copy button included.
     return (
-      <div class={styles.root}>
+      <div class={styles.root} prop:dir="ltr">
         <div
           class={['scrollbar', styles.scroller]}
           style={{
@@ -161,7 +171,7 @@ const CodeBlock: FC<CodeBlockProps> = (props, ctx) => {
             </div>
             <textarea
               class={styles.textarea}
-              aria-label="Code"
+              aria-label={t('code.label')}
               aria-readonly="true"
               inputmode="none"
               tabindex="0"
@@ -176,8 +186,21 @@ const CodeBlock: FC<CodeBlockProps> = (props, ctx) => {
             ></textarea>
           </div>
         </div>
-        <div class={styles.clipboard} title="Copy" on:click={handleCopy}>
-          <Icon name="copy" useTransition={true} />
+        <div
+          class={styles.tools}
+          style={{
+            '--code-block-background':
+              state.backgroundColor || 'var(--canvas-background)',
+          }}
+        >
+          <div
+            class={styles.clipboard}
+            title={t('code.copy')}
+            on:click={handleCopy}
+          >
+            <Icon name="copy" useTransition={true} />
+          </div>
+          {props.tools ?? null}
         </div>
       </div>
     );

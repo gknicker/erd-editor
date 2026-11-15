@@ -68,6 +68,14 @@ jobs:
       # server runs peer.js in Node: five browser tokens and any import outside
       # its allowlist fail here, first, so a size miss never hides the verdict.
       - run: pnpm peer-graph
+      # One file per module, the declarations, the two umd builds run on
+      # happy-dom, the workers' stubs and urls, the viewer's graph against
+      # scripts/viewer-boundary.json, and the graph Obsidian's loader takes.
+      - run: pnpm dist-shape
+      # Bundles dist as consumers do, with Vite, Rolldown, webpack and Rspack,
+      # runs each bundle to see which tags it defined, and reads the bundlers'
+      # module graphs for what the viewer's and the package root's leave out.
+      - run: pnpm consumer-bundles
       # Also reads dist. It is a regression watch rather than a cap: the budget
       # is set to catch an abnormal jump, not every byte.
       - run: pnpm size
@@ -112,6 +120,29 @@ jobs:
           path: packages/erd-editor/e2e/.report
           # The action skips anything under a dot-prefixed folder by default, so
           # the whole report is filtered out and a green run reports no files.
+          include-hidden-files: true
+          retention-days: 7
+
+  # The dev page loads erd-editor's dist/, the compactor that and this
+  # package's, and the e2e typecheck reads erd-editor's .d.ts, so the build
+  # comes first. Its relay and dev page take 5182 and 5181, which no other
+  # suite here binds.
+  yjs-e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-workspace
+      - name: Install Playwright browsers
+        run: pnpm --filter @dineug/erd-editor-yjs exec playwright install --with-deps chromium
+      - run: pnpm exec vp run --fail-if-no-match --filter @dineug/erd-editor-yjs build
+      - run: pnpm --filter @dineug/erd-editor-yjs e2e:typecheck
+      - run: pnpm --filter @dineug/erd-editor-yjs e2e
+      - uses: actions/upload-artifact@v7
+        if: ${{ !cancelled() }}
+        with:
+          name: yjs-playwright-report
+          path: packages/erd-editor-yjs/e2e/.report
+          # Dot-prefixed, so the action would skip the whole report without this.
           include-hidden-files: true
           retention-days: 7
 

@@ -36,6 +36,10 @@ export type Theme = {
   tableBorder: string;
   tableShadow: string;
 
+  tableGroupHeaderBackground: string;
+  tableGroupBackground: string;
+  tableGroupBorder: string;
+
   memoBackground: string;
   memoSelect: string;
   memoBorder: string;
@@ -44,6 +48,11 @@ export type Theme = {
   columnSelect: string;
   columnSelectHover: string;
   columnHover: string;
+
+  columnHandleBackground: string;
+  columnHandleBorder: string;
+  columnHandleHoverBackground: string;
+  columnHandleHoverBorder: string;
 
   relationshipHover: string;
 
@@ -65,6 +74,15 @@ export type Theme = {
 
   toastBackground: string;
   toastBorder: string;
+  toastSuccess: string;
+  toastError: string;
+
+  findReplaceError: string;
+
+  mapColumnsError: string;
+
+  schemaSqlWarningBackground: string;
+  schemaSqlWarningForeground: string;
 
   dragSelectBackground: string;
   dragSelectBorder: string;
@@ -84,12 +102,28 @@ export type Theme = {
   keyFK: string;
   keyPFK: string;
 
-  diffInsertBackground: string;
-  diffDeleteBackground: string;
-  diffCrossBackground: string;
+  treeBackground: string;
+  treeRowHover: string;
+  treeRowCurrent: string;
+  treeMuted: string;
+  treeMatch: string;
+
+  explorerBackground: string;
+  explorerBorder: string;
+
+  dictionaryErrorForeground: string;
+  dictionaryErrorBackground: string;
+  dictionaryWarningForeground: string;
+  dictionaryWarningBackground: string;
+  dictionaryBackground: string;
+  dictionaryHeaderBackground: string;
+  dictionaryGridLine: string;
+  dictionaryHeaderSelect: string;
+
   diffInsertForeground: string;
   diffDeleteForeground: string;
-  diffCrossForeground: string;
+  diffModifyForeground: string;
+  diffRenameForeground: string;
 };
 
 export const ThemeTokens: ReadonlyArray<keyof Theme> = [
@@ -128,6 +162,10 @@ export const ThemeTokens: ReadonlyArray<keyof Theme> = [
   'tableBorder',
   'tableShadow',
 
+  'tableGroupHeaderBackground',
+  'tableGroupBackground',
+  'tableGroupBorder',
+
   'memoBackground',
   'memoSelect',
   'memoBorder',
@@ -136,6 +174,11 @@ export const ThemeTokens: ReadonlyArray<keyof Theme> = [
   'columnSelect',
   'columnSelectHover',
   'columnHover',
+
+  'columnHandleBackground',
+  'columnHandleBorder',
+  'columnHandleHoverBackground',
+  'columnHandleHoverBorder',
 
   'relationshipHover',
 
@@ -157,6 +200,15 @@ export const ThemeTokens: ReadonlyArray<keyof Theme> = [
 
   'toastBackground',
   'toastBorder',
+  'toastSuccess',
+  'toastError',
+
+  'findReplaceError',
+
+  'mapColumnsError',
+
+  'schemaSqlWarningBackground',
+  'schemaSqlWarningForeground',
 
   'dragSelectBackground',
   'dragSelectBorder',
@@ -176,12 +228,28 @@ export const ThemeTokens: ReadonlyArray<keyof Theme> = [
   'keyFK',
   'keyPFK',
 
-  'diffInsertBackground',
-  'diffDeleteBackground',
-  'diffCrossBackground',
+  'treeBackground',
+  'treeRowHover',
+  'treeRowCurrent',
+  'treeMuted',
+  'treeMatch',
+
+  'explorerBackground',
+  'explorerBorder',
+
+  'dictionaryErrorForeground',
+  'dictionaryErrorBackground',
+  'dictionaryWarningForeground',
+  'dictionaryWarningBackground',
+  'dictionaryBackground',
+  'dictionaryHeaderBackground',
+  'dictionaryGridLine',
+  'dictionaryHeaderSelect',
+
   'diffInsertForeground',
   'diffDeleteForeground',
-  'diffCrossForeground',
+  'diffModifyForeground',
+  'diffRenameForeground',
 ];
 
 /** The custom property one token is published under on :host. */

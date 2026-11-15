@@ -1,3 +1,5 @@
+import '@dineug/erd-editor/erd-editor.js';
+
 import {
   type ErdEditorElement,
   setExportFileCallback,
@@ -11,13 +13,16 @@ import {
   hostExportFileCommand,
   hostImportFileCommand,
   hostInitialCommand,
+  hostSaveLocaleCommand,
   hostSaveReplicationCommand,
   hostSaveThemeCommand,
   hostSaveValueCommand,
+  type LocaleSetting,
   type ThemeOptions,
   webviewImportFileCommand,
   webviewInitialValueCommand,
   webviewReplicationCommand,
+  webviewUpdateLocaleCommand,
   webviewUpdateReadonlyCommand,
   webviewUpdateThemeCommand,
 } from '@dineug/erd-editor-webview-bridge';
@@ -30,7 +35,7 @@ export interface WebviewHost {
   dispatch: (action: AnyAction) => void;
   /** The replica worker's name, one per host, so two IDEs never share a worker. */
   workerName: string;
-  /** What an auto appearance means on this host. Left out, it means dark. */
+  /** What an auto appearance means on this host, unless its theme update names it. Left out, dark. */
   resolveAppearance?: () => Appearance;
   /** True hands file dialogs to the host; false keeps the editor's own file input. */
   importFile?: boolean;
@@ -38,9 +43,40 @@ export interface WebviewHost {
   onMounted?: () => void;
 }
 
+/** The editor and its theme builder spell the host's auto as system. */
+type EditorAppearance = Appearance | 'system';
+type EditorThemeOptions = Omit<ThemeOptions, 'appearance'> & {
+  appearance: EditorAppearance;
+};
+
+const toEditorAppearance = (
+  appearance: ThemeOptions['appearance']
+): EditorAppearance => (appearance === 'auto' ? 'system' : appearance);
+
+const toHostAppearance = (
+  appearance: EditorAppearance
+): ThemeOptions['appearance'] =>
+  appearance === 'system' ? 'auto' : appearance;
+
+/**
+ * The editor spells the host's auto locale as system too. Both mappings type
+ * the bridge's code list against the editor's, so a code one side lacks fails
+ * the build.
+ */
+type EditorLocale = Parameters<ErdEditorElement['setLocale']>[0];
+
+const toEditorLocale = (locale: LocaleSetting): EditorLocale =>
+  locale === 'auto' ? 'system' : locale;
+
+const toHostLocale = (locale: EditorLocale): LocaleSetting =>
+  locale === 'system' ? 'auto' : locale;
+
+/** How a host's import is placed, the rule the editor's own import menu follows. */
+const HOST_IMPORT = { placement: 'auto' } as const;
+
 export interface WebviewClient {
   editor: ErdEditorElement;
-  /** Re-applies the appearance while the theme is auto, for a host whose system theme moved. */
+  /** Re-reads what auto shows, for a host whose system theme moved. */
   refreshAppearance: () => void;
   /** Drops the listeners and the worker, for a page that mounts more than once. */
   dispose: () => void;
@@ -64,8 +100,11 @@ export function mountWebview(host: WebviewHost): WebviewClient {
   });
   const resolveAppearance =
     host.resolveAppearance ?? ((): Appearance => Appearance.dark);
+  // Once a theme update names what auto shows, it outranks resolveAppearance.
+  let namedSystemAppearance: Appearance | undefined;
+  const systemAppearance = () => namedSystemAppearance ?? resolveAppearance();
 
-  let appearance: ThemeOptions['appearance'] = Appearance.dark;
+  editor.setSystemAppearance(systemAppearance());
 
   const dispatch = (action: AnyAction) => {
     host.dispatch(action);
@@ -91,46 +130,75 @@ export function mountWebview(host: WebviewHost): WebviewClient {
   });
 
   const handleChangePresetTheme = (event: Event) => {
-    const e = event as CustomEvent<ThemeOptions>;
-    dispatch(Bridge.executeCommand(hostSaveThemeCommand, e.detail));
-    appearance = e.detail.appearance;
+    const { detail } = event as CustomEvent<EditorThemeOptions>;
+    dispatch(
+      Bridge.executeCommand(hostSaveThemeCommand, {
+        ...detail,
+        appearance: toHostAppearance(detail.appearance),
+      })
+    );
+  };
+
+  const handleChangeLocale = (event: Event) => {
+    const { detail } = event as CustomEvent<{ locale: EditorLocale }>;
+    dispatch(
+      Bridge.executeCommand(hostSaveLocaleCommand, {
+        locale: toHostLocale(detail.locale),
+      })
+    );
   };
 
   const disposeCommands = Bridge.mergeRegister(
-    bridge.registerCommand(webviewImportFileCommand, ({ type, op, value }) => {
-      switch (type) {
-        case 'json':
-          op === 'set' ? (editor.value = value) : editor.setDiffValue(value);
-          break;
-        case 'sql':
-          op === 'set' && editor.setSchemaSQL(value);
-          break;
-        case 'graphql':
-          op === 'set' && editor.setSchemaGraphQL(value);
-          break;
-        case 'dbml':
-          op === 'set' && editor.setSchemaDBML(value);
-          break;
-        case 'aml':
-          op === 'set' && editor.setSchemaAML(value);
-          break;
-        default: {
-          // The host has already read the file by the time we get here, so an
-          // unhandled type is a silent loss. type is never in this arm, so
-          // widening the bridge union without adding a case breaks the build.
-          const unhandled: never = type;
-          throw new Error(`unsupported import file type "${unhandled}"`);
+    bridge.registerCommand(
+      webviewImportFileCommand,
+      ({ type, op, value, mode }) => {
+        // Only an append is named, so a host that relays no mode replaces.
+        const append = mode === 'append';
+        const options = append ? { ...HOST_IMPORT, mode } : HOST_IMPORT;
+
+        switch (type) {
+          case 'json':
+            if (op === 'diff') {
+              editor.setDiffValue(value);
+            } else if (append) {
+              editor.setSchemaJSON(value, { mode });
+            } else {
+              editor.value = value;
+            }
+            break;
+          case 'sql':
+            op === 'set' && editor.setSchemaSQL(value, options);
+            break;
+          case 'graphql':
+            op === 'set' && editor.setSchemaGraphQL(value, options);
+            break;
+          case 'dbml':
+            op === 'set' && editor.setSchemaDBML(value, options);
+            break;
+          case 'aml':
+            op === 'set' && editor.setSchemaAML(value, options);
+            break;
+          default: {
+            // The host has already read the file by the time we get here, so an
+            // unhandled type is a silent loss. type is never in this arm, so
+            // widening the bridge union without adding a case breaks the build.
+            const unhandled: never = type;
+            throw new Error(`unsupported import file type "${unhandled}"`);
+          }
         }
       }
-    }),
+    ),
     bridge.registerCommand(webviewInitialValueCommand, ({ value }) => {
       dispatchWorker(
         Bridge.executeCommand(webviewInitialValueCommand, { value })
       );
 
       editor.addEventListener('changePresetTheme', handleChangePresetTheme);
+      editor.addEventListener('changeLocale', handleChangeLocale);
       editor.setInitialValue(value);
       editor.enableThemeBuilder = true;
+      editor.enableLocalePicker = true;
+      editor.enableWelcomeScreen = true;
       sharedStore.subscribe(actions => {
         dispatchWorker(
           Bridge.executeCommand(webviewReplicationCommand, { actions })
@@ -148,24 +216,31 @@ export function mountWebview(host: WebviewHost): WebviewClient {
         Bridge.executeCommand(webviewReplicationCommand, { actions })
       );
     }),
-    bridge.registerCommand(webviewUpdateThemeCommand, payload => {
-      if (payload.appearance) {
-        appearance = payload.appearance;
+    bridge.registerCommand(
+      webviewUpdateThemeCommand,
+      ({ systemAppearance: named, ...payload }) => {
+        if (named) namedSystemAppearance = named;
+        editor.setSystemAppearance(systemAppearance());
+        editor.setPresetTheme({
+          ...payload,
+          appearance:
+            payload.appearance && toEditorAppearance(payload.appearance),
+        });
       }
-
-      editor.setPresetTheme({
-        ...payload,
-        appearance:
-          payload.appearance === 'auto'
-            ? resolveAppearance()
-            : payload.appearance,
-      });
-    }),
+    ),
+    bridge.registerCommand(
+      webviewUpdateLocaleCommand,
+      ({ locale, systemLocale }) => {
+        // What system means goes first, so a switch to system shows it at once.
+        if (systemLocale !== undefined) editor.setSystemLocale(systemLocale);
+        editor.setLocale(toEditorLocale(locale));
+      }
+    ),
     bridge.registerCommand(webviewUpdateReadonlyCommand, readonly => {
       editor.readonly = readonly;
     }),
-    workerBridge.registerCommand(hostSaveValueCommand, ({ value }) => {
-      dispatch(Bridge.executeCommand(hostSaveValueCommand, { value }));
+    workerBridge.registerCommand(hostSaveValueCommand, payload => {
+      dispatch(Bridge.executeCommand(hostSaveValueCommand, payload));
     })
   );
 
@@ -183,8 +258,7 @@ export function mountWebview(host: WebviewHost): WebviewClient {
   return {
     editor,
     refreshAppearance: () => {
-      if (appearance !== 'auto') return;
-      editor.setPresetTheme({ appearance: resolveAppearance() });
+      editor.setSystemAppearance(systemAppearance());
     },
     dispose: () => {
       disposeCommands();
@@ -195,6 +269,7 @@ export function mountWebview(host: WebviewHost): WebviewClient {
       );
       replicationStoreWorker.terminate();
       editor.removeEventListener('changePresetTheme', handleChangePresetTheme);
+      editor.removeEventListener('changeLocale', handleChangeLocale);
     },
   };
 }

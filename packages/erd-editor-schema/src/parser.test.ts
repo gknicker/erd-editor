@@ -1,11 +1,52 @@
+import { omit } from 'es-toolkit';
 import { describe, expect, it } from 'vite-plus/test';
 
-import { parser, parserV2, toJson } from '@/parser';
-import { SchemaV3Constants } from '@/v3';
+import { parser, toJson } from '@/parser';
+import { createSchema, SchemaV3Constants } from '@/v3';
 import { migrateScrollToOrigin } from '@/v3/parser/migrateScroll';
+import { setSettingLock } from '@/v3/schema/settings';
 
 const V3_SCHEMA_URL =
   'https://raw.githubusercontent.com/dineug/erd-editor/main/json-schema/schema.json';
+
+const {
+  BracketType,
+  CanvasType,
+  InvertedLockSettings,
+  Language,
+  LockSettingFields,
+  LockSettingType,
+  NameCase,
+  NameViewMode,
+} = SchemaV3Constants;
+const LOCK_ALL = 63;
+
+const DEFAULT_VIEW = {
+  originX: 0,
+  originY: 0,
+  zoomLevel: 1,
+  canvasType: CanvasType.ERD,
+};
+const DEFAULTS = {
+  ...DEFAULT_VIEW,
+  language: Language.GraphQL,
+  tableNameCase: NameCase.pascalCase,
+  columnNameCase: NameCase.camelCase,
+  bracketType: BracketType.none,
+};
+const SAVED_VIEW = {
+  originX: -40,
+  originY: 90,
+  zoomLevel: 0.5,
+  canvasType: CanvasType.schemaSQL,
+};
+const SAVED_CODE = {
+  language: Language.TypeScript,
+  tableNameCase: NameCase.snakeCase,
+  columnNameCase: NameCase.snakeCase,
+  bracketType: BracketType.backtick,
+};
+const LIVE = { ...SAVED_VIEW, originY: -60, ...SAVED_CODE };
 
 describe('parser', () => {
   it('parses a v3 document through the v3 parser', () => {
@@ -24,7 +65,7 @@ describe('parser', () => {
 
     expect(schema.$schema).toBe(V3_SCHEMA_URL);
     expect(schema.version).toBe('3.0.0');
-    expect(schema.settings.width).toBe(4000);
+    expect(schema.settings).not.toHaveProperty('width');
     expect(schema.settings.databaseName).toBe('shop');
     expect(schema.doc.tableIds).toEqual(['t1']);
     expect(schema.collections.tableEntities.t1.name).toBe('users');
@@ -44,7 +85,7 @@ describe('parser', () => {
     );
 
     expect(schema.version).toBe('3.0.0');
-    expect(schema.settings.width).toBe(3000);
+    expect(schema.settings).not.toHaveProperty('width');
     expect(schema.settings.databaseName).toBe('legacy');
     expect(schema.doc.tableIds).toEqual(['t1']);
     expect(schema.collections.tableEntities.t1.name).toBe('users');
@@ -59,29 +100,33 @@ describe('parser', () => {
       relationshipIds: [],
       indexIds: [],
       memoIds: [],
+      tableGroupIds: [],
+      wordIds: [],
+      termIds: [],
+      domainIds: [],
     });
   });
 
-  it('migrates a legacy document onto the origin pair, legacy pair intact', () => {
+  it('migrates a legacy document onto the origin pair, keeping no legacy field', () => {
     const settings = {
       width: 3000,
       height: 5000,
       zoomLevel: 0.4,
       scrollLeft: -120,
       scrollTop: 340,
+      lockSettings: LOCK_ALL,
     };
     const schema = parser(JSON.stringify({ version: '3.0.0', settings }));
 
     expect(schema.settings).toMatchObject(migrateScrollToOrigin(settings));
-    expect(schema.settings.scrollLeft).toBe(settings.scrollLeft);
-    expect(schema.settings.scrollTop).toBe(settings.scrollTop);
+    for (const field of ['width', 'height', 'scrollLeft', 'scrollTop']) {
+      expect(schema.settings).not.toHaveProperty(field);
+    }
   });
 
-  it('leaves an empty source at four zeroes, where the term is zero too', () => {
+  it('leaves an empty source at the zero origin, where the term is zero too', () => {
     const schema = parser('{"version":"3.0.0"}');
 
-    expect(schema.settings.scrollLeft).toBe(0);
-    expect(schema.settings.scrollTop).toBe(0);
     expect(schema.settings.originX).toBe(0);
     expect(schema.settings.originY).toBe(0);
     expect(schema.settings.zoomLevel).toBe(1);
@@ -89,43 +134,6 @@ describe('parser', () => {
 
   it('throws on malformed json', () => {
     expect(() => parser('not json')).toThrow(SyntaxError);
-  });
-});
-
-describe('parserV2', () => {
-  it('converts a v3 document down to v2', () => {
-    const schema = parserV2(
-      JSON.stringify({
-        version: '3.0.0',
-        settings: { width: 4000, databaseName: 'shop' },
-        doc: { tableIds: ['t1'], memoIds: ['m1'] },
-        collections: {
-          tableEntities: { t1: { id: 't1', name: 'users' } },
-          memoEntities: { m1: { id: 'm1', value: 'note' } },
-        },
-      })
-    );
-
-    expect(schema.canvas.width).toBe(4000);
-    expect(schema.canvas.databaseName).toBe('shop');
-    expect(schema.table.tables[0].name).toBe('users');
-    expect(schema.memo.memos[0].value).toBe('note');
-  });
-
-  it('parses a v2 document as is', () => {
-    const schema = parserV2(
-      JSON.stringify({
-        canvas: { width: 3000 },
-        table: { tables: [{ id: 't1', name: 'users' }], indexes: [] },
-      })
-    );
-
-    expect(schema.canvas.width).toBe(3000);
-    expect(schema.table.tables[0].id).toBe('t1');
-  });
-
-  it('throws on malformed json', () => {
-    expect(() => parserV2('{')).toThrow(SyntaxError);
   });
 });
 
@@ -152,38 +160,36 @@ describe('toJson', () => {
     expect(toJson(schema)).toContain('\n  "version": "3.0.0"');
   });
 
-  it('writes both pairs when nothing is ignored', () => {
-    const schema = parser('{"version":"3.0.0"}');
-    schema.settings.scrollTop = 100;
-    schema.settings.scrollLeft = 200;
+  it('writes the origin and the zoom as they stand while the viewport is unlocked', () => {
+    const schema = parser('{"version":"3.0.0","settings":{"lockSettings":0}}');
     schema.settings.originX = -40;
     schema.settings.originY = -60;
     schema.settings.zoomLevel = 0.5;
 
     const json = JSON.parse(toJson(schema));
 
-    expect(json.settings.scrollTop).toBe(100);
-    expect(json.settings.scrollLeft).toBe(200);
     expect(json.settings.originX).toBe(-40);
     expect(json.settings.originY).toBe(-60);
     expect(json.settings.zoomLevel).toBe(0.5);
   });
 
-  it('writes back the legacy pair a document arrived with, byte for byte', () => {
+  it('writes none of the legacy fields a document arrived with', () => {
     const settings = {
       width: 3000,
       height: 5000,
       zoomLevel: 0.4,
       scrollLeft: -120,
       scrollTop: 340,
+      lockSettings: LOCK_ALL,
     };
     const source = JSON.stringify({ version: '3.0.0', settings });
 
     const json = JSON.parse(toJson(parser(source)));
 
-    expect(json.settings.scrollLeft).toBe(settings.scrollLeft);
-    expect(json.settings.scrollTop).toBe(settings.scrollTop);
     expect(json.settings).toMatchObject(migrateScrollToOrigin(settings));
+    for (const field of ['width', 'height', 'scrollLeft', 'scrollTop']) {
+      expect(json.settings).not.toHaveProperty(field);
+    }
   });
 
   it('parses its own output back to the same in-memory document', () => {
@@ -195,6 +201,7 @@ describe('toJson', () => {
         zoomLevel: 1.5,
         scrollLeft: -137.25,
         scrollTop: 1234.5,
+        lockSettings: LOCK_ALL,
       },
       doc: { tableIds: ['t1'] },
       collections: { tableEntities: { t1: { id: 't1', name: 'users' } } },
@@ -204,92 +211,608 @@ describe('toJson', () => {
     expect(parser(toJson(schema))).toEqual(schema);
   });
 
-  it('zeroes only the origin pair when the scroll setting is ignored', () => {
-    const schema = parser('{"version":"3.0.0"}');
-    schema.settings.scrollTop = 100;
-    schema.settings.scrollLeft = 200;
-    schema.settings.originX = -40;
-    schema.settings.originY = -60;
-    schema.settings.zoomLevel = 0.5;
-    schema.settings.ignoreSaveSettings =
-      SchemaV3Constants.SaveSettingType.scroll;
+  it('writes each locked setting at its lock, leaving the live one alone', () => {
+    const schema = parser('{"version":"3.0.0","settings":{"lockSettings":63}}');
+    Object.assign(schema.settings, LIVE);
 
     const json = JSON.parse(toJson(schema));
 
-    expect(json.settings.originX).toBe(0);
-    expect(json.settings.originY).toBe(0);
-    expect(json.settings.scrollTop).toBe(100);
-    expect(json.settings.scrollLeft).toBe(200);
-    expect(json.settings.zoomLevel).toBe(0.5);
+    expect(json.settings).toMatchObject(DEFAULTS);
+    expect(schema.settings).toMatchObject(LIVE);
   });
 
-  it('reloads a scroll-ignoring export at the origin it wrote', () => {
-    const schema = parser('{"version":"3.0.0"}');
-    schema.settings.scrollTop = 100;
-    schema.settings.scrollLeft = 200;
+  it.each(
+    Object.entries(LockSettingType).map(([name, bit]) => [
+      name,
+      bit,
+      LockSettingFields[bit],
+    ])
+  )('writes %s alone at its lock when only it is locked', (_, bit, fields) => {
+    const lockSettings = setSettingLock(InvertedLockSettings, bit, true);
+    const schema = parser(
+      JSON.stringify({ version: '3.0.0', settings: { lockSettings } })
+    );
+    Object.assign(schema.settings, LIVE, {
+      nameViewMode: NameViewMode.logical,
+    });
+
+    const { settings } = JSON.parse(toJson(schema));
+
+    for (const field of Object.keys(LIVE) as Array<keyof typeof LIVE>) {
+      expect(settings[field]).toBe(
+        fields.includes(field) ? DEFAULTS[field] : LIVE[field]
+      );
+    }
+    expect(settings.nameViewMode).toBe(
+      fields.includes('nameViewMode') ? undefined : NameViewMode.logical
+    );
+  });
+
+  it('locks the origin and the zoom together as the viewport', () => {
+    expect(LockSettingFields[LockSettingType.viewport]).toEqual([
+      'originX',
+      'originY',
+      'zoomLevel',
+    ]);
+  });
+
+  it('writes the lockedValues it held, not a later lock or the live value', () => {
+    const schema = createSchema();
+    Object.assign(schema.settings.lockedValues, {
+      originX: 12,
+      zoomLevel: 0.8,
+    });
     schema.settings.originX = -40;
-    schema.settings.originY = -60;
-    schema.settings.ignoreSaveSettings =
-      SchemaV3Constants.SaveSettingType.scroll;
 
-    const reloaded = parser(toJson(schema)).settings;
+    const { settings } = JSON.parse(toJson(schema));
 
-    expect(reloaded.originX).toBe(0);
-    expect(reloaded.originY).toBe(0);
+    expect(settings).toMatchObject({ originX: 12, zoomLevel: 0.8 });
+    expect(settings).not.toHaveProperty('lockedValues');
+    expect(Object.keys(settings).slice(-2)).toEqual([
+      'maxWidthComment',
+      'lockSettings',
+    ]);
+    expect(parser(toJson(schema)).settings.lockedValues).toMatchObject({
+      originX: 12,
+      zoomLevel: 0.8,
+    });
   });
 
-  it('resets the zoom level when the zoom save setting is ignored', () => {
-    const schema = parser('{"version":"3.0.0"}');
-    schema.settings.scrollTop = 100;
-    schema.settings.originY = 100;
-    schema.settings.zoomLevel = 0.5;
-    schema.settings.ignoreSaveSettings =
-      SchemaV3Constants.SaveSettingType.zoomLevel;
+  it('writes the fields of a document no parser built as they stand', () => {
+    const raw = JSON.parse(toJson(createSchema()));
+    raw.settings.originX = 77;
 
-    const json = JSON.parse(toJson(schema));
-
-    expect(json.settings.scrollTop).toBe(100);
-    expect(json.settings.originY).toBe(100);
-    expect(json.settings.zoomLevel).toBe(1);
-  });
-
-  it('resets both when both bits are set, leaving the live settings alone', () => {
-    const schema = parser('{"version":"3.0.0"}');
-    schema.settings.scrollTop = 100;
-    schema.settings.scrollLeft = 200;
-    schema.settings.originX = -40;
-    schema.settings.originY = -60;
-    schema.settings.zoomLevel = 0.5;
-    schema.settings.ignoreSaveSettings =
-      SchemaV3Constants.SaveSettingType.scroll |
-      SchemaV3Constants.SaveSettingType.zoomLevel;
-
-    const json = JSON.parse(toJson(schema));
-
-    expect(json.settings.originX).toBe(0);
-    expect(json.settings.originY).toBe(0);
-    expect(json.settings.zoomLevel).toBe(1);
-    expect(schema.settings.originX).toBe(-40);
-    expect(schema.settings.originY).toBe(-60);
-    expect(schema.settings.zoomLevel).toBe(0.5);
+    expect(JSON.parse(toJson(raw)).settings).toMatchObject({
+      originX: 77,
+      lockSettings: LOCK_ALL,
+    });
   });
 
   it('never mutates the settings it is handed', () => {
-    const schema = parser(
-      JSON.stringify({
-        version: '3.0.0',
-        settings: { width: 3000, height: 5000, zoomLevel: 0.4 },
-      })
-    );
-    schema.settings.originX = -40;
-    schema.settings.originY = -60;
-    schema.settings.ignoreSaveSettings =
-      SchemaV3Constants.SaveSettingType.scroll |
-      SchemaV3Constants.SaveSettingType.zoomLevel;
-    const before = { ...schema.settings };
+    const schema = createSchema();
+    Object.assign(schema.settings, LIVE);
+    const before = structuredClone(schema.settings);
 
     toJson(schema);
 
     expect(schema.settings).toEqual(before);
+  });
+});
+
+describe('the save switches of releases before the locks', () => {
+  it.each([
+    ['locked', LOCK_ALL],
+    ['unlocked', 0],
+  ])('writes none with the viewport %s', (_, lockSettings) => {
+    const schema = parser(
+      JSON.stringify({
+        version: '3.0.0',
+        settings: { lockSettings, ignoreSaveSettings: 3 },
+      })
+    );
+
+    expect(schema.settings).not.toHaveProperty('ignoreSaveSettings');
+    expect(JSON.parse(toJson(schema)).settings).not.toHaveProperty(
+      'ignoreSaveSettings'
+    );
+  });
+});
+
+/**
+ * A new document locks every lockable setting at its default, while a file
+ * keeps the locks it names; one saved before them locks all of them too.
+ */
+describe('the locks of a new document and of a file', () => {
+  it('writes a new document with every lock on and the defaults in place', () => {
+    const schema = createSchema();
+    Object.assign(schema.settings, LIVE);
+
+    const { settings } = JSON.parse(toJson(schema));
+
+    expect(settings.lockSettings).toBe(LOCK_ALL);
+    expect(settings).toMatchObject(DEFAULTS);
+  });
+
+  it('reads a new document back as it wrote it', () => {
+    const schema = createSchema();
+
+    expect(parser(toJson(schema))).toEqual(schema);
+  });
+
+  it.each([
+    [
+      'a v3 file without the field',
+      { version: '3.0.0', settings: { ...SAVED_VIEW, ...SAVED_CODE } },
+    ],
+    [
+      'a v3 file that saved its view',
+      {
+        version: '3.0.0',
+        settings: { ...SAVED_VIEW, ...SAVED_CODE, ignoreSaveSettings: 0 },
+      },
+    ],
+    [
+      'a v2 file',
+      {
+        canvas: {
+          zoomLevel: 0.5,
+          scrollLeft: -40,
+          scrollTop: 90,
+          language: 'TypeScript',
+          tableCase: 'snakeCase',
+          columnCase: 'snakeCase',
+          bracketType: 'backtick',
+        },
+      },
+    ],
+  ])('locks every setting of %s, its view and tab at the start', (_, json) => {
+    const { settings } = parser(JSON.stringify(json));
+
+    expect(settings.lockSettings).toBe(LOCK_ALL);
+    expect(settings).toMatchObject({ ...DEFAULT_VIEW, ...SAVED_CODE });
+    expect(settings.lockedValues).toEqual({
+      ...DEFAULT_VIEW,
+      ...SAVED_CODE,
+      nameViewMode: NameViewMode.physical,
+    });
+  });
+
+  it('keeps the locks a file names and the values it saved', () => {
+    const settings = {
+      lockSettings: LockSettingType.language | LockSettingType.viewport,
+      ...SAVED_VIEW,
+      ...SAVED_CODE,
+    };
+    const source = JSON.stringify({ version: '3.0.0', settings });
+
+    const parsed = parser(source).settings;
+
+    expect(parsed).toMatchObject(settings);
+    expect(parsed.lockedValues).toEqual({
+      ...omit(settings, ['lockSettings']),
+      nameViewMode: NameViewMode.physical,
+    });
+  });
+
+  it('keeps the bits no lock owns and writes them back', () => {
+    const lockSettings = 1024 | LockSettingType.language;
+    const schema = parser(
+      JSON.stringify({ version: '3.0.0', settings: { lockSettings } })
+    );
+
+    expect(schema.settings.lockSettings).toBe(lockSettings);
+    expect(JSON.parse(toJson(schema)).settings.lockSettings).toBe(lockSettings);
+  });
+
+  it('locks nothing with a bit no lock owns', () => {
+    const lockSettings = 128 | LockSettingType.unlockNameViewMode;
+    const schema = parser(
+      JSON.stringify({ version: '3.0.0', settings: { lockSettings } })
+    );
+    Object.assign(schema.settings, LIVE, { nameViewMode: NameViewMode.both });
+
+    const { settings } = JSON.parse(toJson(schema));
+
+    expect(settings).toMatchObject({
+      ...LIVE,
+      nameViewMode: NameViewMode.both,
+      lockSettings,
+    });
+  });
+});
+
+/**
+ * The scripts are saved sparsely: a document that never had one keeps the
+ * file it had, and one with either script writes both right after the locks.
+ */
+describe('the Schema SQL scripts toJson writes', () => {
+  const withScripts = (before: string, after: string) => {
+    const schema = createSchema();
+    schema.settings.ddlScripts = { before, after };
+    return JSON.parse(toJson(schema)).settings;
+  };
+
+  it('writes no key while both scripts are empty', () => {
+    expect(withScripts('', '')).not.toHaveProperty('ddlScripts');
+    expect(JSON.parse(toJson(createSchema())).settings).not.toHaveProperty(
+      'ddlScripts'
+    );
+  });
+
+  it.each([
+    ['before alone', 'CREATE SCHEMA app;', ''],
+    ['after alone', '', 'GRANT SELECT ON member TO app;'],
+    ['both', 'CREATE SCHEMA app;', 'GRANT SELECT ON member TO app;'],
+  ])('writes both fields once %s holds text', (_, before, after) => {
+    expect(withScripts(before, after).ddlScripts).toEqual({ before, after });
+  });
+
+  it('writes a script of blanks alone, as it was typed', () => {
+    expect(withScripts('  \n', '').ddlScripts).toEqual({
+      before: '  \n',
+      after: '',
+    });
+  });
+
+  it('writes the key right after lockSettings', () => {
+    expect(Object.keys(withScripts('a', 'b')).slice(-3)).toEqual([
+      'maxWidthComment',
+      'lockSettings',
+      'ddlScripts',
+    ]);
+  });
+
+  it('writes no field the scripts do not have', () => {
+    const schema = createSchema();
+    schema.settings.ddlScripts = {
+      before: 'a',
+      after: '',
+      middle: 'c',
+    } as any;
+
+    expect(JSON.parse(toJson(schema)).settings.ddlScripts).toEqual({
+      before: 'a',
+      after: '',
+    });
+  });
+
+  it('reads its own output back to the same scripts', () => {
+    const schema = createSchema();
+    schema.settings.ddlScripts = { before: 'CREATE SCHEMA app;', after: '' };
+
+    expect(parser(toJson(schema))).toEqual(schema);
+  });
+
+  it('writes the scripts of raw JSON as they stand, and none it lacks', () => {
+    const raw = JSON.parse(toJson(createSchema()));
+
+    expect(JSON.parse(toJson(raw)).settings).not.toHaveProperty('ddlScripts');
+
+    raw.settings.ddlScripts = { before: '', after: 'SELECT 1;' };
+
+    expect(JSON.parse(toJson(raw)).settings.ddlScripts).toEqual({
+      before: '',
+      after: 'SELECT 1;',
+    });
+  });
+});
+
+describe('the table groups toJson writes', () => {
+  const source = {
+    version: '3.0.0',
+    settings: { show: SchemaV3Constants.Show.hideTableGroup },
+    doc: { tableIds: ['t1', 't2'], tableGroupIds: ['g1'] },
+    collections: {
+      tableEntities: {
+        t1: { id: 't1', name: 'invoice', groupId: 'g1' },
+        t2: { id: 't2', name: 'member' },
+      },
+      tableGroupEntities: {
+        g1: {
+          id: 'g1',
+          name: 'billing',
+          color: '#0090ff',
+          ui: { x: -40, y: 20, width: 640, height: 360, zIndex: 3 },
+        },
+      },
+    },
+  };
+
+  it('writes the groups, their order, each membership and the hide bit', () => {
+    const json = JSON.parse(toJson(parser(JSON.stringify(source))));
+
+    expect(json.doc.tableGroupIds).toEqual(['g1']);
+    expect(json.collections.tableGroupEntities).toEqual(
+      source.collections.tableGroupEntities
+    );
+    expect(json.collections.tableEntities.t1.groupId).toBe('g1');
+    expect(json.collections.tableEntities.t2).not.toHaveProperty('groupId');
+    expect(json.settings.show).toBe(SchemaV3Constants.Show.hideTableGroup);
+  });
+
+  it('reads its own output back to the same groups', () => {
+    const schema = parser(JSON.stringify(source));
+
+    expect(parser(toJson(schema))).toEqual(schema);
+  });
+
+  it('writes no group key and no empty groupId for a document that never had a group', () => {
+    const schema = parser(
+      JSON.stringify({
+        ...source,
+        doc: { tableIds: ['t1'] },
+        collections: { tableEntities: { t1: { id: 't1', name: 'member' } } },
+      })
+    );
+    const json = JSON.parse(toJson(schema));
+
+    expect(json.doc).not.toHaveProperty('tableGroupIds');
+    expect(json.collections).not.toHaveProperty('tableGroupEntities');
+    expect(json.collections.tableEntities.t1).not.toHaveProperty('groupId');
+    expect(JSON.parse(toJson(createSchema())).doc).toEqual({
+      tableIds: [],
+      relationshipIds: [],
+      indexIds: [],
+      memoIds: [],
+    });
+  });
+
+  it('reads a document without groups back to the same document', () => {
+    const schema = parser(
+      JSON.stringify({
+        ...source,
+        doc: { tableIds: ['t1'] },
+        collections: { tableEntities: { t1: { id: 't1', name: 'member' } } },
+      })
+    );
+
+    expect(parser(toJson(schema))).toEqual(schema);
+  });
+
+  it('keeps the bytes of a document saved before the groups', () => {
+    const saved = toJson(
+      parser(
+        JSON.stringify({
+          ...source,
+          doc: { tableIds: ['t1'] },
+          collections: {
+            tableEntities: { t1: { id: 't1', name: 'member' } },
+          },
+        })
+      )
+    );
+
+    expect(toJson(parser(saved))).toBe(saved);
+    expect(saved).not.toMatch(/groupId|tableGroup/);
+  });
+
+  it('writes both keys while either the ids or the collection holds one', () => {
+    const removed = parser(JSON.stringify(source));
+    removed.doc.tableGroupIds = [];
+    const unlisted = parser(JSON.stringify(source));
+    unlisted.collections.tableGroupEntities = {};
+
+    for (const schema of [removed, unlisted]) {
+      const json = JSON.parse(toJson(schema));
+
+      expect(json.doc).toHaveProperty('tableGroupIds');
+      expect(json.collections).toHaveProperty('tableGroupEntities');
+    }
+  });
+
+  it('keeps the groupId of a table naming a group no document lists', () => {
+    const schema = parser(
+      JSON.stringify({
+        ...source,
+        doc: { tableIds: ['t1'] },
+        collections: {
+          tableEntities: { t1: { id: 't1', name: 'member', groupId: 'g9' } },
+        },
+      })
+    );
+    const json = JSON.parse(toJson(schema));
+
+    expect(json.collections.tableEntities.t1.groupId).toBe('g9');
+    expect(json.doc).not.toHaveProperty('tableGroupIds');
+  });
+
+  it('writes from a copy, leaving the live document as it was', () => {
+    const schema = createSchema();
+    schema.doc.tableIds = ['t1'];
+    schema.collections.tableEntities = {
+      t1: parser(JSON.stringify(source)).collections.tableEntities.t2,
+    };
+    schema.collections.tableEntities.t1.id = 't1';
+
+    toJson(schema);
+
+    expect(schema.doc.tableGroupIds).toEqual([]);
+    expect(schema.collections.tableGroupEntities).toEqual({});
+    expect(schema.collections.tableEntities.t1.groupId).toBe('');
+  });
+
+  it('writes the groups of raw JSON as they stand, and none it lacks', () => {
+    const raw = JSON.parse(toJson(createSchema()));
+
+    expect(JSON.parse(toJson(raw)).doc).not.toHaveProperty('tableGroupIds');
+
+    const grouped = JSON.parse(toJson(parser(JSON.stringify(source))));
+
+    expect(JSON.parse(toJson(grouped)).doc.tableGroupIds).toEqual(['g1']);
+  });
+});
+
+describe('the dictionaries and new fields toJson writes', () => {
+  const source = {
+    version: '3.0.0',
+    doc: {
+      tableIds: ['t1'],
+      wordIds: ['w2'],
+      termIds: [],
+      domainIds: ['d1'],
+    },
+    collections: {
+      tableEntities: {
+        t1: {
+          id: 't1',
+          name: 'member',
+          logicalName: '회원',
+          columnIds: ['c1'],
+          nameDerived: true,
+        },
+      },
+      tableColumnEntities: {
+        c1: { id: 'c1', tableId: 't1', name: 'id', domainId: 'd1' },
+      },
+      wordEntities: {
+        fields: ['id', 'name', 'abbreviation'],
+        rows: [
+          ['w1', 'removed', 'RMV'],
+          ['w2', '회원', 'MBR'],
+        ],
+      },
+      termEntities: { fields: ['id', 'name'], rows: [['tm1', 'removed']] },
+      domainEntities: {
+        fields: ['id', 'name', 'category', 'dataType'],
+        rows: [['d1', '번호N10', '', 'NUMERIC(10)']],
+      },
+    },
+  };
+  const schema = () => parser(JSON.stringify(source));
+
+  it('writes each dictionary as rows, a removed entry too, beside its order', () => {
+    const json = JSON.parse(toJson(schema()));
+
+    expect(json.doc.wordIds).toEqual(['w2']);
+    expect(json.doc.termIds).toEqual([]);
+    // The order key follows the name: the listed entries keyed first, in order.
+    expect(json.collections.wordEntities.fields).toEqual([
+      'id',
+      'name',
+      'order',
+      'abbreviation',
+      'englishName',
+      'description',
+      'synonyms',
+      'forbiddenWords',
+    ]);
+    expect(json.collections.wordEntities.rows).toEqual([
+      ['w1', 'removed', 'a1', 'RMV'],
+      ['w2', '회원', 'a0', 'MBR'],
+    ]);
+    expect(json.collections.termEntities.rows).toEqual([
+      ['tm1', 'removed', 'a0'],
+    ]);
+    expect(json.collections.domainEntities.rows).toEqual([
+      ['d1', '번호N10', 'a0', '', 'NUMERIC(10)'],
+    ]);
+  });
+
+  it('writes one row a line', () => {
+    expect(toJson(schema())).toContain(
+      '\n      "rows": [\n        ["w1","removed","a1","RMV"],\n        ["w2","회원","a0","MBR"]\n      ]'
+    );
+  });
+
+  it('reads its own output back to the same in-memory document', () => {
+    const parsed = schema();
+
+    expect(parser(toJson(parsed))).toEqual(parsed);
+  });
+
+  it('writes no dictionary key for a document that never had one', () => {
+    const json = JSON.parse(toJson(createSchema()));
+
+    expect(Object.keys(json.doc)).toEqual([
+      'tableIds',
+      'relationshipIds',
+      'indexIds',
+      'memoIds',
+    ]);
+    for (const key of ['wordEntities', 'termEntities', 'domainEntities']) {
+      expect(json.collections).not.toHaveProperty(key);
+    }
+  });
+
+  it('writes both keys while either the order or the collection holds one', () => {
+    const unlisted = createSchema();
+    unlisted.doc.wordIds = ['w1'];
+
+    const json = JSON.parse(toJson(unlisted));
+
+    expect(json.doc.wordIds).toEqual(['w1']);
+    expect(json.collections.wordEntities).toEqual({
+      fields: [
+        'id',
+        'name',
+        'order',
+        'abbreviation',
+        'englishName',
+        'description',
+        'synonyms',
+        'forbiddenWords',
+      ],
+      rows: [],
+    });
+  });
+
+  it('writes the logical name, the derived flag and the domain link while held', () => {
+    const { collections } = JSON.parse(toJson(schema()));
+
+    expect(collections.tableEntities.t1).toMatchObject({
+      logicalName: '회원',
+      nameDerived: true,
+    });
+    expect(collections.tableColumnEntities.c1.domainId).toBe('d1');
+    expect(collections.tableColumnEntities.c1).not.toHaveProperty(
+      'logicalName'
+    );
+  });
+
+  it('writes none of them at their defaults, though every width is written', () => {
+    const { collections } = JSON.parse(
+      toJson(
+        parser(
+          JSON.stringify({
+            version: '3.0.0',
+            doc: { tableIds: ['t1'] },
+            collections: {
+              tableEntities: { t1: { id: 't1', columnIds: ['c1'] } },
+              tableColumnEntities: { c1: { id: 'c1', tableId: 't1' } },
+            },
+          })
+        )
+      )
+    );
+
+    for (const key of ['logicalName', 'nameDerived', 'groupId']) {
+      expect(collections.tableEntities.t1).not.toHaveProperty(key);
+    }
+    for (const key of ['logicalName', 'domainId']) {
+      expect(collections.tableColumnEntities.c1).not.toHaveProperty(key);
+    }
+    expect(collections.tableEntities.t1.ui.widthLogicalName).toBe(60);
+    expect(collections.tableColumnEntities.c1.ui).toMatchObject({
+      widthLogicalName: 60,
+      widthDomain: 60,
+    });
+  });
+
+  it('writes the default column order in seven entries', () => {
+    const json = JSON.parse(toJson(createSchema()));
+
+    expect(json.settings.columnOrder).toEqual([1, 2, 4, 8, 16, 32, 64]);
+    expect(parser(toJson(createSchema())).settings.columnOrder).toEqual(
+      createSchema().settings.columnOrder
+    );
+  });
+
+  it('writes from a copy, leaving the live document as it was', () => {
+    const parsed = schema();
+    const before = structuredClone(parsed);
+
+    toJson(parsed);
+
+    expect(parsed).toEqual(before);
   });
 });

@@ -2,6 +2,7 @@
 // other browser spec installs a themeContext provider of its own. Without this
 // one a missing provider paints an empty stage and no other test notices.
 
+import { whenDrawn } from '@dineug/r-html-konva';
 import type { Group } from 'konva/lib/Group';
 import type { Stage } from 'konva/lib/Stage';
 import { afterEach, describe, expect, it } from 'vite-plus/test';
@@ -9,18 +10,19 @@ import { afterEach, describe, expect, it } from 'vite-plus/test';
 import { flush } from '@/__test-utils__/index';
 import type { ErdEditorElement } from '@/components/erd-editor/ErdEditor';
 import { TOOLBAR_HEIGHT } from '@/constants/layout';
-import { whenDrawn } from '@/konva/batchDraw';
-import { Appearance, GrayColor } from '@/themes/radix-ui-theme';
+import {
+  Appearance,
+  GrayColor,
+  SYSTEM_APPEARANCE,
+} from '@/themes/radix-ui-theme';
 
-await import('@/components/erd-editor/ErdEditor');
+await import('@/erd-editor');
 
 const TABLE_ID = 'users';
 
 const document$ = JSON.stringify({
   version: '3.0.0',
   settings: {
-    width: 2000,
-    height: 2000,
     originX: 0,
     originY: 0,
     zoomLevel: 1,
@@ -33,10 +35,9 @@ const document$ = JSON.stringify({
     columnNameCase: 2,
     bracketType: 1,
     relationshipDataTypeSync: true,
-    relationshipOptimization: false,
     columnOrder: [1, 2, 4, 8, 16, 32, 64],
     maxWidthComment: -1,
-    ignoreSaveSettings: 0,
+    lockSettings: 0,
   },
   doc: {
     tableIds: [TABLE_ID],
@@ -53,7 +54,6 @@ const document$ = JSON.stringify({
         columnIds: ['c1'],
         seqColumnIds: ['c1'],
         ui: { x: 60, y: 60, zIndex: 2, widthName: 60, color: '' },
-        meta: { updateAt: 1, createAt: 1 },
       },
     },
     tableColumnEntities: {
@@ -72,7 +72,6 @@ const document$ = JSON.stringify({
           widthDataType: 60,
           widthDefault: 60,
         },
-        meta: { updateAt: 1, createAt: 1 },
       },
     },
     relationshipEntities: {},
@@ -291,6 +290,24 @@ describe('<erd-editor> preset changes', () => {
     await settleScene();
 
     expect(tableBody(stage).getAttr('fill')).not.toBe(dark);
+  });
+
+  it('repaints the scene from the light or dark a host names for system', async () => {
+    const el = await createSeededEditor();
+    const stage = stageRegistry().canvas;
+    const dark = tableBody(stage).getAttr('fill');
+    el.setPresetTheme({ appearance: Appearance.light });
+    await settleScene();
+    const light = tableBody(stage).getAttr('fill');
+
+    el.setSystemAppearance(Appearance.dark);
+    el.setPresetTheme({ appearance: SYSTEM_APPEARANCE });
+    await settleScene();
+    expect(tableBody(stage).getAttr('fill')).toBe(dark);
+
+    el.setSystemAppearance(Appearance.light);
+    await settleScene();
+    expect(tableBody(stage).getAttr('fill')).toBe(light);
   });
 
   it('repaints the scene when the gray scale changes', async () => {

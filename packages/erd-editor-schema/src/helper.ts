@@ -1,6 +1,6 @@
 import { isNumber, isString } from 'es-toolkit';
 
-import { DeepPartial, EntityMeta } from '@/internal-types';
+import { DeepPartial } from '@/internal-types';
 
 export function assign<T extends object, K extends keyof T>(
   valid: (value: any) => boolean,
@@ -15,6 +15,15 @@ export function assign<T extends object, K extends keyof T>(
       target[key] = value as Required<T>[K];
     }
   };
+}
+
+/**
+ * The id an entry of a collection goes by: its own while it holds one, else
+ * the key the collection holds it at, so a file may leave the id out.
+ */
+export function entryId(key: string, entry: object): string {
+  const id: unknown = Reflect.get(entry, 'id');
+  return isString(id) && id !== '' ? id : key;
 }
 
 export function validString(list: ReadonlyArray<string>) {
@@ -33,20 +42,15 @@ export function propOr<T extends object, P extends string | number | symbol, R>(
   return (Reflect.get(target, propertyKey) as unknown as any) ?? defaultValue;
 }
 
-export function getDefaultEntityMeta(): EntityMeta {
-  const now = Date.now();
-  return {
-    updateAt: now,
-    createAt: now,
-  };
-}
-
-export function assignMeta(
-  target: EntityMeta,
-  source?: DeepPartial<EntityMeta>
-) {
-  const assignNumber = assign(isNumber, target, source);
-
-  assignNumber('updateAt');
-  assignNumber('createAt');
+/**
+ * The sequence a parse keeps beside an id list: the saved one while it holds
+ * every listed id, else the list itself, since a re-add sorts an id missing
+ * from the sequence past every other and so reorders the live ones.
+ */
+export function restoreSequence(
+  ids: ReadonlyArray<string>,
+  seqIds: string[]
+): string[] {
+  const seq = new Set(seqIds);
+  return ids.every(id => seq.has(id)) ? seqIds : [...ids];
 }

@@ -1,15 +1,19 @@
 import { query } from '@dineug/erd-editor-schema';
+import { uuid25 } from '@dineug/uuid';
 import { last } from 'es-toolkit';
-import { nanoid } from 'nanoid';
 
 import { ColumnOption } from '@/constants/schema';
 import { GeneratorAction } from '@/engine/generator.actions';
+import { toDomainTypeActions } from '@/engine/modules/dictionary/domainTypes';
 import {
   focusColumnAction,
   focusTableAction,
 } from '@/engine/modules/editor/atom.actions';
 import { FocusType, SelectType } from '@/engine/modules/editor/state';
-import { getRemoveFirstColumnId } from '@/engine/modules/editor/utils/focus';
+import {
+  getFirstColumnType,
+  getRemoveFirstColumnId,
+} from '@/engine/modules/editor/utils/focus';
 import { removeIndexAction } from '@/engine/modules/index/atom.actions';
 import { removeRelationshipAction } from '@/engine/modules/relationship/atom.actions';
 import { arrayHas } from '@/utils/arrayHas';
@@ -20,15 +24,15 @@ import {
   addColumnAction,
   changeColumnAutoIncrementAction,
   changeColumnCommentAction,
-  changeColumnDataTypeAction,
   changeColumnDefaultAction,
+  changeColumnLogicalNameAction,
   changeColumnNameAction,
+  changeColumnNameDerivedAction,
   changeColumnNotNullAction,
   changeColumnPrimaryKeyAction,
   changeColumnUniqueAction,
   removeColumnAction,
 } from './atom.actions';
-import { getDataTypeSyncColumns } from './utils/dataType';
 
 export const isToggleColumnTypes = arrayHas<FocusType>([
   FocusType.columnNotNull,
@@ -38,15 +42,21 @@ export const isToggleColumnTypes = arrayHas<FocusType>([
 
 export const isChangeColumnTypes = arrayHas<FocusType>([
   FocusType.columnName,
+  FocusType.columnLogicalName,
   FocusType.columnDataType,
   FocusType.columnDefault,
   FocusType.columnComment,
 ]);
 
 export const addColumnAction$ = (tableId?: string): GeneratorAction =>
-  function* ({ editor: { selectedMap } }) {
+  function* (state) {
+    const {
+      editor: { selectedMap },
+    } = state;
+    const focusType = getFirstColumnType(state);
+
     if (tableId) {
-      const id = nanoid();
+      const id = uuid25();
       yield addColumnAction({
         id,
         tableId,
@@ -54,7 +64,7 @@ export const addColumnAction$ = (tableId?: string): GeneratorAction =>
       yield focusColumnAction({
         tableId,
         columnId: id,
-        focusType: FocusType.columnName,
+        focusType,
         $mod: false,
         shiftKey: false,
       });
@@ -63,7 +73,7 @@ export const addColumnAction$ = (tableId?: string): GeneratorAction =>
 
     const addColumnActions = Object.entries(selectedMap)
       .filter(([, type]) => type === SelectType.table)
-      .map(([tableId]) => ({ tableId, id: nanoid() }));
+      .map(([tableId]) => ({ tableId, id: uuid25() }));
 
     for (const payload of addColumnActions) {
       yield addColumnAction(payload);
@@ -75,7 +85,7 @@ export const addColumnAction$ = (tableId?: string): GeneratorAction =>
       yield focusColumnAction({
         tableId: lastAction.tableId,
         columnId: lastAction.id,
-        focusType: FocusType.columnName,
+        focusType,
         $mod: false,
         shiftKey: false,
       });
@@ -188,20 +198,16 @@ export const toggleColumnValueAction$ = (
     }
   };
 
+/**
+ * Writes a column's type as typed, with what the data type sync spreads from
+ * it, and unlinks in the same dispatch each written column, a foreign key the
+ * sync reached included, off the type of its domain, listed or removed.
+ */
 export const changeColumnDataTypeAction$ = (
   payload: ChangeColumnValuePayload
 ): GeneratorAction =>
   function* (state) {
-    const {
-      settings: { relationshipDataTypeSync },
-    } = state;
-    let payloads: ChangeColumnValuePayload[] = [payload];
-
-    if (relationshipDataTypeSync) {
-      payloads = getDataTypeSyncColumns([payload], state, payload);
-    }
-
-    yield payloads.map(changeColumnDataTypeAction);
+    yield toDomainTypeActions(state, { dataTypes: [payload] });
   };
 
 export const changeColumnValueAction$ = (
@@ -228,7 +234,19 @@ export const changeColumnValueAction$ = (
 
     switch (focusType) {
       case FocusType.columnName:
-        yield changeColumnNameAction(payload);
+        // A name typed by hand is the column's own, so no logical name
+        // derives it again while it is not empty, until the derived flag is
+        // taken back.
+        yield [
+          changeColumnNameAction(payload),
+          ...(bHas(column.options, ColumnOption.nameDerived)
+            ? [changeColumnNameDerivedAction({ ...payload, value: false })]
+            : []),
+        ];
+        break;
+      case FocusType.columnLogicalName:
+        // Each key writes the logical name alone, deriving no name from it.
+        yield changeColumnLogicalNameAction(payload);
         break;
       case FocusType.columnDataType:
         yield changeColumnDataTypeAction$(payload);
@@ -242,24 +260,39 @@ export const changeColumnValueAction$ = (
     }
   };
 
+/**
+ * Makes every named column still in the table a primary key, or none once all
+ * are, and no other; it sends no relationship action, and none for a column
+ * already there, as its undo records the negation.
+ */
+export const changeColumnsPrimaryKeyAction$ = (
+  tableId: string,
+  columnIds: string[]
+): GeneratorAction =>
+  function* ({ collections }) {
+    const table = query(collections)
+      .collection('tableEntities')
+      .selectById(tableId);
+    if (!table) return;
+
+    // A removed column keeps its entity, which a selection can still name.
+    const columns = query(collections)
+      .collection('tableColumnEntities')
+      .selectByIds(columnIds.filter(arrayHas(table.columnIds)));
+    const isPrimaryKey = ({ options }: { options: number }) =>
+      bHas(options, ColumnOption.primaryKey);
+    const value = !columns.every(isPrimaryKey);
+
+    yield columns
+      .filter(column => isPrimaryKey(column) !== value)
+      .map(({ id }) => changeColumnPrimaryKeyAction({ tableId, id, value }));
+  };
+
+/** Toggles one column's primary key, the rule above over a single column. */
 export const changeColumnPrimaryKeyAction$ = (
   tableId: string,
   columnId: string
-): GeneratorAction =>
-  function* ({ collections }) {
-    const column = query(collections)
-      .collection('tableColumnEntities')
-      .selectById(columnId);
-    if (!column) return;
-
-    const value = bHas(column.options, ColumnOption.primaryKey);
-
-    yield changeColumnPrimaryKeyAction({
-      tableId,
-      id: columnId,
-      value: !value,
-    });
-  };
+): GeneratorAction => changeColumnsPrimaryKeyAction$(tableId, [columnId]);
 
 export const actions$ = {
   addColumnAction$,
@@ -268,4 +301,5 @@ export const actions$ = {
   changeColumnDataTypeAction$,
   changeColumnValueAction$,
   changeColumnPrimaryKeyAction$,
+  changeColumnsPrimaryKeyAction$,
 };

@@ -1,82 +1,82 @@
 import { query } from '@dineug/erd-editor-schema';
-import { nanoid } from 'nanoid';
+import { uuid25 } from '@dineug/uuid';
 
-import { ColumnOption } from '@/constants/schema';
+import { ColumnOption, Database } from '@/constants/schema';
 import { RootState } from '@/engine/state';
 import { bHas } from '@/utils/bit';
-
 import {
-  autoName,
+  autoNameIgnoreCase,
+  getBracket,
+  isDelimitedPart,
+  primaryKeyColumns,
+  splitNameParts,
+  tableNamePart,
+  unquoteNamePart,
+} from '@/utils/tableName';
+
+import { SchemaSQLHeader } from './options';
+import {
+  commentToWrite,
+  CreateSchemaOptions,
   FormatColumnOptions,
   FormatCommentOptions,
   FormatIndexOptions,
   formatNames,
+  formatReferentialActions,
   FormatRelationOptions,
   formatSize,
   formatSpace,
   FormatTableOptions,
-  getBracket,
-  KeyColumn,
   Name,
-  orderByNameASC,
   primaryKey,
-  primaryKeyColumns,
+  referentialActionSupport,
+  selectIndexColumns,
+  toForeignKeyPairs,
   toOrderName,
+  toSchemaEntities,
+  toStringLiteral,
   unique,
   uniqueColumns,
+  WrittenObjects,
 } from './utils';
 
-export function createSchema(state: RootState): string {
-  const {
-    settings: { bracketType },
-    doc: { tableIds, relationshipIds, indexIds },
-    collections,
-  } = state;
+const ACTION_SUPPORT = referentialActionSupport(Database.MSSQL);
+
+// The schema the export assumes where a table's name gives none, the default
+// schema of the database owner and of a user created without one.
+const DEFAULT_SCHEMA = 'dbo';
+
+export function createSchema(
+  state: RootState,
+  tableIds?: readonly string[],
+  { written, logicalNameAsComment }: CreateSchemaOptions = {}
+): string {
   const fkNames: Name[] = [];
   const indexNames: Name[] = [];
   const stringBuffer: string[] = [''];
-  const bracket = getBracket(bracketType);
-  const tables = query(collections)
-    .collection('tableEntities')
-    .selectByIds(tableIds)
-    .sort(orderByNameASC);
-  const relationships = query(collections)
-    .collection('relationshipEntities')
-    .selectByIds(relationshipIds);
-  const indexes = query(collections)
-    .collection('indexEntities')
-    .selectByIds(indexIds);
+  const { tables, relationships, indexes } = toSchemaEntities(state, tableIds);
 
   tables.forEach(table => {
+    written?.tables.push(table);
     formatTable(state, { table, buffer: stringBuffer });
     stringBuffer.push('');
 
-    const columns = query(collections)
-      .collection('tableColumnEntities')
-      .selectByIds(table.columnIds);
+    formatUnique(state, { table, buffer: stringBuffer });
 
-    // unique
-    if (unique(columns)) {
-      const uqColumns = uniqueColumns(columns);
-      uqColumns.forEach(column => {
-        stringBuffer.push(`ALTER TABLE ${bracket}${table.name}${bracket}`);
-        stringBuffer.push(
-          `  ADD CONSTRAINT ${bracket}UQ_${table.name}_${column.name}${bracket} UNIQUE (${bracket}${column.name}${bracket})\nGO`
-        );
-        stringBuffer.push('');
-      });
-    }
-
-    formatComment(state, { table, buffer: stringBuffer });
+    formatComment(state, {
+      table,
+      buffer: stringBuffer,
+      logicalNameAsComment,
+    });
   });
 
   relationships.forEach(relationship => {
-    formatRelation(state, {
+    const wrote = formatRelation(state, {
       relationship,
       buffer: stringBuffer,
       fkNames,
     });
-    stringBuffer.push('');
+    if (wrote) stringBuffer.push('');
   });
 
   indexes.forEach(index => {
@@ -129,13 +129,36 @@ export function formatTable(
 
   if (pk) {
     const pkColumns = primaryKeyColumns(columns);
+    const pkName = `PK_${tableNamePart(table.name, bracketType)}`;
     buffer.push(
-      `  CONSTRAINT ${bracket}PK_${
-        table.name
-      }${bracket} PRIMARY KEY (${formatNames(pkColumns, bracket)})`
+      `  CONSTRAINT ${bracket}${pkName}${bracket} PRIMARY KEY (${formatNames(pkColumns, bracket)})`
     );
   }
   buffer.push(`)\nGO`);
+}
+
+/**
+ * One named constraint per column the diagram marks unique, after the table.
+ * The whole export and the per-table Schema SQL tab both write it.
+ */
+export function formatUnique(
+  { settings: { bracketType }, collections }: RootState,
+  { buffer, table }: FormatTableOptions
+) {
+  const bracket = getBracket(bracketType);
+  const columns = query(collections)
+    .collection('tableColumnEntities')
+    .selectByIds(table.columnIds);
+
+  if (!unique(columns)) return;
+
+  uniqueColumns(columns).forEach(column => {
+    buffer.push(`ALTER TABLE ${bracket}${table.name}${bracket}`);
+    buffer.push(
+      `  ADD CONSTRAINT ${bracket}UQ_${tableNamePart(table.name, bracketType)}_${column.name}${bracket} UNIQUE (${bracket}${column.name}${bracket})\nGO`
+    );
+    buffer.push('');
+  });
 }
 
 function formatColumn(
@@ -166,25 +189,77 @@ function formatColumn(
   buffer.push(stringBuffer.join(' ') + `${isComma ? ',' : ''}`);
 }
 
+// A part SQL Server reads as one name: in one pair of brackets or double
+// quotes (isDelimitedPart), or a regular identifier.
+const REGULAR_PART = /^[\p{L}_@#][\p{L}\p{N}_@#$]*$/u;
+
+function isOneName(part: string): boolean {
+  return isDelimitedPart(part) || REGULAR_PART.test(part);
+}
+
+/**
+ * The prefix that puts an object in the database an unquoted name gives, its
+ * third part from the end; '' quoted, or where that part is no one name, which
+ * fails its CREATE TABLE and would open a quote or a bracket before the dot.
+ */
+function databasePrefix(name: string, bracket: string): string {
+  if (bracket) return '';
+
+  const [, , database = ''] = splitNameParts(name).reverse();
+  return isOneName(database) ? `${database}.` : '';
+}
+
+/**
+ * The procedure that adds a table's extended properties and their level 0 and 1
+ * arguments. An unquoted name splits at each dot outside brackets or quotes into
+ * table, schema and the database whose procedure acts there; quoted, a dbo table.
+ */
+function formatLevels(
+  name: string,
+  bracket: string
+): { procedure: string; levels: string } {
+  const [table, schema = ''] = bracket
+    ? [name]
+    : splitNameParts(name).reverse();
+  const level0 = unquoteNamePart(schema) || DEFAULT_SCHEMA;
+  const level1 = bracket ? table : unquoteNamePart(table);
+
+  return {
+    procedure: `${databasePrefix(name, bracket)}sys.sp_addextendedproperty`,
+    levels: `'schema', ${toStringLiteral(level0)}, 'table', ${toStringLiteral(level1)}`,
+  };
+}
+
+/**
+ * A comment as a national literal. A plain one is varchar in the database's
+ * code page, and SQL Server stores each character outside it as a question mark.
+ */
+const toDescription = (comment: string) => `N${toStringLiteral(comment)}`;
+
 function formatComment(
-  { collections }: RootState,
-  { table, buffer }: FormatCommentOptions
+  { settings: { bracketType }, collections }: RootState,
+  { table, buffer, logicalNameAsComment }: FormatCommentOptions
 ) {
-  if (table.comment.trim() !== '') {
-    buffer.push(`EXECUTE sys.sp_addextendedproperty 'MS_Description',`);
-    buffer.push(
-      `  '${table.comment}', 'user', dbo, 'table', '${table.name}'\nGO`
-    );
+  const { procedure, levels } = formatLevels(
+    table.name,
+    getBracket(bracketType)
+  );
+  const tableComment = commentToWrite(table, logicalNameAsComment);
+
+  if (tableComment !== '') {
+    buffer.push(`EXECUTE ${procedure} 'MS_Description',`);
+    buffer.push(`  ${toDescription(tableComment)}, ${levels}\nGO`);
     buffer.push('');
   }
   query(collections)
     .collection('tableColumnEntities')
     .selectByIds(table.columnIds)
     .forEach(column => {
-      if (column.comment.trim() !== '') {
-        buffer.push(`EXECUTE sys.sp_addextendedproperty 'MS_Description',`);
+      const comment = commentToWrite(column, logicalNameAsComment);
+      if (comment !== '') {
+        buffer.push(`EXECUTE ${procedure} 'MS_Description',`);
         buffer.push(
-          `  '${column.comment}', 'user', dbo, 'table', '${table.name}', 'column', '${column.name}'\nGO`
+          `  ${toDescription(comment)}, ${levels}, 'column', ${toStringLiteral(column.name)}\nGO`
         );
         buffer.push('');
       }
@@ -192,54 +267,42 @@ function formatComment(
 }
 
 function formatRelation(
-  { settings: { bracketType }, collections }: RootState,
+  state: RootState,
   { buffer, relationship, fkNames }: FormatRelationOptions
-) {
+): boolean {
+  const {
+    settings: { bracketType },
+  } = state;
+  const columns = toForeignKeyPairs(state, relationship);
+  if (!columns) return false;
+
+  const { startTable, endTable } = columns;
   const bracket = getBracket(bracketType);
-  const tableCollection = query(collections).collection('tableEntities');
-  const columnCollection = query(collections).collection('tableColumnEntities');
-  const startTable = tableCollection.selectById(relationship.start.tableId);
-  const endTable = tableCollection.selectById(relationship.end.tableId);
+  buffer.push(`ALTER TABLE ${bracket}${endTable.name}${bracket}`);
 
-  if (startTable && endTable) {
-    buffer.push(`ALTER TABLE ${bracket}${endTable.name}${bracket}`);
+  // FK
+  const startName = tableNamePart(startTable.name, bracketType);
+  const endName = tableNamePart(endTable.name, bracketType);
+  const fkName = autoNameIgnoreCase(fkNames, `FK_${startName}_TO_${endName}`);
+  fkNames.push({
+    id: uuid25(),
+    name: fkName,
+  });
 
-    // FK
-    let fkName = `FK_${startTable.name}_TO_${endTable.name}`;
-    fkName = autoName(fkNames, '', fkName);
-    fkNames.push({
-      id: nanoid(),
-      name: fkName,
-    });
+  buffer.push(`  ADD CONSTRAINT ${bracket}${fkName}${bracket}`);
 
-    buffer.push(`  ADD CONSTRAINT ${bracket}${fkName}${bracket}`);
-
-    // key
-    const columns: KeyColumn = {
-      start: [],
-      end: [],
-    };
-    relationship.end.columnIds.forEach(columnId => {
-      const column = columnCollection.selectById(columnId);
-      if (column) {
-        columns.end.push(column);
-      }
-    });
-    relationship.start.columnIds.forEach(columnId => {
-      const column = columnCollection.selectById(columnId);
-      if (column) {
-        columns.start.push(column);
-      }
-    });
-
-    buffer.push(`    FOREIGN KEY (${formatNames(columns.end, bracket)})`);
-    buffer.push(
-      `    REFERENCES ${bracket}${startTable.name}${bracket} (${formatNames(
-        columns.start,
-        bracket
-      )})\nGO`
-    );
-  }
+  buffer.push(`    FOREIGN KEY (${formatNames(columns.end, bracket)})`);
+  buffer.push(
+    `    REFERENCES ${bracket}${startTable.name}${bracket} (${formatNames(
+      columns.start,
+      bracket
+    )})`,
+    ...formatReferentialActions(relationship, ACTION_SUPPORT).map(
+      clause => `    ${clause}`
+    )
+  );
+  buffer[buffer.length - 1] += '\nGO';
+  return true;
 }
 
 export function formatIndex(
@@ -252,31 +315,21 @@ export function formatIndex(
     .selectById(index.tableId);
   if (!table) return;
 
-  const columnNames = query(collections)
-    .collection('indexColumnEntities')
-    .selectByIds(index.indexColumnIds)
-    .map(indexColumn => {
-      const column = query(collections)
-        .collection('tableColumnEntities')
-        .selectById(indexColumn.columnId);
-      if (column) {
-        return {
-          name: `${bracket}${column.name}${bracket} ${toOrderName(
-            indexColumn.orderType
-          )}`,
-        };
-      }
-      return null;
+  const columnNames = selectIndexColumns(collections, table, index).map(
+    ({ indexColumn, column }) => ({
+      name: `${bracket}${column.name}${bracket} ${toOrderName(
+        indexColumn.orderType
+      )}`,
     })
-    .filter(columnName => columnName !== null) as { name: string }[];
+  );
 
   if (columnNames.length !== 0) {
     let indexName = index.name;
     if (index.name.trim() === '') {
-      indexName = `IDX_${table.name}`;
-      indexName = autoName(indexNames, '', indexName);
+      const tableName = tableNamePart(table.name, bracketType);
+      indexName = autoNameIgnoreCase(indexNames, `IDX_${tableName}`);
       indexNames.push({
-        id: nanoid(),
+        id: uuid25(),
         name: indexName,
       });
     }
@@ -290,4 +343,72 @@ export function formatIndex(
       `  ON ${bracket}${table.name}${bracket} (${formatNames(columnNames)})\nGO`
     );
   }
+}
+
+/**
+ * USE for use; for createAndUse, CREATE DATABASE first where DB_ID finds none.
+ * Each ends its batch with GO.
+ */
+export function formatHeader(
+  { settings: { bracketType } }: RootState,
+  header: Exclude<SchemaSQLHeader, 'none'>,
+  name: string
+): string {
+  const bracket = getBracket(bracketType);
+  const database = `${bracket}${name}${bracket}`;
+  const use = `USE ${database}\nGO`;
+
+  return header === SchemaSQLHeader.createAndUse
+    ? `IF DB_ID(N${toStringLiteral(name)}) IS NULL\n  CREATE DATABASE ${database}\nGO\n\n${use}`
+    : use;
+}
+
+/**
+ * One transaction that drops each foreign key a written table holds, found in
+ * its own database's catalog, then the tables, all rolled back on an error, so
+ * a key held from outside them still refuses; IF EXISTS needs SQL Server 2016.
+ */
+export function formatDropBlock(
+  { settings: { bracketType } }: RootState,
+  { tables }: WrittenObjects
+): string {
+  if (tables.length === 0) return '';
+
+  const bracket = getBracket(bracketType);
+  const quote = (name: string) => `${bracket}${name}${bracket}`;
+  const selects = tables.flatMap(({ name }) => {
+    const database = databasePrefix(name, bracket);
+    const objectId = `OBJECT_ID(N${toStringLiteral(quote(name))}, N'U')`;
+    const select = [
+      `SELECT @sql += N${toStringLiteral(`ALTER TABLE ${quote(name)} DROP CONSTRAINT `)} + QUOTENAME(name) + N';'`,
+      `  FROM ${database}sys.foreign_keys`,
+      `  WHERE parent_object_id = ${objectId}`,
+    ];
+    // The catalog of a database that does not exist fails as the SELECT runs,
+    // past the CATCH and with the transaction left open, so the SELECT runs
+    // only where OBJECT_ID finds its table.
+    return database
+      ? [`  IF ${objectId} IS NOT NULL`, ...select.map(line => `    ${line}`)]
+      : select.map(line => `  ${line}`);
+  });
+  const lines = [
+    'BEGIN TRY',
+    '  BEGIN TRANSACTION',
+    '',
+    "  DECLARE @sql NVARCHAR(MAX) = N''",
+    ...selects,
+    '  EXECUTE sp_executesql @sql',
+    '',
+    `  DROP TABLE IF EXISTS ${tables.map(({ name }) => quote(name)).join(', ')}`,
+    '',
+    '  COMMIT TRANSACTION',
+    'END TRY',
+    'BEGIN CATCH',
+    '  IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION;',
+    '  THROW;',
+    'END CATCH',
+    'GO',
+  ];
+
+  return lines.join('\n');
 }

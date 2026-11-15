@@ -3,8 +3,10 @@ import { atom, useAtomValue, useSetAtom, useStore } from 'jotai';
 import { DateTime } from 'luxon';
 import { useCallback } from 'react';
 
+import { i18nAtom } from '@/atoms/modules/locale';
 import { schemaEntitiesAtom } from '@/atoms/modules/schema';
 import { selectedSchemaIdAtom } from '@/atoms/modules/sidebar';
+import { type Localized, localized } from '@/i18n/translate';
 import { getAppDatabaseService } from '@/services/indexeddb';
 import type { NewSchemaEntity } from '@/services/indexeddb/modules/schema';
 import { backupFileName, createBackup } from '@/utils/backup';
@@ -24,13 +26,15 @@ type Store = ReturnType<typeof useStore>;
 
 export type ImportNotice = {
   key: number;
-  message: string;
+  /** Read in the language it renders in, so a notice follows a switch. */
+  message: Localized;
   tone: 'success' | 'warning';
 };
 
-const SAMPLE_NAME = 'bookstore sample';
-
 export const importNoticeAtom = atom<ImportNotice | null>(null);
+
+/** Whether files given to the file chooser or dropped are being imported. */
+export const importingFilesAtom = atom(false);
 
 const addImportedSchemasAtom = atom(
   null,
@@ -56,15 +60,15 @@ const showImportNoticeAtom = atom(null, (get, set, result: ImportResult) => {
 
   set(importNoticeAtom, {
     key: Date.now(),
-    message: describeImportResult(result),
+    message: i18n => describeImportResult(result, i18n),
     tone: result.imported && !skipped ? 'success' : 'warning',
   });
 });
 
 /**
- * Converts every source into the document it parses to; one the editor fails
- * on is counted as an invalid file. Loaded on demand, since it brings in the
- * whole editor.
+ * Converts every source into the document it parses to, its tables placed,
+ * one after another; one the editor fails on is counted as an invalid file.
+ * Loaded on demand, since it brings in the whole editor.
  */
 async function convertSources(
   sources: Array<{ name: string; source: SourceImport }>
@@ -75,7 +79,7 @@ async function convertSources(
 
   for (const { name, source } of sources) {
     try {
-      documents.push({ name, value: convertSource(source) });
+      documents.push({ name, value: await convertSource(source) });
     } catch (error) {
       console.error(error);
       failed += 1;
@@ -163,7 +167,7 @@ async function runImport(store: Store, read: () => Promise<ImportItem[]>) {
   } catch (error) {
     store.set(importNoticeAtom, {
       key: Date.now(),
-      message: 'Import failed',
+      message: localized('import.failed'),
       tone: 'warning',
     });
     reportError(error);
@@ -173,20 +177,33 @@ async function runImport(store: Store, read: () => Promise<ImportItem[]>) {
 
 export const useImportNotice = () => useAtomValue(importNoticeAtom);
 
+export const useImportingFiles = () => useAtomValue(importingFilesAtom);
+
 export const useDismissImportNotice = () => {
   const setNotice = useSetAtom(importNoticeAtom);
   return useCallback(() => setNotice(null), [setNotice]);
 };
 
+/**
+ * Imports files one import at a time, as /gdrive does: files given while one
+ * runs are refused, and the controls that start one read importingFilesAtom.
+ */
 export const useImportFiles = () => {
   const store = useStore();
 
   return useCallback(
-    (files: File[]) => {
-      const now = Date.now();
-      return runImport(store, () =>
-        Promise.all(files.map(file => readImportFile(file, now)))
-      );
+    async (files: File[]) => {
+      if (store.get(importingFilesAtom)) return undefined;
+      store.set(importingFilesAtom, true);
+
+      try {
+        const now = Date.now();
+        return await runImport(store, () =>
+          Promise.all(files.map(file => readImportFile(file, now)))
+        );
+      } finally {
+        store.set(importingFilesAtom, false);
+      }
     },
     [store]
   );
@@ -212,7 +229,7 @@ export const useOpenSample = () => {
         return [
           {
             kind: 'source',
-            name: SAMPLE_NAME,
+            name: store.get(i18nAtom).t('viewer.sampleName'),
             source: { type: 'dbml', value },
           },
         ];
@@ -239,7 +256,11 @@ export const useExportBackup = () => {
         'application/json'
       );
     } catch (error) {
-      setNotice({ key: Date.now(), message: 'Export failed', tone: 'warning' });
+      setNotice({
+        key: Date.now(),
+        message: localized('import.exportFailed'),
+        tone: 'warning',
+      });
       reportError(error);
     }
   }, [setNotice]);

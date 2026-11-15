@@ -31,7 +31,8 @@ export async function tableIds(page: Page): Promise<string[]> {
   return await page.evaluate(() => {
     const editor = document.querySelector('erd-editor') as any;
     if (!editor) throw new Error('erd-editor is not mounted');
-    return JSON.parse(editor.value).doc.tableIds as string[];
+    // The file form leaves out a list that holds nothing.
+    return (JSON.parse(editor.value).doc.tableIds ?? []) as string[];
   });
 }
 
@@ -489,7 +490,7 @@ async function freeCanvasPoint(page: Page) {
 }
 
 /**
- * Alt+N is the editor's add-table shortcut. tinykeys binds it to a element
+ * Alt+N is the editor's add-table shortcut. Its bindings listen on an element
  * inside the shadow root, so the canvas has to be clicked first for the keydown
  * to reach the binding.
  */

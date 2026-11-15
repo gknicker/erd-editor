@@ -1,6 +1,9 @@
+import type { DictionaryKind } from '@/engine/modules/dictionary/actions';
 import {
   createDocumentPng,
+  createDocumentSvg,
   type DocumentPngOptions,
+  type DocumentSvgOptions,
 } from '@/services/export-png';
 
 type ExportOptions = {
@@ -32,15 +35,15 @@ function performExportBuiltin(blob: Blob, options: ExportOptions) {
 
 const pad = (value: number, length = 2) => String(value).padStart(length, '0');
 
-/** The local time as yyyy-MM-dd'T'HH_mm_ss, which a file name can carry. */
-function toFileTimestamp(date: Date): string {
+/** The local time to the second, as 2024-03-09T04_05_06, which sorts as it reads. */
+function formatTimestamp(date: Date) {
   const day = `${pad(date.getFullYear(), 4)}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
   const time = `${pad(date.getHours())}_${pad(date.getMinutes())}_${pad(date.getSeconds())}`;
   return `${day}T${time}`;
 }
 
 function createName(suffix: string, name?: string) {
-  const prefix = toFileTimestamp(new Date());
+  const prefix = formatTimestamp(new Date());
   return name?.trim()
     ? `${name}-${prefix}${suffix}`
     : `unnamed-${prefix}${suffix}`;
@@ -58,13 +61,41 @@ export function exportSchemaSQL(sql: string, name?: string) {
   });
 }
 
+/** What a dictionary's CSV file is named after, the sheet it holds. */
+const DICTIONARY_CSV_SUFFIX: Readonly<Record<DictionaryKind, string>> = {
+  word: '-words.csv',
+  term: '-terms.csv',
+  domain: '-domains.csv',
+};
+
 /**
- * Writes the whole document out as an image, at the zoom the author is reading
- * it at. The scene is rendered again off screen rather than captured, so the
- * file holds the whole document however far it was scrolled away from.
+ * One dictionary's sheet as a CSV file, named as the other exports are with
+ * the sheet after the time. The text is written as given, so the byte order
+ * mark and the CRLF line ends the dictionary codec writes reach the file.
  *
  * @example
- * exportPNG({ doc: toJson(store.state), theme, toWidth, zoomLevel }, databaseName);
+ * exportCSV(writeDictionaryCsv('word', words), 'word', databaseName);
+ */
+export function exportCSV(csv: string, sheet: DictionaryKind, name?: string) {
+  performExport(new Blob([csv], { type: 'text/csv' }), {
+    fileName: createName(DICTIONARY_CSV_SUFFIX[sheet], name),
+  });
+}
+
+/** The Code Generator's text, named as the other exports are, with its language's extension. */
+export function exportCode(code: string, extension: string, name?: string) {
+  performExport(new Blob([code]), {
+    fileName: createName(extension, name),
+  });
+}
+
+/**
+ * Writes the whole document out as an image, at 100% whatever zoom the author
+ * is reading it at. The scene is rendered again off screen rather than captured,
+ * so the file holds the whole document however far it was scrolled away from.
+ *
+ * @example
+ * exportPNG({ doc: toJson(store.state), theme, toWidth }, databaseName);
  */
 export function exportPNG(
   options: DocumentPngOptions,
@@ -73,6 +104,24 @@ export function exportPNG(
   return createDocumentPng(options).then(blob => {
     performExport(blob, {
       fileName: createName('.png', name),
+    });
+  });
+}
+
+/**
+ * Writes the whole document out as an svg, at 100% and with no scale, drawn
+ * again off screen the way the png is.
+ *
+ * @example
+ * exportSVG({ doc: toJson(store.state), theme, toWidth }, databaseName);
+ */
+export function exportSVG(
+  options: DocumentSvgOptions,
+  name?: string
+): Promise<void> {
+  return createDocumentSvg(options).then(svg => {
+    performExport(new Blob([svg], { type: 'image/svg+xml' }), {
+      fileName: createName('.svg', name),
     });
   });
 }

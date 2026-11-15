@@ -6,16 +6,13 @@ import {
   isString,
 } from 'es-toolkit';
 
-import {
-  assign,
-  assignMeta,
-  getDefaultEntityMeta,
-  validNumber,
-} from '@/helper';
+import { assign, entryId, validNumber } from '@/helper';
 import { DeepPartial } from '@/internal-types';
 import {
   Direction,
   DirectionList,
+  ReferentialAction,
+  ReferentialActionList,
   Relationship,
   RelationshipType,
   RelationshipTypeList,
@@ -28,6 +25,8 @@ export const createRelationship = (): Relationship => ({
   identification: false,
   relationshipType: RelationshipType.ZeroN,
   startRelationshipType: StartRelationshipType.dash,
+  onDelete: ReferentialAction.none,
+  onUpdate: ReferentialAction.none,
   start: {
     tableId: '',
     columnIds: [],
@@ -42,7 +41,6 @@ export const createRelationship = (): Relationship => ({
     y: 0,
     direction: Direction.bottom,
   },
-  meta: getDefaultEntityMeta(),
 });
 
 export function createAndMergeRelationshipEntities(
@@ -51,8 +49,8 @@ export function createAndMergeRelationshipEntities(
   const entities: Record<string, Relationship> = {};
   if (!isPlainObject(json) || isNil(json)) return entities;
 
-  for (const value of Object.values(json)) {
-    if (!value) continue;
+  for (const [key, value] of Object.entries(json)) {
+    if (!isPlainObject(value)) continue;
     const target = createRelationship();
     const assignString = assign(isString, target, value);
     const assignBoolean = assign(isBoolean, target, value);
@@ -61,7 +59,7 @@ export function createAndMergeRelationshipEntities(
     const endAssignNumber = assign(isNumber, target.end, value.end);
     const endAssignString = assign(isString, target.end, value.end);
 
-    assignString('id');
+    target.id = entryId(key, value);
     assignBoolean('identification');
     assign(
       validNumber(RelationshipTypeList),
@@ -73,6 +71,8 @@ export function createAndMergeRelationshipEntities(
       target,
       value
     )('startRelationshipType');
+    assign(validNumber(ReferentialActionList), target, value)('onDelete');
+    assign(validNumber(ReferentialActionList), target, value)('onUpdate');
 
     startAssignString('tableId');
     startAssignNumber('x');
@@ -85,8 +85,6 @@ export function createAndMergeRelationshipEntities(
     endAssignNumber('y');
     assign(validNumber(DirectionList), target.end, value.end)('direction');
     assign(Array.isArray, target.end, value.end)('columnIds');
-
-    assignMeta(target.meta, value.meta);
 
     if (target.id) {
       entities[target.id] = target;

@@ -14,21 +14,27 @@ import {
   ColumnOption,
   ColumnType,
   ColumnTypeList,
-  ColumnTypeToName,
   ColumnUIKey,
   Database,
   DatabaseList,
+  DDLScriptPosition,
+  DDLScriptPositionList,
   Direction,
   DirectionList,
+  InvertedLockSettings,
   Language,
   LanguageList,
+  LockSettingFields,
+  LockSettingType,
+  LockSettingTypeList,
   NameCase,
   NameCaseList,
+  NameViewMode,
+  NameViewModeList,
   OrderType,
   OrderTypeList,
   RelationshipType,
   RelationshipTypeList,
-  SaveSettingType,
   Show,
   StartRelationshipType,
   StartRelationshipTypeList,
@@ -61,7 +67,14 @@ describe('schema constant re-exports', () => {
     expect(ColumnUIKey).toBe(SchemaV3Constants.ColumnUIKey);
     expect(OrderType).toBe(SchemaV3Constants.OrderType);
     expect(OrderTypeList).toBe(SchemaV3Constants.OrderTypeList);
-    expect(SaveSettingType).toBe(SchemaV3Constants.SaveSettingType);
+    expect(LockSettingType).toBe(SchemaV3Constants.LockSettingType);
+    expect(LockSettingTypeList).toBe(SchemaV3Constants.LockSettingTypeList);
+    expect(LockSettingFields).toBe(SchemaV3Constants.LockSettingFields);
+    expect(DDLScriptPosition).toBe(SchemaV3Constants.DDLScriptPosition);
+    expect(DDLScriptPositionList).toBe(SchemaV3Constants.DDLScriptPositionList);
+    expect(InvertedLockSettings).toBe(SchemaV3Constants.InvertedLockSettings);
+    expect(NameViewMode).toBe(SchemaV3Constants.NameViewMode);
+    expect(NameViewModeList).toBe(SchemaV3Constants.NameViewModeList);
   });
 
   it('re-exports the canvas bounds as plain numbers', () => {
@@ -105,7 +118,7 @@ describe('schema constant re-exports', () => {
       ColumnOption,
       ColumnUIKey,
       OrderType,
-      SaveSettingType,
+      LockSettingType,
     ];
 
     for (const group of flagGroups) {
@@ -158,38 +171,5 @@ describe('BracketTypeMap', () => {
   it('returns undefined for an unknown bracket type', () => {
     expect(BracketTypeMap[0]).toBeUndefined();
     expect(BracketTypeMap[999]).toBeUndefined();
-  });
-});
-
-describe('ColumnTypeToName', () => {
-  it('maps every column type flag to its settings label', () => {
-    expect(ColumnTypeToName).toEqual({
-      [ColumnType.columnName]: 'Name',
-      [ColumnType.columnDataType]: 'DataType',
-      [ColumnType.columnNotNull]: 'Not Null',
-      [ColumnType.columnUnique]: 'Unique',
-      [ColumnType.columnAutoIncrement]: 'Auto Increment',
-      [ColumnType.columnDefault]: 'Default',
-      [ColumnType.columnComment]: 'Comment',
-    });
-  });
-
-  it('covers every entry of ColumnTypeList with a unique label', () => {
-    const labels = ColumnTypeList.map(columnType => {
-      const name = ColumnTypeToName[columnType];
-      expect(typeof name).toBe('string');
-      expect(name.length).toBeGreaterThan(0);
-      return name;
-    });
-
-    expect(new Set(labels).size).toBe(ColumnTypeList.length);
-    expect(Object.keys(ColumnTypeToName)).toHaveLength(ColumnTypeList.length);
-  });
-
-  it('returns undefined for a flag that is not a column type', () => {
-    expect(ColumnTypeToName[0]).toBeUndefined();
-    expect(
-      ColumnTypeToName[ColumnType.columnName | ColumnType.columnUnique]
-    ).toBeUndefined();
   });
 });

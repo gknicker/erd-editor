@@ -1,21 +1,15 @@
-import { query } from '@dineug/erd-editor-schema';
 import type { AnyAction } from '@dineug/r-html';
-import { isNil } from 'es-toolkit';
-import {
-  asapScheduler,
-  filter,
-  tap,
-  throttle,
-  throttleTime,
-  timer,
-} from 'rxjs';
+import { isNil, isString } from 'es-toolkit';
+import { asapScheduler, filter, observeOn, tap, throttle, timer } from 'rxjs';
 
-import { ColumnOption, StartRelationshipType } from '@/constants/schema';
+import { LockSettingType, NameViewMode, Show } from '@/constants/schema';
 import type { Hook, HookEffect } from '@/engine/hooks';
+import { DictionaryKind } from '@/engine/modules/dictionary/actions';
 import {
-  initialLoadJsonAction,
-  loadJsonAction,
-} from '@/engine/modules/editor/atom.actions';
+  addDictionaryAction,
+  removeDictionaryAction,
+  updateDictionaryAction,
+} from '@/engine/modules/dictionary/atom.actions';
 import { ViewKind } from '@/engine/modules/editor/state';
 import { getActiveView, isViewShown } from '@/engine/modules/editor/view';
 import {
@@ -27,21 +21,36 @@ import {
   viewScrollToAction,
   viewSetCentersAction,
   viewSetLayoutAction,
+  viewStepCentersAction,
   viewStreamScrollToAction,
   viewStreamZoomLevelAction,
 } from '@/engine/modules/editor/view.actions';
+import {
+  addIndexAction,
+  changeIndexUniqueAction,
+  removeIndexAction,
+} from '@/engine/modules/index/atom.actions';
+import {
+  addIndexColumnAction,
+  moveIndexColumnAction,
+  removeIndexColumnAction,
+} from '@/engine/modules/index-column/atom.actions';
 import { moveMemoAction } from '@/engine/modules/memo/atom.actions';
 import {
   addRelationshipAction,
+  changeRelationshipColumnsAction,
   removeRelationshipAction,
 } from '@/engine/modules/relationship/atom.actions';
 import {
+  changeLockSettingsAction,
   changeMaxWidthCommentAction,
+  changeNameViewModeAction,
   changeShowAction,
 } from '@/engine/modules/settings/atom.actions';
 import {
   addTableAction,
   changeTableCommentAction,
+  changeTableLogicalNameAction,
   changeTableNameAction,
   moveTableAction,
   moveToTableAction,
@@ -53,9 +62,12 @@ import {
   changeColumnCommentAction,
   changeColumnDataTypeAction,
   changeColumnDefaultAction,
+  changeColumnDomainAction,
+  changeColumnLogicalNameAction,
   changeColumnNameAction,
   changeColumnNotNullAction,
   changeColumnPrimaryKeyAction,
+  moveColumnAction,
   removeColumnAction,
 } from '@/engine/modules/table-column/atom.actions';
 import { RootState } from '@/engine/state';
@@ -67,75 +79,41 @@ import { invalidateTableWidths } from '@/utils/calcTable';
 import type { ViewSource } from '@/utils/draw-relationship/geometrySource';
 import { relationshipSort } from '@/utils/draw-relationship/sort';
 
+import {
+  recalculateIdentification,
+  recalculateStartRelationshipType,
+} from './endFlags';
+
+/**
+ * Reads the flag once per batch, in the microtask after it, as the foreign key
+ * bits are read: a headless peer writes its file one scheduler turn after a
+ * batch, and a flag read on a timer reached that file only with the next write.
+ */
 const identificationHook: HookEffect = (action$, getState) =>
   action$
-    .pipe(throttleTime(10, undefined, { leading: false, trailing: true }))
-    .subscribe(() => {
-      const { doc, collections } = getState();
-      const collection = query(collections).collection('relationshipEntities');
-      const relationships = collection.selectByIds(doc.relationshipIds);
+    .pipe(
+      throttle(() => timer(0, asapScheduler), {
+        leading: false,
+        trailing: true,
+      })
+    )
+    .subscribe(() => recalculateIdentification(getState()));
 
-      for (const relationship of relationships) {
-        const { end, identification } = relationship;
-        const table = query(collections)
-          .collection('tableEntities')
-          .selectById(end.tableId);
-        if (!table) continue;
-
-        const has = arrayHas(table.columnIds);
-        const columns = query(collections)
-          .collection('tableColumnEntities')
-          .selectByIds(end.columnIds)
-          .filter(column => has(column.id));
-        if (!columns.length) continue;
-
-        const value = columns.every(column =>
-          bHas(column.options, ColumnOption.primaryKey)
-        );
-
-        if (value === identification) {
-          continue;
-        }
-
-        relationship.identification = value;
-      }
-    });
-
+/**
+ * The same one microtask later, behind the not null a key turned on sets in the
+ * microtask after its batch: read before it, a batch keying two end columns at
+ * once left the relationship ringed.
+ */
 const startRelationshipHook: HookEffect = (action$, getState) =>
   action$
-    .pipe(throttleTime(10, undefined, { leading: false, trailing: true }))
-    .subscribe(() => {
-      const { doc, collections } = getState();
-      const collection = query(collections).collection('relationshipEntities');
-      const relationships = collection.selectByIds(doc.relationshipIds);
-
-      for (const relationship of relationships) {
-        const { end, startRelationshipType } = relationship;
-        const table = query(collections)
-          .collection('tableEntities')
-          .selectById(end.tableId);
-        if (!table) continue;
-
-        const has = arrayHas(table.columnIds);
-        const columns = query(collections)
-          .collection('tableColumnEntities')
-          .selectByIds(end.columnIds)
-          .filter(column => has(column.id));
-        if (!columns.length) continue;
-
-        const value = columns.every(column =>
-          bHas(column.options, ColumnOption.notNull)
-        )
-          ? StartRelationshipType.dash
-          : StartRelationshipType.ring;
-
-        if (value === startRelationshipType) {
-          continue;
-        }
-
-        relationship.startRelationshipType = value;
-      }
-    });
+    .pipe(
+      throttle(() => timer(0, asapScheduler), {
+        leading: false,
+        trailing: true,
+      }),
+      observeOn(asapScheduler)
+    )
+    .subscribe(() => recalculateStartRelationshipType(getState()));
 
 /**
  * Actions that move something without changing what it contains. Every other
@@ -156,9 +134,82 @@ const isMoveOnly = arrayHas<string>([
 const sortWindow = ({ tags }: AnyAction) =>
   !isNil(tags) && bHas(tags, Tag.drag) ? timer(5) : timer(0, asapScheduler);
 
-const relationshipSortHook: HookEffect = (action$, getState) =>
+/**
+ * The actions that add, drop, reshape or renumber an alternate key, whose mark
+ * widens its table in the document while the setting shows the marks. A column
+ * move renumbers the keys, an index column move their members.
+ */
+const alternateKeyActions = [
+  addIndexAction,
+  removeIndexAction,
+  changeIndexUniqueAction,
+  addIndexColumnAction,
+  removeIndexColumnAction,
+  moveIndexColumnAction,
+  moveColumnAction,
+];
+
+const alternateKeyActionTypes = alternateKeyActions.map(action => action.type);
+
+const isAlternateKeyAction = arrayHas<string>(alternateKeyActionTypes);
+
+/** The show bits that move no table and no anchor: the referential action labels, the groups and the memos. */
+const isPaintOnlyShow = arrayHas<number>([
+  Show.hideReferentialAction,
+  Show.hideTableGroup,
+  Show.hideMemo,
+]);
+
+/** One of those bits shown or hidden, which neither sorts nor measures. */
+const isPaintOnlyToggle = (action: AnyAction) =>
+  action.type === changeShowAction.type &&
+  isPaintOnlyShow(action.payload?.show);
+
+const isDictionaryWrite = arrayHas<string>([
+  addDictionaryAction.type,
+  updateDictionaryAction.type,
+  removeDictionaryAction.type,
+]);
+
+/**
+ * Whether a dictionary write, a lock change or a name view switch can move a
+ * table: a domain named by a cell added, renamed or removed, an unlock of the
+ * name view, and a switch this store shows, shared or its own. Others pass.
+ */
+const reachesLayout = (
+  { type, payload }: AnyAction,
+  state: RootState
+): boolean => {
+  if (type === changeNameViewModeAction.type) {
+    return payload.shared === true || payload.editorId === state.editor.id;
+  }
+  if (isDictionaryWrite(type)) {
+    return (
+      payload?.kind === DictionaryKind.domain &&
+      (type !== updateDictionaryAction.type || isString(payload.values?.name))
+    );
+  }
+  if (type === changeLockSettingsAction.type) {
+    return (
+      payload?.value === false &&
+      bHas(payload.lockSettingType, LockSettingType.unlockNameViewMode)
+    );
+  }
+  return true;
+};
+
+const relationshipSortHook: HookEffect = (action$, getState, ctx) =>
   action$
     .pipe(
+      // An index changes no width while the marks are hidden, and a checkbox
+      // in the Indexes tab would otherwise sort the whole document.
+      filter(
+        action =>
+          (!isAlternateKeyAction(action.type) ||
+            bHas(getState().settings.show, Show.columnAlternateKey)) &&
+          !isPaintOnlyToggle(action) &&
+          reachesLayout(action, getState())
+      ),
       // Invalidation reads every action, the sort reads one per window. Putting
       // this after the throttle would drop the width-changing action whenever
       // it shared a window with a move.
@@ -168,18 +219,32 @@ const relationshipSortHook: HookEffect = (action$, getState) =>
       throttle(sortWindow, { leading: false, trailing: true })
     )
     .subscribe(() => {
-      relationshipSort(getState());
+      relationshipSort(getState(), 'document', { route: ctx.routes !== false });
     });
 
 /**
- * Document actions a view never sees the effect of: a view draws no memo and
- * reads none of the show bits or the comment width, so its geometry is the
- * same on either side of them.
+ * Document actions a view's geometry never sees: no memo, alternate key mark,
+ * show bit or comment width. A column move resizes no box.
  */
 const isDocumentOnly = arrayHas<string>([
   changeShowAction.type,
   changeMaxWidthCommentAction.type,
   moveMemoAction.type,
+  ...alternateKeyActionTypes,
+]);
+
+/**
+ * Document actions a view reads outside the physical view alone: a logical
+ * name, a domain link and a domain renamed size the cells the logical view and
+ * the view of both draw, and none the physical view does.
+ */
+const isNameViewOnly = arrayHas<string>([
+  changeTableLogicalNameAction.type,
+  changeColumnLogicalNameAction.type,
+  changeColumnDomainAction.type,
+  addDictionaryAction.type,
+  updateDictionaryAction.type,
+  removeDictionaryAction.type,
 ]);
 
 /** View actions that move the placement a view is looked at through, and nothing in it. */
@@ -212,6 +277,7 @@ const aimedKind: Record<
   [viewCloseAction.type]: kindOf,
   [viewSetLayoutAction.type]: kindOf,
   [viewSetCentersAction.type]: flowOnly,
+  [viewStepCentersAction.type]: flowOnly,
   [viewChangeShowModeAction.type]: namedOrActiveKind,
   [viewMoveTableAction.type]: namedOrActiveKind,
 };
@@ -226,14 +292,22 @@ const namedIds: Record<string, (payload: any) => string[]> = {
   [removeTableAction.type]: idOf,
   [moveToTableAction.type]: idOf,
   [changeTableNameAction.type]: idOf,
+  [changeTableLogicalNameAction.type]: idOf,
   [changeTableCommentAction.type]: idOf,
   [addRelationshipAction.type]: idOf,
   [removeRelationshipAction.type]: idOf,
+  [changeRelationshipColumnsAction.type]: ({ id, start, end }) => [
+    id,
+    start.tableId,
+    end.tableId,
+  ],
   [moveTableAction.type]: idsOf,
   [viewMoveTableAction.type]: idsOf,
   [addColumnAction.type]: tableIdOf,
   [removeColumnAction.type]: tableIdOf,
   [changeColumnNameAction.type]: tableIdOf,
+  [changeColumnLogicalNameAction.type]: tableIdOf,
+  [changeColumnDomainAction.type]: tableIdOf,
   [changeColumnCommentAction.type]: tableIdOf,
   [changeColumnDataTypeAction.type]: tableIdOf,
   [changeColumnDefaultAction.type]: tableIdOf,
@@ -258,6 +332,12 @@ function touchesView(
   source: ViewSource
 ): boolean {
   if (isDocumentOnly(action.type) || isViewTransform(action.type)) return false;
+  if (
+    isNameViewOnly(action.type) &&
+    state.settings.nameViewMode === NameViewMode.physical
+  ) {
+    return false;
+  }
 
   const aimed = aimedKind[action.type];
   if (aimed && aimed(state, action.payload) !== source) return false;
@@ -286,6 +366,9 @@ const viewRelationshipSortHook: HookEffect = (action$, getState) => {
     .pipe(
       filter(action => {
         const state = getState();
+        // A word or a term commit would otherwise lay every view out again.
+        if (!reachesLayout(action, state)) return false;
+
         let touched = false;
         for (const source of VIEW_SOURCES) {
           if (
@@ -320,6 +403,7 @@ const layoutActions = [
   changeMaxWidthCommentAction,
   addRelationshipAction,
   removeRelationshipAction,
+  changeRelationshipColumnsAction,
   moveMemoAction,
   // Routing reads every table in the document, not only the two a
   // relationship connects, so the set of tables is part of its input: a
@@ -337,6 +421,17 @@ const layoutActions = [
   changeColumnDataTypeAction,
   changeColumnDefaultAction,
   sortTableAction,
+  ...alternateKeyActions,
+  // The name view picks the cells a row lays out and the text each is measured
+  // by, and a domain's name sizes the cells that name it.
+  changeNameViewModeAction,
+  changeLockSettingsAction,
+  changeTableLogicalNameAction,
+  changeColumnLogicalNameAction,
+  changeColumnDomainAction,
+  addDictionaryAction,
+  updateDictionaryAction,
+  removeDictionaryAction,
 ];
 
 /**
@@ -362,27 +457,44 @@ const viewLayoutActions = [
   viewSetLayoutAction,
   viewChangeShowModeAction,
   viewSetCentersAction,
+  viewStepCentersAction,
+];
+
+/**
+ * What can change the columns a relationship ends on or the flags it reads off
+ * them: an end column or its table removed or back by an undo, a peer or an
+ * agent, a relationship made, remapped or removed, and a key flag. A load settles them itself.
+ */
+const identificationActions = [
+  addColumnAction,
+  removeColumnAction,
+  changeColumnPrimaryKeyAction,
+  addRelationshipAction,
+  removeRelationshipAction,
+  changeRelationshipColumnsAction,
+  addTableAction,
+  removeTableAction,
+];
+
+/**
+ * The same with the not null flag added. The key flag stays, since a key
+ * turned on turns not null on with no action of its own.
+ */
+const startRelationshipActions = [
+  addColumnAction,
+  removeColumnAction,
+  changeColumnNotNullAction,
+  changeColumnPrimaryKeyAction,
+  addRelationshipAction,
+  removeRelationshipAction,
+  changeRelationshipColumnsAction,
+  addTableAction,
+  removeTableAction,
 ];
 
 export const hooks: Hook[] = [
-  [
-    [
-      removeColumnAction,
-      changeColumnPrimaryKeyAction,
-      loadJsonAction,
-      initialLoadJsonAction,
-    ],
-    identificationHook,
-  ],
-  [
-    [
-      removeColumnAction,
-      changeColumnNotNullAction,
-      loadJsonAction,
-      initialLoadJsonAction,
-    ],
-    startRelationshipHook,
-  ],
+  [identificationActions, identificationHook],
+  [startRelationshipActions, startRelationshipHook],
   [layoutActions, relationshipSortHook],
   [
     [...layoutActions, ...viewRowActions, ...viewLayoutActions],

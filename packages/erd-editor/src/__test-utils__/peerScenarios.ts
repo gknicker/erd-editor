@@ -2,20 +2,30 @@ import { query } from '@dineug/erd-editor-schema';
 import type { CompositionActions } from '@dineug/r-html';
 
 import { createImportValue, SEED } from '@/__test-utils__/peerSeed';
+import { mapColumnsAction$ } from '@/components/map-columns/mapColumnsAction';
 import {
   BracketType,
   ColumnOption,
   ColumnType,
   Database,
   Language,
+  LockSettingType,
   NameCase,
+  NameViewMode,
   OrderType,
+  ReferentialAction,
   RelationshipType,
-  SaveSettingType,
   Show,
 } from '@/constants/schema';
 import type { GeneratorAction } from '@/engine/generator.actions';
 import {
+  addDictionaryAction,
+  removeDictionaryAction,
+  updateDictionaryAction,
+} from '@/engine/modules/dictionary/atom.actions';
+import {
+  appendSchemaAction$,
+  appendSchemaJsonAction$,
   loadJsonAction$,
   loadSchemaAMLAction$,
   loadSchemaDBMLAction$,
@@ -47,6 +57,9 @@ import {
 } from '@/engine/modules/memo/generator.actions';
 import {
   addRelationshipAction,
+  changeRelationshipColumnsAction,
+  changeRelationshipOnDeleteAction,
+  changeRelationshipOnUpdateAction,
   changeRelationshipTypeAction,
   removeRelationshipAction,
 } from '@/engine/modules/relationship/atom.actions';
@@ -57,18 +70,21 @@ import {
   changeColumnOrderAction,
   changeDatabaseAction,
   changeDatabaseNameAction,
-  changeIgnoreSaveSettingsAction,
+  changeDDLScriptAction,
   changeLanguageAction,
   changeMaxWidthCommentAction,
   changeRelationshipDataTypeSyncAction,
-  changeRelationshipOptimizationAction,
   changeShowAction,
   changeTableNameCaseAction,
+  toNameViewModeAction,
 } from '@/engine/modules/settings/atom.actions';
+import { changeLockSettingsAction$ } from '@/engine/modules/settings/generator.actions';
 import {
   changeTableColorAction,
   changeTableCommentAction,
+  changeTableLogicalNameAction,
   changeTableNameAction,
+  changeTableNameDerivedAction,
   moveToTableAction,
 } from '@/engine/modules/table/atom.actions';
 import {
@@ -78,6 +94,9 @@ import {
 } from '@/engine/modules/table/generator.actions';
 import {
   changeColumnAutoIncrementAction,
+  changeColumnDomainAction,
+  changeColumnLogicalNameAction,
+  changeColumnNameDerivedAction,
   changeColumnNotNullAction,
   changeColumnPrimaryKeyAction,
   changeColumnUniqueAction,
@@ -89,11 +108,24 @@ import {
   changeColumnValueAction$,
   removeColumnAction$,
 } from '@/engine/modules/table-column/generator.actions';
+import {
+  changeTableGroupColorAction,
+  changeTableGroupNameAction,
+  moveToTableGroupAction,
+  resizeTableGroupAction,
+} from '@/engine/modules/table-group/atom.actions';
+import {
+  addTableGroupAction$,
+  moveTableGroupAction$,
+  removeTableGroupAction$,
+  setTableGroupAction$,
+} from '@/engine/modules/table-group/generator.actions';
 import type {
   DispatchFocus,
   DispatchReport,
   PeerStore,
 } from '@/engine/peer-store';
+import type { ValuesType } from '@/internal-types';
 import { bHas } from '@/utils/bit';
 
 /**
@@ -143,6 +175,19 @@ const colorMemoAction$ = (id: string, color: string): GeneratorAction =>
       id,
       color,
       prevColor: memo?.ui.color ?? '',
+    });
+  };
+
+const colorTableGroupAction$ = (id: string, color: string): GeneratorAction =>
+  function* ({ collections }) {
+    const group = query(collections)
+      .collection('tableGroupEntities')
+      .selectById(id);
+
+    yield changeTableGroupColorAction({
+      id,
+      color,
+      prevColor: group?.color ?? '',
     });
   };
 
@@ -290,6 +335,63 @@ export const setDatabase = (value: number): PeerScenario => ({
   actions: [changeDatabaseAction({ value })],
 });
 
+type RelationshipEnd = { tableId: string; columnIds: string[] };
+
+/** Points a relationship at other columns, as Map Columns saves an edit. */
+export const changeColumns = (
+  id: string,
+  start: RelationshipEnd,
+  end: RelationshipEnd
+): PeerScenario => ({
+  label: 'changeColumns',
+  actions: [changeRelationshipColumnsAction({ id, start, end })],
+});
+
+const refuseNever = () => {
+  throw new Error('the seed refused a mapping it takes');
+};
+
+/**
+ * What Map Columns confirms from a parent to a child taking a new column for
+ * each column of the parent's primary key, judged where it lands as the
+ * dialog's own dispatch is.
+ */
+export const mapWithNewColumn = (
+  startTableId: string,
+  endTableId: string,
+  keyColumnIds: string[],
+  relationshipType: number = RelationshipType.ZeroN
+): PeerScenario => ({
+  label: 'mapWithNewColumn',
+  actions: [
+    mapColumnsAction$(
+      {
+        mode: 'create',
+        startTableId,
+        endTableId,
+        relationshipType,
+        keyId: `primaryKey:${startTableId}`,
+        rows: keyColumnIds.map(parentColumnId => ({
+          parentColumnId,
+          pick: { kind: 'new' as const },
+        })),
+      },
+      { onRefuse: refuseNever }
+    ),
+  ],
+});
+
+/**
+ * Switches the names the sender shows as a reader would, the lock of the seed
+ * keeping the switch to the sender's own screen.
+ */
+const nameViewModeAction$ = (
+  value: ValuesType<typeof NameViewMode>
+): GeneratorAction =>
+  function* (state) {
+    yield toNameViewModeAction(state, value, false);
+  };
+
 /** A scenario under its own label, for the edits only the seed map makes. */
 const edit = (
   label: string,
@@ -315,6 +417,18 @@ export const SEED_SCENARIOS: Readonly<Record<string, () => PeerScenario>> = {
   colorTable: () => colorTable(SEED.users, '#ff8800'),
   moveTable: () => moveTable(SEED.users, 40, 60),
   sortTables: () => sortTables(),
+  setTableLogicalName: () =>
+    edit(
+      'setTableLogicalName',
+      [changeTableLogicalNameAction({ id: SEED.users, value: 'Member' })],
+      tableFocus(SEED.users)
+    ),
+  setTableNameDerived: () =>
+    edit(
+      'setTableNameDerived',
+      [changeTableNameDerivedAction({ id: SEED.users, value: true })],
+      tableFocus(SEED.users)
+    ),
 
   addColumn: () => addColumn(SEED.empty),
   removeColumns: () =>
@@ -383,6 +497,43 @@ export const SEED_SCENARIOS: Readonly<Record<string, () => PeerScenario>> = {
         targetId: SEED.orderId,
       }),
     ]),
+  setColumnLogicalName: () =>
+    edit(
+      'setColumnLogicalName',
+      [
+        changeColumnLogicalNameAction({
+          tableId: SEED.users,
+          id: SEED.userName,
+          value: 'Member Name',
+        }),
+      ],
+      columnFocus(SEED.users, SEED.userName, FocusType.columnName)
+    ),
+  // The note links the domain users.name already links.
+  setColumnDomain: () =>
+    edit(
+      'setColumnDomain',
+      [
+        changeColumnDomainAction({
+          tableId: SEED.orders,
+          id: SEED.orderNote,
+          value: SEED.domain,
+        }),
+      ],
+      columnFocus(SEED.orders, SEED.orderNote, FocusType.columnName)
+    ),
+  setColumnNameDerived: () =>
+    edit(
+      'setColumnNameDerived',
+      [
+        changeColumnNameDerivedAction({
+          tableId: SEED.users,
+          id: SEED.userName,
+          value: true,
+        }),
+      ],
+      columnFocus(SEED.users, SEED.userName, FocusType.columnName)
+    ),
 
   // A start table with no key, so the relationship brings one of its own.
   addRelationship: () =>
@@ -398,6 +549,15 @@ export const SEED_SCENARIOS: Readonly<Record<string, () => PeerScenario>> = {
         end: { tableId: SEED.orders, columnIds: [SEED.orderNote] },
       }),
     ]),
+  changeColumns: () =>
+    changeColumns(
+      SEED.relationship,
+      { tableId: SEED.users, columnIds: [SEED.userId] },
+      { tableId: SEED.orders, columnIds: [SEED.orderNote] }
+    ),
+  // The empty table has no column for the key, so the mapping adds one.
+  mapWithNewColumn: () =>
+    mapWithNewColumn(SEED.users, SEED.empty, [SEED.userId]),
   removeRelationship: () =>
     edit('removeRelationship', [
       removeRelationshipAction({ id: SEED.relationship }),
@@ -407,6 +567,20 @@ export const SEED_SCENARIOS: Readonly<Record<string, () => PeerScenario>> = {
       changeRelationshipTypeAction({
         id: SEED.relationship,
         value: RelationshipType.ZeroOne,
+      }),
+    ]),
+  setRelationshipOnDelete: () =>
+    edit('setRelationshipOnDelete', [
+      changeRelationshipOnDeleteAction({
+        id: SEED.relationship,
+        value: ReferentialAction.cascade,
+      }),
+    ]),
+  setRelationshipOnUpdate: () =>
+    edit('setRelationshipOnUpdate', [
+      changeRelationshipOnUpdateAction({
+        id: SEED.relationship,
+        value: ReferentialAction.setNull,
       }),
     ]),
 
@@ -460,6 +634,80 @@ export const SEED_SCENARIOS: Readonly<Record<string, () => PeerScenario>> = {
     edit('moveMemo', [moveToMemoAction({ id: SEED.memo, x: 960, y: 420 })]),
   resizeMemo: () => resizeMemo(SEED.memo, 320, 240),
 
+  // Drawn round the empty table, which joins it.
+  addTableGroup: () =>
+    edit('addTableGroup', [
+      addTableGroupAction$({ x: 60, y: 460, width: 500, height: 200 }),
+    ]),
+  removeTableGroup: () =>
+    edit('removeTableGroup', [removeTableGroupAction$(SEED.group)]),
+  renameTableGroup: () =>
+    edit('renameTableGroup', [
+      changeTableGroupNameAction({ id: SEED.group, value: 'members' }),
+    ]),
+  colorTableGroup: () =>
+    edit('colorTableGroup', [colorTableGroupAction$(SEED.group, '#0090ff')]),
+  moveTableGroup: () =>
+    edit('moveTableGroup', [moveTableGroupAction$([SEED.group], 40, 0)]),
+  placeTableGroup: () =>
+    edit('placeTableGroup', [
+      moveToTableGroupAction({ id: SEED.group, x: -200, y: 40 }),
+    ]),
+  resizeTableGroup: () =>
+    edit('resizeTableGroup', [
+      resizeTableGroupAction({
+        id: SEED.group,
+        x: 60,
+        y: 60,
+        width: 900,
+        height: 240,
+      }),
+    ]),
+  setTableGroup: () =>
+    edit('setTableGroup', [setTableGroupAction$([SEED.orders], SEED.group)]),
+
+  addWord: () =>
+    edit('addWord', [
+      addDictionaryAction({
+        kind: 'word',
+        id: 'word_number',
+        values: { name: 'Number', abbreviation: 'NO', englishName: 'Number' },
+      }),
+    ]),
+  // A term on the seed's domain, so it adds a row and names one listed.
+  addTerm: () =>
+    edit('addTerm', [
+      addDictionaryAction({
+        kind: 'term',
+        id: 'term_member_number',
+        values: {
+          name: 'Member Number',
+          physicalName: 'MBR_NO',
+          domainId: SEED.domain,
+        },
+      }),
+    ]),
+  addDomain: () =>
+    edit('addDomain', [
+      addDictionaryAction({
+        kind: 'domain',
+        id: 'domain_number',
+        values: { name: 'Number', category: 'Number', dataType: 'INT' },
+      }),
+    ]),
+  updateTerm: () =>
+    edit('updateTerm', [
+      updateDictionaryAction({
+        kind: 'term',
+        id: SEED.term,
+        values: { physicalName: 'MBR_NAME', description: 'what others see' },
+      }),
+    ]),
+  removeWord: () =>
+    edit('removeWord', [
+      removeDictionaryAction({ kind: 'word', id: SEED.nameWord }),
+    ]),
+
   setDatabaseName: () =>
     edit('setDatabaseName', [changeDatabaseNameAction({ value: 'shop' })]),
   setDatabase: () => setDatabase(Database.PostgreSQL),
@@ -481,10 +729,6 @@ export const SEED_SCENARIOS: Readonly<Record<string, () => PeerScenario>> = {
     edit('setRelationshipDataTypeSync', [
       changeRelationshipDataTypeSyncAction({ value: false }),
     ]),
-  setRelationshipOptimization: () =>
-    edit('setRelationshipOptimization', [
-      changeRelationshipOptimizationAction({ value: true }),
-    ]),
   setColumnOrder: () =>
     edit('setColumnOrder', [
       changeColumnOrderAction({
@@ -498,11 +742,21 @@ export const SEED_SCENARIOS: Readonly<Record<string, () => PeerScenario>> = {
     ]),
   setMaxWidthComment: () =>
     edit('setMaxWidthComment', [changeMaxWidthCommentAction({ value: 120 })]),
-  setIgnoreSaveSettings: () =>
-    edit('setIgnoreSaveSettings', [
-      changeIgnoreSaveSettingsAction({
-        saveSettingType: SaveSettingType.scroll,
-        value: true,
+  setLockSettings: () =>
+    edit('setLockSettings', [
+      changeLockSettingsAction$(LockSettingType.language, false),
+    ]),
+  setNameViewMode: () =>
+    edit('setNameViewMode', [nameViewModeAction$(NameViewMode.logical)]),
+  unlockNameViewMode: () =>
+    edit('unlockNameViewMode', [
+      changeLockSettingsAction$(LockSettingType.unlockNameViewMode, false),
+    ]),
+  setDDLScript: () =>
+    edit('setDDLScript', [
+      changeDDLScriptAction({
+        position: 'before',
+        value: 'CREATE EXTENSION IF NOT EXISTS pgcrypto;',
       }),
     ]),
 
@@ -527,4 +781,13 @@ export const SEED_SCENARIOS: Readonly<Record<string, () => PeerScenario>> = {
       loadSchemaAMLAction$('accounts\n  id int pk\n  email varchar'),
     ]),
   importJson: () => edit('importJson', [loadJsonAction$(createImportValue())]),
+  appendSql: () =>
+    edit('appendSql', [
+      appendSchemaAction$(
+        'sql',
+        'CREATE TABLE accounts (id INT NOT NULL PRIMARY KEY, email VARCHAR(255));'
+      ),
+    ]),
+  appendJson: () =>
+    edit('appendJson', [appendSchemaJsonAction$(createImportValue())]),
 };

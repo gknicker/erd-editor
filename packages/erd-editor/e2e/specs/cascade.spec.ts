@@ -2,7 +2,7 @@ import { expect, test } from '../support/fixtures';
 import { twoTables } from '../support/schema';
 
 test.describe('cascade invariants', () => {
-  test('the global bucket is adopted ahead of every component sheet', async ({
+  test('the theme tokens, then the global bucket, are adopted ahead of every component sheet', async ({
     erd,
     page,
   }) => {
@@ -24,22 +24,24 @@ test.describe('cascade invariants', () => {
           .map((rules, index) => (rules.some(r => SCOPE.test(r)) ? -1 : index))
           .filter(index => index >= 0),
         treeStyleCount: root.querySelectorAll('style').length,
-        firstAdoptedRule: sheets[0]?.[0] ?? '',
+        themeRule: sheets[0]?.[0] ?? '',
+        firstGlobalRule: sheets[1]?.[0] ?? '',
         lastGlobalRule: sheets[4]?.[0] ?? '',
       };
     });
 
-    // The five css.global sheets, and nothing else, hold the head of the adopted list.
+    // The theme's own sheet, then the four css.global sheets, and nothing else,
+    // hold the head of the adopted list.
     expect(layout.globalSheetIndexes).toEqual([0, 1, 2, 3, 4]);
-    expect(layout.firstAdoptedRule.startsWith('p, ol, ul')).toBe(true);
+    expect(layout.themeRule.startsWith(':host')).toBe(true);
+    expect(layout.themeRule).toContain('--erd-editor-');
+    expect(layout.firstGlobalRule.startsWith('p, ol, ul')).toBe(true);
 
-    // The color picker is the fifth, last in the bucket — which is where it sat relative to the
-    // other four when it was a tree <style>, minus the inversion that put it ahead of the whole
-    // adopted pool.
-    expect(layout.lastGlobalRule).toContain('.easylogic-colorpicker');
+    // The scrollbar sheet is the fourth global sheet, last in the bucket.
+    expect(layout.lastGlobalRule.startsWith('::-webkit-scrollbar')).toBe(true);
 
-    // The theme tokens are the one <style> element left in the tree.
-    expect(layout.treeStyleCount).toBe(1);
+    // The theme tokens are a sheet too, so no <style> element is left in the tree.
+    expect(layout.treeStyleCount).toBe(0);
   });
 
   test('the theme tokens and the global bucket define disjoint custom properties', async ({
@@ -59,22 +61,18 @@ test.describe('cascade invariants', () => {
       const declared = (text: string) =>
         Array.from(text.matchAll(/(--[\w-]+)\s*:/g)).map(match => match[1]);
 
-      const themeStyle = Array.from(root.querySelectorAll('style')).find(
-        element => (element.textContent ?? '').includes('--erd-editor-')
-      );
-      if (!themeStyle) throw new Error('the theme tokens <style> is missing');
-
       const SCOPE = /\._[0-9a-z]{7}/;
-      const bucket = root.adoptedStyleSheets
-        .map(sheet => Array.from(sheet.cssRules).map(rule => rule.cssText))
-        .filter(rules => !rules.some(rule => SCOPE.test(rule)))
-        .flat()
-        .join('\n');
+      const [theme, ...shared] = root.adoptedStyleSheets.map(sheet =>
+        Array.from(sheet.cssRules)
+          .map(rule => rule.cssText)
+          .join('\n')
+      );
+      if (!theme?.includes('--erd-editor-')) {
+        throw new Error('the theme tokens sheet is not the first adopted');
+      }
+      const bucket = shared.filter(text => !SCOPE.test(text)).join('\n');
 
-      return {
-        theme: declared(themeStyle.textContent ?? ''),
-        bucket: declared(bucket),
-      };
+      return { theme: declared(theme), bucket: declared(bucket) };
     });
 
     expect(names.theme.length).toBeGreaterThan(50);
@@ -114,20 +112,19 @@ test.describe('cascade invariants', () => {
     expect(scrollbar.scrollbarColor).not.toBe('auto');
   });
 
-  test('the color picker renders against the folded global sheet', async ({
+  test('the color picker draws its own scoped panel over the floating toolbar', async ({
     erd,
     page,
   }) => {
     await erd.seed(twoTables());
 
-    // The picker's markup is built by the upstream library at runtime, so its sheet is the one
-    // that had to stay unscoped when it moved from a tree <style> to css.global. Opening it
-    // is what proves the selectors still match the class names that library writes.
+    // The picker's markup is the editor's own, so its rules are scoped like
+    // every other component's; opening it proves they reach the shadow root.
     await erd.tableEl('users').locator('div.table-header-color').click();
-    const picker = page.locator('erd-editor .easylogic-colorpicker');
-    await expect(picker).toBeVisible();
+    const panel = page.locator('erd-editor .color-picker [role="dialog"]');
+    await expect(panel).toBeVisible();
 
-    const applied = await picker.evaluate(element => {
+    const applied = await panel.evaluate(element => {
       const style = window.getComputedStyle(element);
       return {
         position: style.position,
@@ -137,13 +134,17 @@ test.describe('cascade invariants', () => {
       };
     });
 
-    // .easylogic-colorpicker — the first rule of the sheet, and unreachable if scoping had
-    // renamed the class out from under the library.
+    // A z-index of 2 stacks it over the floating toolbar's 1, as the context menu stacks.
     expect(applied).toEqual({
       position: 'relative',
-      width: '224px',
-      zIndex: '1000',
+      width: '220px',
+      zIndex: '2',
       borderTopStyle: 'solid',
     });
+
+    const area = await panel
+      .getByRole('slider', { name: 'Saturation and brightness' })
+      .boundingBox();
+    expect(area?.height).toBe(150);
   });
 });

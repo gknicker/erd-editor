@@ -1,7 +1,7 @@
 import { AnyAction } from '@dineug/r-html';
-import { nanoid } from 'nanoid';
+import { uuid25 } from '@dineug/uuid';
 
-import { ColumnOption } from '@/constants/schema';
+import { ColumnOption, OrderType } from '@/constants/schema';
 import {
   addIndexAction,
   changeIndexNameAction,
@@ -19,7 +19,10 @@ import { addRelationshipAction } from '@/engine/modules/relationship/atom.action
 import {
   addTableAction,
   changeTableCommentAction,
+  changeTableGroupAction,
+  changeTableLogicalNameAction,
   changeTableNameAction,
+  changeTableNameDerivedAction,
 } from '@/engine/modules/table/atom.actions';
 import {
   addColumnAction,
@@ -27,11 +30,18 @@ import {
   changeColumnCommentAction,
   changeColumnDataTypeAction,
   changeColumnDefaultAction,
+  changeColumnDomainAction,
+  changeColumnLogicalNameAction,
   changeColumnNameAction,
+  changeColumnNameDerivedAction,
   changeColumnNotNullAction,
   changeColumnPrimaryKeyAction,
   changeColumnUniqueAction,
 } from '@/engine/modules/table-column/atom.actions';
+import {
+  addTableGroupAction,
+  changeTableGroupNameAction,
+} from '@/engine/modules/table-group/atom.actions';
 import { bHas } from '@/utils/bit';
 import {
   ClipboardColumn,
@@ -42,29 +52,69 @@ import {
   PlacementPoint,
 } from '@/utils/table-clipboard';
 
+/**
+ * A table group a document brings, its rect where it lands and the source ids
+ * of the tables it holds, which no clipboard payload carries.
+ */
+export type CreateEntityTableGroup = {
+  sourceId: string;
+  name: string;
+  color: string;
+  tableIds: string[];
+  ui: { x: number; y: number; width: number; height: number; zIndex: number };
+};
+
 export type CreateEntityInput = {
   tables: ClipboardTable[];
   columns: ClipboardColumn[];
   memos: ClipboardMemo[];
   relationships: ClipboardRelationship[];
   indexes: ClipboardIndex[];
+  tableGroups?: CreateEntityTableGroup[];
 };
 
 export type CreateEntityActions = {
   actions: AnyAction[];
   tableIds: string[];
   memoIds: string[];
+  tableGroupIds: string[];
+};
+
+export type CreateEntityOptions = {
+  /**
+   * Whether a field is set only when it holds something other than what a new
+   * entity starts with, an empty text, a flag off or an ascending order, which
+   * leaves the same entities in fewer actions.
+   */
+  valuesOnly?: boolean;
 };
 
 // changeColor/memo.resize are in pushStreamHistoryMap and would land as a
 // second, debounced history command, so colour and size ride the add payload.
 export function toCreateEntityActions(
-  { tables, columns, memos, relationships, indexes }: CreateEntityInput,
-  placement: Map<string, PlacementPoint>
+  {
+    tables,
+    columns,
+    memos,
+    relationships,
+    indexes,
+    tableGroups = [],
+  }: CreateEntityInput,
+  placement: Map<string, PlacementPoint>,
+  { valuesOnly = false }: CreateEntityOptions = {}
 ): CreateEntityActions {
   const actions: AnyAction[] = [];
+  const set = (holds: boolean, action: AnyAction) => {
+    (holds || !valuesOnly) && actions.push(action);
+  };
+  // The dictionary fields ride only when set, so a document holding none
+  // copies in the batch it did before them.
+  const carry = (holds: boolean, action: AnyAction) => {
+    holds && actions.push(action);
+  };
   const tableIds: string[] = [];
   const memoIds: string[] = [];
+  const tableGroupIds: string[] = [];
   const columnBySourceId = new Map(
     columns.map(column => [column.sourceId, column])
   );
@@ -75,7 +125,7 @@ export function toCreateEntityActions(
     const point = placement.get(table.sourceId);
     if (!point) continue;
 
-    const tableId = nanoid();
+    const tableId = uuid25();
     tableIds.push(tableId);
     tableIdBySourceId.set(table.sourceId, tableId);
 
@@ -88,40 +138,81 @@ export function toCreateEntityActions(
           zIndex: point.zIndex,
           color: table.ui.color,
         },
-      }),
-      changeTableNameAction({ id: tableId, value: table.name }),
+      })
+    );
+    set(
+      !!table.name,
+      changeTableNameAction({ id: tableId, value: table.name })
+    );
+    carry(
+      !!table.logicalName,
+      changeTableLogicalNameAction({
+        id: tableId,
+        value: table.logicalName ?? '',
+      })
+    );
+    set(
+      !!table.comment,
       changeTableCommentAction({ id: tableId, value: table.comment })
+    );
+    carry(
+      table.nameDerived === true,
+      changeTableNameDerivedAction({ id: tableId, value: true })
     );
 
     for (const sourceColumnId of table.columnIds) {
       const column = columnBySourceId.get(sourceColumnId);
       if (!column) continue;
 
-      const payload = { id: nanoid(), tableId };
+      const payload = { id: uuid25(), tableId };
       columnIdBySourceId.set(sourceColumnId, payload.id);
 
-      actions.push(
-        addColumnAction(payload),
-        changeColumnNameAction({ ...payload, value: column.name }),
-        changeColumnDataTypeAction({ ...payload, value: column.dataType }),
-        changeColumnDefaultAction({ ...payload, value: column.default }),
-        changeColumnCommentAction({ ...payload, value: column.comment }),
-        changeColumnPrimaryKeyAction({
+      const primaryKey = bHas(column.options, ColumnOption.primaryKey);
+      const notNull = bHas(column.options, ColumnOption.notNull);
+      const unique = bHas(column.options, ColumnOption.unique);
+      const autoIncrement = bHas(column.options, ColumnOption.autoIncrement);
+
+      actions.push(addColumnAction(payload));
+      set(
+        !!column.name,
+        changeColumnNameAction({ ...payload, value: column.name })
+      );
+      carry(
+        !!column.logicalName,
+        changeColumnLogicalNameAction({
           ...payload,
-          value: bHas(column.options, ColumnOption.primaryKey),
-        }),
-        changeColumnNotNullAction({
-          ...payload,
-          value: bHas(column.options, ColumnOption.notNull),
-        }),
-        changeColumnUniqueAction({
-          ...payload,
-          value: bHas(column.options, ColumnOption.unique),
-        }),
-        changeColumnAutoIncrementAction({
-          ...payload,
-          value: bHas(column.options, ColumnOption.autoIncrement),
+          value: column.logicalName ?? '',
         })
+      );
+      set(
+        !!column.dataType,
+        changeColumnDataTypeAction({ ...payload, value: column.dataType })
+      );
+      carry(
+        !!column.domainId,
+        changeColumnDomainAction({ ...payload, value: column.domainId ?? '' })
+      );
+      set(
+        !!column.default,
+        changeColumnDefaultAction({ ...payload, value: column.default })
+      );
+      set(
+        !!column.comment,
+        changeColumnCommentAction({ ...payload, value: column.comment })
+      );
+      set(
+        primaryKey,
+        changeColumnPrimaryKeyAction({ ...payload, value: primaryKey })
+      );
+      set(notNull, changeColumnNotNullAction({ ...payload, value: notNull }));
+      set(unique, changeColumnUniqueAction({ ...payload, value: unique }));
+      set(
+        autoIncrement,
+        changeColumnAutoIncrementAction({ ...payload, value: autoIncrement })
+      );
+      carry(
+        bHas(column.options, ColumnOption.nameDerived),
+        changeColumnNameDerivedAction({ ...payload, value: true })
       );
     }
   }
@@ -146,8 +237,10 @@ export function toCreateEntityActions(
 
     actions.push(
       addRelationshipAction({
-        id: nanoid(),
+        id: uuid25(),
         relationshipType: relationship.relationshipType,
+        onDelete: relationship.onDelete,
+        onUpdate: relationship.onUpdate,
         start: { tableId: startTableId, columnIds: startColumnIds },
         end: { tableId: endTableId, columnIds: endColumnIds },
       })
@@ -164,20 +257,25 @@ export function toCreateEntityActions(
     );
     if (!columnIds) continue;
 
-    const indexId = nanoid();
+    const indexId = uuid25();
 
-    actions.push(
-      addIndexAction({ id: indexId, tableId }),
-      changeIndexNameAction({ id: indexId, tableId, value: index.name }),
+    actions.push(addIndexAction({ id: indexId, tableId }));
+    set(
+      !!index.name,
+      changeIndexNameAction({ id: indexId, tableId, value: index.name })
+    );
+    set(
+      index.unique,
       changeIndexUniqueAction({ id: indexId, tableId, value: index.unique })
     );
 
     index.indexColumns.forEach(({ orderType }, i) => {
-      const id = nanoid();
+      const id = uuid25();
       const columnId = columnIds[i];
 
-      actions.push(
-        addIndexColumnAction({ id, indexId, tableId, columnId }),
+      actions.push(addIndexColumnAction({ id, indexId, tableId, columnId }));
+      set(
+        orderType !== OrderType.ASC,
         changeIndexColumnOrderTypeAction({
           id,
           indexId,
@@ -192,7 +290,7 @@ export function toCreateEntityActions(
     const point = placement.get(memo.sourceId);
     if (!point) continue;
 
-    const memoId = nanoid();
+    const memoId = uuid25();
     memoIds.push(memoId);
 
     actions.push(
@@ -206,12 +304,40 @@ export function toCreateEntityActions(
           width: memo.ui.width,
           height: memo.ui.height,
         },
-      }),
-      changeMemoValueAction({ id: memoId, value: memo.value })
+      })
     );
+    set(!!memo.value, changeMemoValueAction({ id: memoId, value: memo.value }));
   }
 
-  return { actions, tableIds, memoIds };
+  // A group takes new ids for itself and its members alike, and a member the
+  // input does not bring is left out of it.
+  for (const group of tableGroups) {
+    const tableGroupId = uuid25();
+    tableGroupIds.push(tableGroupId);
+
+    actions.push(
+      addTableGroupAction({
+        id: tableGroupId,
+        color: group.color,
+        ui: { ...group.ui },
+      })
+    );
+    set(
+      !!group.name,
+      changeTableGroupNameAction({ id: tableGroupId, value: group.name })
+    );
+
+    for (const sourceTableId of group.tableIds) {
+      const tableId = tableIdBySourceId.get(sourceTableId);
+      if (!tableId) continue;
+
+      actions.push(
+        changeTableGroupAction({ id: tableId, value: tableGroupId })
+      );
+    }
+  }
+
+  return { actions, tableIds, memoIds, tableGroupIds };
 }
 
 /**

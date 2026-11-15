@@ -1,79 +1,77 @@
 import { query } from '@dineug/erd-editor-schema';
-import { nanoid } from 'nanoid';
+import { uuid25 } from '@dineug/uuid';
 
-import { ColumnOption } from '@/constants/schema';
+import { ColumnOption, Database } from '@/constants/schema';
 import { RootState } from '@/engine/state';
 import { bHas } from '@/utils/bit';
+import {
+  autoNameIgnoreCase,
+  getBracket,
+  primaryKeyColumns,
+  tableNamePart,
+} from '@/utils/tableName';
 
 import {
-  autoName,
+  commentToWrite,
+  CreateSchemaOptions,
   FormatColumnOptions,
+  formatDefault,
   FormatIndexOptions,
   formatNames,
+  formatReferentialActions,
   FormatRelationOptions,
   formatSize,
   formatSpace,
   FormatTableOptions,
-  getBracket,
-  KeyColumn,
+  ifNotExists,
   Name,
-  orderByNameASC,
   primaryKey,
-  primaryKeyColumns,
+  referentialActionSupport,
+  selectIndexColumns,
+  toForeignKeyPairs,
   toOrderName,
+  toSchemaEntities,
+  toStringLiteral,
   unique,
   uniqueColumns,
 } from './utils';
 
-export function createSchema(state: RootState): string {
-  const {
-    settings: { bracketType },
-    doc: { tableIds, relationshipIds, indexIds },
-    collections,
-  } = state;
+// The header and the drop block are MySQL's, which MariaDB reads alike.
+export { formatDropBlock, formatHeader } from './MySQL';
+
+const ACTION_SUPPORT = referentialActionSupport(Database.MariaDB);
+
+export function createSchema(
+  state: RootState,
+  tableIds?: readonly string[],
+  { statements, written, logicalNameAsComment }: CreateSchemaOptions = {}
+): string {
   const fkNames: Name[] = [];
   const indexNames: Name[] = [];
   const stringBuffer: string[] = [''];
-  const bracket = getBracket(bracketType);
-  const tables = query(collections)
-    .collection('tableEntities')
-    .selectByIds(tableIds)
-    .sort(orderByNameASC);
-  const relationships = query(collections)
-    .collection('relationshipEntities')
-    .selectByIds(relationshipIds);
-  const indexes = query(collections)
-    .collection('indexEntities')
-    .selectByIds(indexIds);
+  const { tables, relationships, indexes } = toSchemaEntities(state, tableIds);
 
   tables.forEach(table => {
-    formatTable(state, { table, buffer: stringBuffer });
+    written?.tables.push(table);
+    formatTable(state, {
+      table,
+      buffer: stringBuffer,
+      statements,
+      logicalNameAsComment,
+    });
     stringBuffer.push('');
 
-    const columns = query(collections)
-      .collection('tableColumnEntities')
-      .selectByIds(table.columnIds);
-
-    // unique
-    if (unique(columns)) {
-      const uqColumns = uniqueColumns(columns);
-      uqColumns.forEach(column => {
-        stringBuffer.push(`ALTER TABLE ${bracket}${table.name}${bracket}`);
-        stringBuffer.push(
-          `  ADD CONSTRAINT ${bracket}UQ_${table.name}_${column.name}${bracket} UNIQUE (${bracket}${column.name}${bracket});`
-        );
-        stringBuffer.push('');
-      });
-    }
+    formatUnique(state, { table, buffer: stringBuffer, statements });
   });
 
   relationships.forEach(relationship => {
-    formatRelation(state, {
+    const wrote = formatRelation(state, {
       relationship,
       buffer: stringBuffer,
       fkNames,
+      statements,
     });
-    stringBuffer.push('');
+    if (wrote) stringBuffer.push('');
   });
 
   indexes.forEach(index => {
@@ -81,6 +79,7 @@ export function createSchema(state: RootState): string {
       index,
       buffer: stringBuffer,
       indexNames,
+      statements,
     });
     stringBuffer.push('');
   });
@@ -90,7 +89,7 @@ export function createSchema(state: RootState): string {
 
 export function formatTable(
   state: RootState,
-  { buffer, table }: FormatTableOptions
+  { buffer, table, statements, logicalNameAsComment }: FormatTableOptions
 ) {
   const {
     settings: { bracketType },
@@ -101,7 +100,9 @@ export function formatTable(
     .collection('tableColumnEntities')
     .selectByIds(table.columnIds);
 
-  buffer.push(`CREATE TABLE ${bracket}${table.name}${bracket}`);
+  buffer.push(
+    `CREATE TABLE${ifNotExists(statements)} ${bracket}${table.name}${bracket}`
+  );
   buffer.push(`(`);
   const pk = primaryKey(columns);
   const spaceSize = formatSize(columns);
@@ -113,6 +114,7 @@ export function formatTable(
         isComma: true,
         spaceSize,
         buffer,
+        logicalNameAsComment,
       });
     } else {
       formatColumn(state, {
@@ -120,6 +122,7 @@ export function formatTable(
         isComma: columns.length !== i + 1,
         spaceSize,
         buffer,
+        logicalNameAsComment,
       });
     }
   });
@@ -128,16 +131,47 @@ export function formatTable(
     const pkColumns = primaryKeyColumns(columns);
     buffer.push(`  PRIMARY KEY (${formatNames(pkColumns, bracket)})`);
   }
-  if (table.comment.trim() === '') {
+  const comment = commentToWrite(table, logicalNameAsComment);
+  if (comment === '') {
     buffer.push(`);`);
   } else {
-    buffer.push(`) COMMENT '${table.comment}';`);
+    buffer.push(`) COMMENT ${toStringLiteral(comment)};`);
   }
+}
+
+/**
+ * One named constraint per column the diagram marks unique, after the table.
+ * The whole export and the per-table Schema SQL tab both write it.
+ */
+export function formatUnique(
+  { settings: { bracketType }, collections }: RootState,
+  { buffer, table, statements }: FormatTableOptions
+) {
+  const bracket = getBracket(bracketType);
+  const columns = query(collections)
+    .collection('tableColumnEntities')
+    .selectByIds(table.columnIds);
+
+  if (!unique(columns)) return;
+
+  uniqueColumns(columns).forEach(column => {
+    buffer.push(`ALTER TABLE ${bracket}${table.name}${bracket}`);
+    buffer.push(
+      `  ADD CONSTRAINT ${bracket}UQ_${tableNamePart(table.name, bracketType)}_${column.name}${bracket} UNIQUE${ifNotExists(statements)} (${bracket}${column.name}${bracket});`
+    );
+    buffer.push('');
+  });
 }
 
 function formatColumn(
   { settings: { bracketType } }: RootState,
-  { buffer, column, isComma, spaceSize }: FormatColumnOptions
+  {
+    buffer,
+    column,
+    isComma,
+    spaceSize,
+    logicalNameAsComment,
+  }: FormatColumnOptions
 ) {
   const bracket = getBracket(bracketType);
   const stringBuffer: string[] = [];
@@ -159,69 +193,62 @@ function formatColumn(
     stringBuffer.push(`AUTO_INCREMENT`);
   } else {
     if (column.default.trim() !== '') {
-      stringBuffer.push(`DEFAULT ${column.default}`);
+      stringBuffer.push(
+        `DEFAULT ${formatDefault(column.default, Database.MariaDB)}`
+      );
     }
   }
-  if (column.comment.trim() !== '') {
-    stringBuffer.push(`COMMENT '${column.comment}'`);
+  const comment = commentToWrite(column, logicalNameAsComment);
+  if (comment !== '') {
+    stringBuffer.push(`COMMENT ${toStringLiteral(comment)}`);
   }
   buffer.push(stringBuffer.join(' ') + `${isComma ? ',' : ''}`);
 }
 
 function formatRelation(
-  { settings: { bracketType }, collections }: RootState,
-  { buffer, relationship, fkNames }: FormatRelationOptions
-) {
+  state: RootState,
+  { buffer, relationship, fkNames, statements }: FormatRelationOptions
+): boolean {
+  const {
+    settings: { bracketType },
+  } = state;
+  const columns = toForeignKeyPairs(state, relationship);
+  if (!columns) return false;
+
+  const { startTable, endTable } = columns;
   const bracket = getBracket(bracketType);
-  const tableCollection = query(collections).collection('tableEntities');
-  const columnCollection = query(collections).collection('tableColumnEntities');
-  const startTable = tableCollection.selectById(relationship.start.tableId);
-  const endTable = tableCollection.selectById(relationship.end.tableId);
+  buffer.push(`ALTER TABLE ${bracket}${endTable.name}${bracket}`);
 
-  if (startTable && endTable) {
-    buffer.push(`ALTER TABLE ${bracket}${endTable.name}${bracket}`);
+  // FK
+  const startName = tableNamePart(startTable.name, bracketType);
+  const endName = tableNamePart(endTable.name, bracketType);
+  const fkName = autoNameIgnoreCase(fkNames, `FK_${startName}_TO_${endName}`);
+  fkNames.push({
+    id: uuid25(),
+    name: fkName,
+  });
 
-    // FK
-    let fkName = `FK_${startTable.name}_TO_${endTable.name}`;
-    fkName = autoName(fkNames, '', fkName);
-    fkNames.push({
-      id: nanoid(),
-      name: fkName,
-    });
+  buffer.push(`  ADD CONSTRAINT ${bracket}${fkName}${bracket}`);
 
-    buffer.push(`  ADD CONSTRAINT ${bracket}${fkName}${bracket}`);
-
-    // key
-    const columns: KeyColumn = {
-      start: [],
-      end: [],
-    };
-    relationship.end.columnIds.forEach(columnId => {
-      const column = columnCollection.selectById(columnId);
-      if (column) {
-        columns.end.push(column);
-      }
-    });
-    relationship.start.columnIds.forEach(columnId => {
-      const column = columnCollection.selectById(columnId);
-      if (column) {
-        columns.start.push(column);
-      }
-    });
-
-    buffer.push(`    FOREIGN KEY (${formatNames(columns.end, bracket)})`);
-    buffer.push(
-      `    REFERENCES ${bracket}${startTable.name}${bracket} (${formatNames(
-        columns.start,
-        bracket
-      )});`
-    );
-  }
+  buffer.push(
+    `    FOREIGN KEY${ifNotExists(statements)} (${formatNames(columns.end, bracket)})`
+  );
+  buffer.push(
+    `    REFERENCES ${bracket}${startTable.name}${bracket} (${formatNames(
+      columns.start,
+      bracket
+    )})`,
+    ...formatReferentialActions(relationship, ACTION_SUPPORT).map(
+      clause => `    ${clause}`
+    )
+  );
+  buffer[buffer.length - 1] += ';';
+  return true;
 }
 
 export function formatIndex(
   { settings: { bracketType }, collections }: RootState,
-  { buffer, index, indexNames }: FormatIndexOptions
+  { buffer, index, indexNames, statements }: FormatIndexOptions
 ) {
   const bracket = getBracket(bracketType);
   const table = query(collections)
@@ -229,40 +256,28 @@ export function formatIndex(
     .selectById(index.tableId);
   if (!table) return;
 
-  const columnNames = query(collections)
-    .collection('indexColumnEntities')
-    .selectByIds(index.indexColumnIds)
-    .map(indexColumn => {
-      const column = query(collections)
-        .collection('tableColumnEntities')
-        .selectById(indexColumn.columnId);
-      if (column) {
-        return {
-          name: `${bracket}${column.name}${bracket} ${toOrderName(
-            indexColumn.orderType
-          )}`,
-        };
-      }
-      return null;
+  const columnNames = selectIndexColumns(collections, table, index).map(
+    ({ indexColumn, column }) => ({
+      name: `${bracket}${column.name}${bracket} ${toOrderName(
+        indexColumn.orderType
+      )}`,
     })
-    .filter(columnName => columnName !== null) as { name: string }[];
+  );
 
   if (columnNames.length !== 0) {
     let indexName = index.name;
     if (index.name.trim() === '') {
-      indexName = `IDX_${table.name}`;
-      indexName = autoName(indexNames, '', indexName);
+      const tableName = tableNamePart(table.name, bracketType);
+      indexName = autoNameIgnoreCase(indexNames, `IDX_${tableName}`);
       indexNames.push({
-        id: nanoid(),
+        id: uuid25(),
         name: indexName,
       });
     }
 
-    if (index.unique) {
-      buffer.push(`CREATE UNIQUE INDEX ${bracket}${indexName}${bracket}`);
-    } else {
-      buffer.push(`CREATE INDEX ${bracket}${indexName}${bracket}`);
-    }
+    buffer.push(
+      `CREATE ${index.unique ? 'UNIQUE ' : ''}INDEX${ifNotExists(statements)} ${bracket}${indexName}${bracket}`
+    );
     buffer.push(
       `  ON ${bracket}${table.name}${bracket} (${formatNames(columnNames)});`
     );

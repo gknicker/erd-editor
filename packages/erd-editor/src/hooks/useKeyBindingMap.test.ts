@@ -15,8 +15,19 @@ import {
   Mounted,
 } from '@/__test-utils__/index';
 import { AppContext } from '@/components/appContext';
+import {
+  measureRoot,
+  observeViewport,
+} from '@/components/erd-editor/viewportLayout';
+import ExplorerController from '@/components/explorer/explorer-controller/ExplorerController';
+import { explorerViewOf } from '@/components/explorer/explorerView';
+import { Open } from '@/constants/open';
+import { CanvasType } from '@/constants/schema';
+import { changeOpenMapAction } from '@/engine/modules/editor/atom.actions';
+import { changeCanvasTypeAction } from '@/engine/modules/settings/atom.actions';
 import { useKeyBindingMap } from '@/hooks/useKeyBindingMap';
 import { KeyBindingName } from '@/utils/keyboard-shortcut';
+import { TAKEOVERS } from '@/utils/takeover';
 
 const Probe: FC<{}> = (props, ctx) => {
   const root = createRef<HTMLDivElement>();
@@ -34,7 +45,7 @@ type KeyInit = {
   keyCode?: number;
 };
 
-/** The modifier $mod resolves to, read off the platform the way tinykeys reads it. */
+/** The modifier $mod resolves to, read off the platform the way hasAppleDevice reads it. */
 const APPLE = /Mac|iPod|iPhone|iPad/.test(navigator.platform);
 
 let mounted: Mounted | null = null;
@@ -138,6 +149,33 @@ describe('useKeyBindingMap', () => {
     expect(event.defaultPrevented).toBe(true);
   });
 
+  it('reads T then G on the canvas as grouping the selected tables, the G prevented', () => {
+    const first = press({ key: 't', code: 'KeyT' });
+    expect(shortcuts).toHaveLength(0);
+    expect(first.defaultPrevented).toBe(false);
+
+    const second = press({ key: 'g', code: 'KeyG' });
+
+    expect(shortcuts.map(({ type }) => type)).toEqual([
+      KeyBindingName.groupSelectedTables,
+    ]);
+    expect(second.defaultPrevented).toBe(true);
+  });
+
+  it('leaves T then G to a caret, where it is part of a word being typed', () => {
+    const $root = mounted!.container.querySelector('.root') as HTMLDivElement;
+    const input = document.createElement('input');
+    $root.append(input);
+
+    // "outgoing" holds the pair.
+    input.dispatchEvent(keydown({ key: 't', code: 'KeyT' }));
+    const event = keydown({ key: 'g', code: 'KeyG' });
+    input.dispatchEvent(event);
+
+    expect(shortcuts).toHaveLength(0);
+    expect(event.defaultPrevented).toBe(false);
+  });
+
   it('leaves Space to a caret, which owns it as a space', () => {
     const $root = mounted!.container.querySelector('.root') as HTMLDivElement;
     const input = document.createElement('input');
@@ -162,6 +200,194 @@ describe('useKeyBindingMap', () => {
     expect(event.defaultPrevented).toBe(false);
   });
 
+  it('takes $mod+KeyK from a caret too, as a command palette opens from any field', () => {
+    const $root = mounted!.container.querySelector('.root') as HTMLDivElement;
+    const input = document.createElement('input');
+    $root.append(input);
+
+    const event = keydown({ key: 'k', code: 'KeyK', mod: true });
+    input.dispatchEvent(event);
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(shortcuts.map(({ type }) => type)).toEqual([KeyBindingName.search]);
+  });
+
+  it('reads a bare Delete and Backspace as removing the selection, prevented and left to bubble', () => {
+    const onKeydown = vi.fn();
+    mounted!.container.addEventListener('keydown', onKeydown);
+
+    const presses = [
+      press({ key: 'Delete', code: 'Delete' }),
+      press({ key: 'Backspace', code: 'Backspace' }),
+    ];
+
+    expect(shortcuts.map(({ type }) => type)).toEqual([
+      KeyBindingName.removeSelection,
+      KeyBindingName.removeSelection,
+    ]);
+    expect(presses.every(event => event.defaultPrevented)).toBe(true);
+    expect(onKeydown).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(['input', 'textarea'])(
+    'leaves Delete and Backspace to a caret in a %s, which erases a character',
+    tagName => {
+      const $root = mounted!.container.querySelector('.root') as HTMLDivElement;
+      const field = document.createElement(tagName);
+      $root.append(field);
+
+      const presses = [
+        keydown({ key: 'Delete', code: 'Delete' }),
+        keydown({ key: 'Backspace', code: 'Backspace' }),
+      ];
+      presses.forEach(event => field.dispatchEvent(event));
+
+      expect(shortcuts).toHaveLength(0);
+      expect(presses.some(event => event.defaultPrevented)).toBe(false);
+    }
+  );
+
+  it('takes Backspace from a focused toolbar button too, where no caret erases anything', () => {
+    const $root = mounted!.container.querySelector('.root') as HTMLDivElement;
+    const button = document.createElement('button');
+    $root.append(button);
+
+    const event = keydown({ key: 'Backspace', code: 'Backspace' });
+    button.dispatchEvent(event);
+
+    expect(shortcuts.map(({ type }) => type)).toEqual([
+      KeyBindingName.removeSelection,
+    ]);
+    expect(event.defaultPrevented).toBe(true);
+  });
+
+  it('takes $mod+KeyF on the ERD tab from a caret too, so no browser find opens over the editor', () => {
+    expect(app.store.state.settings.canvasType).toBe(CanvasType.ERD);
+    const $root = mounted!.container.querySelector('.root') as HTMLDivElement;
+    const input = document.createElement('input');
+    $root.append(input);
+    const outside = vi.fn();
+    mounted!.container.addEventListener('keydown', outside);
+
+    const onCanvas = press({ key: 'f', code: 'KeyF', mod: true });
+    const inField = keydown({ key: 'f', code: 'KeyF', mod: true });
+    input.dispatchEvent(inField);
+
+    expect(shortcuts.map(({ type }) => type)).toEqual([
+      KeyBindingName.findReplace,
+      KeyBindingName.findReplace,
+    ]);
+    expect(onCanvas.defaultPrevented).toBe(true);
+    expect(inField.defaultPrevented).toBe(true);
+    expect(outside).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    CanvasType.visualization,
+    CanvasType.schemaSQL,
+    CanvasType.generatorCode,
+    CanvasType.settings,
+  ])(
+    'takes $mod+KeyF on the %s tab too, from the canvas or a caret',
+    canvasType => {
+      app.store.dispatchSync(changeCanvasTypeAction({ value: canvasType }));
+      const $root = mounted!.container.querySelector('.root') as HTMLDivElement;
+      const input = document.createElement('input');
+      $root.append(input);
+      const outside = vi.fn();
+      mounted!.container.addEventListener('keydown', outside);
+
+      const onCanvas = press({ key: 'f', code: 'KeyF', mod: true });
+      const inField = keydown({ key: 'f', code: 'KeyF', mod: true });
+      input.dispatchEvent(inField);
+
+      expect(shortcuts.map(({ type }) => type)).toEqual([
+        KeyBindingName.findReplace,
+        KeyBindingName.findReplace,
+      ]);
+      expect(onCanvas.defaultPrevented).toBe(true);
+      expect(inField.defaultPrevented).toBe(true);
+      expect(outside).not.toHaveBeenCalled();
+    }
+  );
+
+  it.each(TAKEOVERS)(
+    'leaves $mod+KeyF to the host find on the ERD tab while %s takes the canvas over',
+    key => {
+      app.store.dispatchSync(changeOpenMapAction({ [key]: true }));
+      const $root = mounted!.container.querySelector('.root') as HTMLDivElement;
+      const input = document.createElement('input');
+      $root.append(input);
+      const outside = vi.fn();
+      mounted!.container.addEventListener('keydown', outside);
+
+      const onCanvas = press({ key: 'f', code: 'KeyF', mod: true });
+      const inField = keydown({ key: 'f', code: 'KeyF', mod: true });
+      input.dispatchEvent(inField);
+
+      expect(app.store.state.settings.canvasType).toBe(CanvasType.ERD);
+      expect(shortcuts).toHaveLength(0);
+      expect(onCanvas.defaultPrevented).toBe(false);
+      expect(inField.defaultPrevented).toBe(false);
+      expect(outside).toHaveBeenCalledTimes(2);
+      // The other chords stay the editor's under it.
+      expect(
+        press({ key: 'k', code: 'KeyK', mod: true }).defaultPrevented
+      ).toBe(true);
+
+      // Taken again once the overlay has gone.
+      shortcuts = [];
+      app.store.dispatchSync(changeOpenMapAction({ [key]: false }));
+      expect(
+        press({ key: 'f', code: 'KeyF', mod: true }).defaultPrevented
+      ).toBe(true);
+      expect(shortcuts.map(({ type }) => type)).toEqual([
+        KeyBindingName.findReplace,
+      ]);
+    }
+  );
+
+  it('leaves $mod+KeyF to the host find on another tab while a takeover stays open', () => {
+    app.store.dispatchSync(changeOpenMapAction({ [Open.timeTravel]: true }));
+    app.store.dispatchSync(
+      changeCanvasTypeAction({ value: CanvasType.settings })
+    );
+
+    const event = press({ key: 'f', code: 'KeyF', mod: true });
+
+    expect(shortcuts).toHaveLength(0);
+    expect(event.defaultPrevented).toBe(false);
+  });
+
+  it('takes $mod+KeyF under a dialog, which the Explorer search trades for itself', () => {
+    const dialogs = [
+      Open.tableProperties,
+      Open.themeBuilder,
+      Open.exportImage,
+      Open.localePicker,
+      Open.mapColumns,
+    ];
+    for (const key of dialogs) {
+      app.store.dispatchSync(changeOpenMapAction({ [key]: true }));
+      expect(
+        press({ key: 'f', code: 'KeyF', mod: true }).defaultPrevented
+      ).toBe(true);
+      app.store.dispatchSync(changeOpenMapAction({ [key]: false }));
+    }
+
+    expect(shortcuts.map(({ type }) => type)).toEqual(
+      dialogs.map(() => KeyBindingName.findReplace)
+    );
+  });
+
+  it('reads Alt+KeyF as the Flow focus, never as find and replace', () => {
+    press({ key: 'ƒ', code: 'KeyF', altKey: true });
+
+    expect(shortcuts.map(({ type }) => type)).toEqual([
+      KeyBindingName.focusView,
+    ]);
+  });
+
   it('ignores keys that are not part of the map', () => {
     press({ key: 'a', code: 'KeyA' });
 
@@ -180,6 +406,35 @@ describe('useKeyBindingMap', () => {
     const event = press({ key: 'q', code: 'KeyQ' });
     expect(shortcuts.map(({ type }) => type)).toEqual([KeyBindingName.edit]);
     expect(event.defaultPrevented).toBe(true);
+  });
+
+  it('reads a sequence a host binds, emitting on its last press alone', async () => {
+    app.keyBindingMap.addMemo = [
+      { shortcut: 'KeyG KeyM', preventDefault: true },
+    ];
+    await flush();
+
+    const first = press({ key: 'g', code: 'KeyG' });
+    expect(shortcuts).toHaveLength(0);
+    expect(first.defaultPrevented).toBe(false);
+
+    const last = press({ key: 'm', code: 'KeyM' });
+    expect(shortcuts.map(({ type }) => type)).toEqual([KeyBindingName.addMemo]);
+    expect(last.defaultPrevented).toBe(true);
+  });
+
+  it('leaves $mod+KeyF to the page on the ERD tab too once a host empties findReplace', async () => {
+    app.keyBindingMap.findReplace = [];
+    await flush();
+    const outside = vi.fn();
+    mounted!.container.addEventListener('keydown', outside);
+
+    const event = press({ key: 'f', code: 'KeyF', mod: true });
+
+    expect(app.store.state.settings.canvasType).toBe(CanvasType.ERD);
+    expect(shortcuts).toHaveLength(0);
+    expect(event.defaultPrevented).toBe(false);
+    expect(outside).toHaveBeenCalledTimes(1);
   });
 
   it('stops propagation for options that ask for it', async () => {
@@ -246,5 +501,61 @@ describe('useKeyBindingMap', () => {
     $root.dispatchEvent(keydown({ key: 'Enter' }));
 
     expect(shortcuts).toHaveLength(0);
+  });
+});
+
+describe('useKeyBindingMap with the Explorer search', () => {
+  /** The binder and the search together, as the element mounts them. */
+  const Editor: FC<{}> = (props, ctx) => {
+    const root = createRef<HTMLDivElement>();
+    useKeyBindingMap(ctx, root);
+
+    return () =>
+      html`<div class="root" ${ref(root)}><${ExplorerController} /></div>`;
+  };
+
+  let stopObserving = () => {};
+
+  beforeEach(async () => {
+    mounted?.unmount();
+    app = createTestAppContext();
+    stopObserving = observeViewport(app.store);
+    measureRoot(app.store, { width: 1200, height: 800 });
+    mounted = await mountAndFlush(html`<${Editor} />`, app);
+  });
+
+  afterEach(() => {
+    stopObserving();
+    app.store.destroy();
+  });
+
+  it('opens the search on a chord a host remaps, trading Table Properties for it (AC-R7)', async () => {
+    app.keyBindingMap.findReplace = [
+      { shortcut: '$mod+Shift+KeyH', preventDefault: true },
+    ];
+    await flush();
+    app.store.dispatchSync(
+      changeOpenMapAction({ [Open.tableProperties]: true })
+    );
+
+    const event = keydown({ key: 'H', code: 'KeyH', mod: true });
+    Object.defineProperty(event, 'shiftKey', { value: true });
+    mounted!.container.querySelector('.root')!.dispatchEvent(event);
+    await flush();
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(explorerViewOf(app.store).open).toBe(true);
+    expect(app.store.state.editor.openMap[Open.tableProperties]).toBe(false);
+  });
+
+  it('leaves $mod+KeyF unprevented and the Explorer shut once a host empties findReplace (AC-R7)', async () => {
+    app.keyBindingMap.findReplace = [];
+    await flush();
+
+    const event = press({ key: 'f', code: 'KeyF', mod: true });
+    await flush();
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(explorerViewOf(app.store).open).toBe(false);
   });
 });

@@ -2,16 +2,26 @@
 
 import { describe, expect, it } from 'vite-plus/test';
 
-import { COLUMN_MIN_WIDTH, MEMO_MIN_HEIGHT } from '@/constants/layout';
-import { Database, Show } from '@/constants/schema';
+import { MEMO_MIN_HEIGHT, TABLE_GROUP_MIN_WIDTH } from '@/constants/layout';
+import { Database, DDLScriptPosition, Show } from '@/constants/schema';
 import { DatabaseVendorList } from '@/constants/sql/database';
 import { ChangeActionTypes } from '@/engine/action-types';
 import { createEngineContext } from '@/engine/context';
+import { actions as dictionaryActions } from '@/engine/modules/dictionary/atom.actions';
+import {
+  DictionaryCheckLevel,
+  DictionaryCheckLevelOf,
+  listDictionaryChecks,
+} from '@/engine/modules/dictionary/checks';
+import { validateDictionaryValues } from '@/engine/modules/dictionary/entryWrites';
+import { actions$ as dictionaryActions$ } from '@/engine/modules/dictionary/generator.actions';
 import { actions$ as editorActions$ } from '@/engine/modules/editor/generator.actions';
 import { FocusType } from '@/engine/modules/editor/state';
 import { actions as memoActions } from '@/engine/modules/memo/atom.actions';
 import { actions as tableActions } from '@/engine/modules/table/atom.actions';
 import { actions$ as tableActions$ } from '@/engine/modules/table/generator.actions';
+import { actions as tableGroupActions } from '@/engine/modules/table-group/atom.actions';
+import { actions$ as tableGroupActions$ } from '@/engine/modules/table-group/generator.actions';
 import {
   createPeerStore,
   PeerStoreError,
@@ -21,10 +31,15 @@ import { defaultToWidth } from '@/engine/to-width';
 import * as peer from '@/peer';
 import { bHas } from '@/utils/bit';
 import { measureTableSize } from '@/utils/calcTable';
-import { createSchemaSQL } from '@/utils/schema-sql';
+import {
+  createSchemaSQL,
+  SchemaSQLHeaderList,
+  SchemaSQLStatementsList,
+} from '@/utils/schema-sql';
+import { getTablesGroupRect } from '@/utils/tableGroup';
 
 describe('peer barrel (AC-B2)', () => {
-  it('exposes exactly the 44 values the headless peer needs', () => {
+  it('exposes exactly the 58 values the headless peer needs', () => {
     expect(Object.keys(peer).sort()).toEqual(
       [
         'createPeerStore',
@@ -40,6 +55,8 @@ describe('peer barrel (AC-B2)', () => {
         'memoActions$',
         'relationshipActions$',
         'settingsActions$',
+        'tableGroupActions$',
+        'dictionaryActions$',
         'tableActions',
         'tableColumnActions',
         'indexActions',
@@ -47,6 +64,12 @@ describe('peer barrel (AC-B2)', () => {
         'memoActions',
         'relationshipActions',
         'settingsActions',
+        'tableGroupActions',
+        'dictionaryActions',
+        'validateDictionaryValues',
+        'listDictionaryChecks',
+        'DictionaryCheckLevel',
+        'DictionaryCheckLevelOf',
         'ChangeActionTypes',
         'StreamActionTypes',
         'SharedFollowingActionTypes',
@@ -55,25 +78,31 @@ describe('peer barrel (AC-B2)', () => {
         'ColumnOption',
         'OrderType',
         'RelationshipType',
+        'ReferentialAction',
         'BracketType',
         'CanvasType',
         'ColumnType',
         'Database',
+        'DDLScriptPosition',
         'Language',
+        'LockSettingType',
         'NameCase',
-        'SaveSettingType',
         'Show',
         'MEMO_MIN_WIDTH',
         'MEMO_MIN_HEIGHT',
-        'COLUMN_MIN_WIDTH',
+        'TABLE_GROUP_MIN_WIDTH',
+        'TABLE_GROUP_MIN_HEIGHT',
         'createSchemaSQL',
+        'SchemaSQLStatementsList',
+        'SchemaSQLHeaderList',
         'DatabaseVendorList',
         'DatabaseVendorToDatabase',
         'bHas',
         'measureTableSize',
+        'getTablesGroupRect',
       ].sort()
     );
-    expect(Object.keys(peer)).toHaveLength(44);
+    expect(Object.keys(peer)).toHaveLength(58);
   });
 
   it('re-exports each name from the module that owns it', () => {
@@ -86,16 +115,28 @@ describe('peer barrel (AC-B2)', () => {
     expect(peer.tableActions$).toBe(tableActions$);
     expect(peer.tableActions).toBe(tableActions);
     expect(peer.memoActions).toBe(memoActions);
+    expect(peer.tableGroupActions).toBe(tableGroupActions);
+    expect(peer.tableGroupActions$).toBe(tableGroupActions$);
+    expect(peer.dictionaryActions$).toBe(dictionaryActions$);
+    expect(peer.dictionaryActions).toBe(dictionaryActions);
+    expect(peer.validateDictionaryValues).toBe(validateDictionaryValues);
+    expect(peer.listDictionaryChecks).toBe(listDictionaryChecks);
+    expect(peer.DictionaryCheckLevel).toBe(DictionaryCheckLevel);
+    expect(peer.DictionaryCheckLevelOf).toBe(DictionaryCheckLevelOf);
     expect(peer.ChangeActionTypes).toBe(ChangeActionTypes);
     expect(peer.FocusType).toBe(FocusType);
     expect(peer.Database).toBe(Database);
+    expect(peer.DDLScriptPosition).toBe(DDLScriptPosition);
     expect(peer.Show).toBe(Show);
     expect(peer.MEMO_MIN_HEIGHT).toBe(MEMO_MIN_HEIGHT);
-    expect(peer.COLUMN_MIN_WIDTH).toBe(COLUMN_MIN_WIDTH);
+    expect(peer.TABLE_GROUP_MIN_WIDTH).toBe(TABLE_GROUP_MIN_WIDTH);
     expect(peer.createSchemaSQL).toBe(createSchemaSQL);
+    expect(peer.SchemaSQLStatementsList).toBe(SchemaSQLStatementsList);
+    expect(peer.SchemaSQLHeaderList).toBe(SchemaSQLHeaderList);
     expect(peer.DatabaseVendorList).toBe(DatabaseVendorList);
     expect(peer.bHas).toBe(bHas);
     expect(peer.measureTableSize).toBe(measureTableSize);
+    expect(peer.getTablesGroupRect).toBe(getTablesGroupRect);
   });
 
   it('keeps the catalog per module and exports no flat actions map', () => {
@@ -126,7 +167,13 @@ describe('peer barrel (AC-B2)', () => {
       entries: 1,
       skipped: [],
     });
-    expect(JSON.parse(store.value).doc.tableIds).toEqual([]);
+    expect(JSON.parse(store.value).doc.tableIds ?? []).toEqual([]);
+    expect(JSON.parse(store.value).collections?.tableEntities ?? {}).toEqual(
+      {}
+    );
+    expect(
+      Object.keys(JSON.parse(store.runtimeValue).collections.tableEntities)
+    ).toEqual(report.createdIds);
 
     store.destroy();
   });

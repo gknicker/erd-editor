@@ -3,6 +3,8 @@
 // and the screen wherever a pan has taken it, not of a fixed box.
 
 import { render, useProvider } from '@dineug/r-html';
+import { whenDrawn } from '@dineug/r-html-konva';
+import type { Layer } from 'konva/lib/Layer';
 import type { Stage } from 'konva/lib/Stage';
 import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
 
@@ -52,15 +54,17 @@ import {
 } from '@/engine/modules/settings/atom.actions';
 import {
   addTableAction,
+  changeTableGroupAction,
   moveToTableAction,
 } from '@/engine/modules/table/atom.actions';
+import { addTableGroupAction } from '@/engine/modules/table-group/atom.actions';
 import type { Point } from '@/internal-types';
-import { whenDrawn } from '@/konva/batchDraw';
 import { getContentRect } from '@/konva/scene/contentBounds';
 import { getTableRect, type Rect } from '@/konva/scene/metrics';
 import { freezeView, thawView } from '@/konva/scene/viewFreeze';
 import { toScreenPoint } from '@/konva/scene/viewport';
 import type { GeometrySource } from '@/utils/draw-relationship/geometrySource';
+import { getTableGroupRect } from '@/utils/tableGroup';
 
 const teardowns: Array<() => void> = [];
 
@@ -276,6 +280,16 @@ describe('the minimap shell', () => {
     ).toBeTruthy();
   });
 
+  it('keeps the map left to right inside a right-to-left editor', async () => {
+    const mounted = await mountMinimap();
+    mounted.container.dir = 'rtl';
+
+    expect(minimapOf(mounted).getAttribute('dir')).toBe('ltr');
+    expect(getComputedStyle(stageRegistry().minimap.content).direction).toBe(
+      'ltr'
+    );
+  });
+
   it('hangs one Stage of one layer in the scene box', async () => {
     const app = createTestAppContext();
     const mounted = await mountMinimap(app);
@@ -390,6 +404,117 @@ describe('the minimap shell', () => {
     expect(tables.map(node => node.getAttr('tableId'))).toEqual(['t1', 't2']);
     expect(memos).toHaveLength(1);
     expect(memos[0].hasName('m1')).toBe(true);
+  });
+
+  it('draws no memo mark while memos are hidden', async () => {
+    const app = createTestAppContext();
+    await mountMinimap(app);
+    const stage = stageRegistry().minimap;
+
+    app.store.dispatchSync(
+      addTableAction({ id: 't1', ui: { x: 10, y: 20, zIndex: 1 } }),
+      addMemoAction({ id: 'm1', ui: { x: 50, y: 60, zIndex: 3 } }),
+      changeShowAction({ show: Show.hideMemo, value: true })
+    );
+    await flush();
+
+    expect(stage.find('.minimap-table')).toHaveLength(1);
+    expect(stage.find('.minimap-memo')).toHaveLength(0);
+  });
+
+  it('stacks the table and memo marks by one z-index, as the canvas does', async () => {
+    const app = createTestAppContext();
+    await mountMinimap(app);
+    const stage = stageRegistry().minimap;
+
+    app.store.dispatchSync(
+      addTableAction({ id: 'low', ui: { x: 10, y: 20, zIndex: 2 } }),
+      addTableAction({ id: 'raised', ui: { x: 30, y: 40, zIndex: 9 } }),
+      addMemoAction({ id: 'note', ui: { x: 50, y: 60, zIndex: 5 } })
+    );
+    await flush();
+
+    const marks = stage
+      .findOne<Layer>('.minimap-scene')!
+      .getChildren()
+      .filter(
+        node => node.hasName('minimap-table') || node.hasName('minimap-memo')
+      )
+      .map(node =>
+        node.hasName('minimap-table')
+          ? (node.attrs.tableId as string)
+          : node.name().split(' ')[1]
+      );
+
+    expect(marks).toEqual(['low', 'note', 'raised']);
+  });
+
+  it('draws each group behind the marks, by z-index, while groups are shown', async () => {
+    const app = createTestAppContext();
+    await mountMinimap(app);
+    const stage = stageRegistry().minimap;
+
+    app.store.dispatchSync(
+      addTableAction({ id: 't1', ui: { x: 10, y: 20, zIndex: 1 } }),
+      addTableGroupAction({
+        id: 'above',
+        color: '#3b82f6',
+        ui: { x: 0, y: 0, width: 600, height: 400, zIndex: 7 },
+      }),
+      addTableGroupAction({
+        id: 'below',
+        ui: { x: -200, y: -200, width: 300, height: 300, zIndex: 2 },
+      })
+    );
+    await flush();
+
+    const layer = stage.findOne<Layer>('.minimap-scene')!;
+    expect(layer.getChildren().map(node => node.attrs.kind)).toEqual([
+      'minimap-table-group',
+      'minimap-table-group',
+      'minimap-table',
+    ]);
+    expect(stage.find('.minimap-table-group').map(node => node.name())).toEqual(
+      ['minimap-table-group below', 'minimap-table-group above']
+    );
+
+    app.store.dispatchSync(
+      changeShowAction({ show: Show.hideTableGroup, value: true })
+    );
+    await flush();
+    expect(stage.find('.minimap-table-group')).toHaveLength(0);
+  });
+
+  it('grows a group box over the first member the group gains, on a map the join leaves unmoved', async () => {
+    const app = createTestAppContext();
+    // Two tables far out on either side pin the map, so no new ratio redraws the box.
+    app.store.dispatchSync(
+      addTableAction({ id: 'west', ui: { x: -3000, y: -3000, zIndex: 1 } }),
+      addTableAction({ id: 'east', ui: { x: 4000, y: 3000, zIndex: 2 } }),
+      addTableAction({ id: 't1', ui: { x: 500, y: 100, zIndex: 3 } }),
+      addTableGroupAction({
+        id: 'g1',
+        ui: { x: 0, y: 0, width: 300, height: 200, zIndex: 4 },
+      })
+    );
+    await mountMinimap(app);
+    const stage = stageRegistry().minimap;
+    const before = layoutOf(app);
+
+    app.store.dispatchSync(changeTableGroupAction({ id: 't1', value: 'g1' }));
+    await flush();
+    await whenDrawn();
+
+    const rect = getMinimapMarkRect(
+      before.ratio,
+      getTableGroupRect(
+        app.store.state,
+        app.store.state.collections.tableGroupEntities.g1
+      )
+    );
+    expect(layoutOf(app)).toEqual(before);
+    expect(rect.width).toBeGreaterThan(300);
+    expect(stage.findOne('.minimap-table-group')!.attrs).toMatchObject(rect);
   });
 
   it('keeps the box for a table the canvas culls (AC-S4, AC-S5)', async () => {
@@ -1131,6 +1256,13 @@ describe('the minimap under a view provider', () => {
   function seedFlow(app: AppContext) {
     seedDocument(app);
     app.store.dispatchSync(
+      addTableGroupAction({
+        id: 'g1',
+        color: '#3b82f6',
+        ui: { x: 0, y: 0, width: 600, height: 400, zIndex: 1 },
+      })
+    );
+    app.store.dispatchSync(
       viewOpenAction({ kind: ViewKind.flow }),
       viewSetLayoutAction({ kind: ViewKind.flow, positions: FLOW_POINTS }),
       viewScrollToAction({ ...FLOW_ORIGIN, kind: ViewKind.flow })
@@ -1162,6 +1294,7 @@ describe('the minimap under a view provider', () => {
       stage.find('.minimap-table').map(node => node.getAttr('tableId'))
     ).toEqual(['t1', 't2', 't3']);
     expect(stage.find('.minimap-memo')).toHaveLength(0);
+    expect(stage.find('.minimap-table-group')).toHaveLength(0);
     expectStageSized(layout);
     expect(parseFloat(minimapOf(mounted).style.width)).toBeCloseTo(
       layout.box.width,

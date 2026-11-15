@@ -7,7 +7,7 @@ import * as vscode from 'vscode';
 
 const EXTENSION_ID = 'dineug.vuerd-vscode';
 const VIEW_TYPE = 'editor.erd';
-const PROTOCOL_VERSION = 1;
+const PROTOCOL_VERSION = 2;
 const FIXTURE_FILE = 'sample.erd.json';
 const POLL_INTERVAL = 50;
 const POLL_TIMEOUT = 5_000;
@@ -342,6 +342,87 @@ describe('document hub for coding agents', () => {
       applyToDirty: dirtyMs,
       save: saveMs,
     });
+  });
+
+  /**
+   * Writes bytes to a file of the workspace, has a peer scroll and zoom it, and
+   * checks that neither dirties the tab nor writes the file until a table does.
+   * Resolves the file the table's save wrote.
+   */
+  async function viewThenEdit(name: string, bytes: string): Promise<Frame> {
+    const [workspaceFolder] = vscode.workspace.workspaceFolders ?? [];
+    const uri = vscode.Uri.joinPath(workspaceFolder.uri, name);
+    const filePath = path.join(folder, name);
+    fs.writeFileSync(filePath, bytes);
+    try {
+      const peer = await connectPeer('e2e-view');
+      await peer.call('openDocument', { path: filePath });
+      await delay(500);
+      const joined = await peer.call('join', { path: filePath });
+      assert.strictEqual(joined.initialValue, bytes);
+      const meta = { editorId: 'agent-hub-e2e', nickname: 'e2e' };
+      const version = joined.snapshotVersion + 1;
+      const view = [
+        { type: 'settings.scrollTo', payload: { originX: -240, originY: 120 } },
+        { type: 'settings.changeZoomLevel', payload: { value: 0.5 } },
+      ].map(action => ({ ...action, version, tags: 1, meta }));
+
+      await peer.call('applyActions', { path: filePath, actions: view });
+      // Well past the replica round trip, which dirties a tab in about 250 ms.
+      await delay(1_000);
+
+      assert.ok(erdTabs().every(tab => !tab.isDirty));
+      assert.deepStrictEqual(await peer.call('save', { path: filePath }), {
+        saved: true,
+      });
+      assert.strictEqual(fs.readFileSync(filePath, 'utf8'), bytes);
+
+      const tableId = `e2e${Date.now()}`;
+      await peer.call('applyActions', {
+        path: filePath,
+        actions: tableBatch(tableId, version + 1),
+      });
+      await waitUntil('an edit turns the ERD tab dirty', () =>
+        erdTabs().some(tab => tab.isDirty)
+      );
+      assert.deepStrictEqual(await peer.call('save', { path: filePath }), {
+        saved: true,
+      });
+      const onDisk = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+      assert.ok(onDisk.doc.tableIds.includes(tableId));
+      return onDisk;
+    } finally {
+      if (erdTabs().some(tab => tab.isDirty)) {
+        await vscode.workspace.save(uri);
+      }
+      await closeAllEditors();
+      fs.rmSync(filePath, { force: true });
+    }
+  }
+
+  it('leaves a file an older release wrote clean and unwritten after a view change it does not save', async () => {
+    // No locks and no origin, as releases before both wrote it, so it opens
+    // locked: the replica's value never has these bytes, so only its changed
+    // flag keeps the tab clean.
+    const bytes = JSON.stringify({
+      version: '3.0.0',
+      settings: { ignoreSaveSettings: 3, zoomLevel: 1 },
+      doc: { tableIds: [], relationshipIds: [], indexIds: [], memoIds: [] },
+      collections: {},
+    });
+
+    await viewThenEdit('legacy-view.erd', bytes);
+  });
+
+  it('leaves a new empty file clean and empty after a view change, as a new document saves no view', async () => {
+    const onDisk = await viewThenEdit('new-view.erd', '');
+
+    const { lockSettings, originX, originY, zoomLevel } = onDisk.settings;
+    assert.deepStrictEqual(
+      { lockSettings, originX, originY, zoomLevel },
+      { lockSettings: 63, originX: 0, originY: 0, zoomLevel: 1 }
+    );
+    assert.strictEqual('ignoreSaveSettings' in onDisk.settings, false);
   });
 
   it('hands one peer batch to the other peer, and never back to its sender', async () => {

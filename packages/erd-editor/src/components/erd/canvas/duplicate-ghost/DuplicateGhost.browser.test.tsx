@@ -1,5 +1,6 @@
 /** @jsxHost konva */
 
+import { whenDrawn } from '@dineug/r-html-konva';
 import { Container } from 'konva/lib/Container';
 import type { Group } from 'konva/lib/Group';
 import type { Node as KonvaNode } from 'konva/lib/Node';
@@ -17,11 +18,17 @@ import {
   changeZoomLevelAction,
   scrollToAction,
 } from '@/engine/modules/settings/atom.actions';
-import { addTableAction } from '@/engine/modules/table/atom.actions';
+import {
+  addTableAction,
+  changeTableGroupAction,
+} from '@/engine/modules/table/atom.actions';
 import { addColumnAction } from '@/engine/modules/table-column/atom.actions';
-import { whenDrawn } from '@/konva/batchDraw';
+import { addTableGroupAction } from '@/engine/modules/table-group/atom.actions';
 import { renderScene } from '@/konva/scene/renderScene';
-import { duplicateDragStartAction } from '@/utils/emitter';
+import {
+  duplicateDragCancelAction,
+  duplicateDragStartAction,
+} from '@/utils/emitter';
 
 type Mounted = {
   stage: Stage;
@@ -181,6 +188,28 @@ describe('DuplicateGhost - node structure', () => {
     ]);
   });
 
+  it('stacks the ghosts by one z-index, as the scene and the landed copy do', async () => {
+    const { app } = await mountGhost();
+    app.store.dispatchSync(
+      addTableAction({ id: 'raised', ui: { x: 100, y: 200, zIndex: 9 } }),
+      addMemoAction({ id: 'note', ui: { x: 300, y: 400, zIndex: 5 } }),
+      addTableAction({ id: 'low', ui: { x: 500, y: 200, zIndex: 2 } })
+    );
+    select(app, {
+      raised: SelectType.table,
+      note: SelectType.memo,
+      low: SelectType.table,
+    });
+
+    await startGesture(app);
+
+    expect(ghostsIn().map(node => node.id())).toEqual([
+      'duplicate-ghost-low',
+      'duplicate-ghost-note',
+      'duplicate-ghost-raised',
+    ]);
+  });
+
   it('leaves the copied entity id to the entity, so an id scan stays unambiguous', async () => {
     const { app, stage } = await mountGhost();
     seedTable(app, 't1', 100, 200);
@@ -210,6 +239,26 @@ describe('DuplicateGhost - node structure', () => {
     expect(layer.opacity()).toBe(0.6);
     expect(layer.listening()).toBe(false);
     expect(layer.getChildren()).toHaveLength(1);
+  });
+
+  it('draws a member of a colored group as the copy it lands, in no group and with no group color', async () => {
+    const { app, stage } = await mountGhost();
+    seedTable(app, 't1', 100, 200);
+    app.store.dispatchSync(
+      addTableGroupAction({
+        id: 'g1',
+        color: '#1e3a8a',
+        ui: { x: 0, y: 0, width: 600, height: 500, zIndex: 1 },
+      }),
+      changeTableGroupAction({ id: 't1', value: 'g1' })
+    );
+    select(app, { t1: SelectType.table });
+
+    await startGesture(app);
+
+    const band = stage.findOne('.table-header-band');
+    expect(band).toBeTruthy();
+    expect(band?.getAttr('fill')).not.toBe('#1e3a8a');
   });
 
   it('renders no ghost when nothing is selected', async () => {
@@ -493,6 +542,38 @@ describe('DuplicateGhost - commit', () => {
 
     expect(app.store.state.doc.tableIds).toHaveLength(3);
     expect(lastTable(app).ui).toMatchObject({ x: 160, y: 230 });
+  });
+
+  it('lets go of its copies on a cancel, so the release duplicates nothing, and copies again on the next drag', async () => {
+    const { app } = await mountGhost();
+    seedTable(app, 't1', 100, 200);
+    select(app, { t1: SelectType.table });
+
+    await startGesture(app);
+    await movePointer([[60, 30]]);
+    expect(ghostsIn().length).toBe(1);
+
+    app.emitter.emit(duplicateDragCancelAction());
+    await flush();
+    await whenDrawn();
+    expect(ghostsIn().length).toBe(0);
+
+    await movePointer([[120, 90]]);
+    await dropAndSettle();
+
+    expect(ghostsIn().length).toBe(0);
+    expect(app.store.state.doc.tableIds).toEqual(['t1']);
+    expect(app.store.state.editor.selectedMap).toEqual({
+      t1: SelectType.table,
+    });
+
+    // A cancel with nothing held changes nothing, and the next drag copies.
+    app.emitter.emit(duplicateDragCancelAction());
+    await startGesture(app);
+    await movePointer([[60, 30]]);
+    expect(ghostsIn().length).toBe(1);
+    await dropAndSettle();
+    expect(app.store.state.doc.tableIds).toHaveLength(2);
   });
 
   // Covers the outcome, not the mechanism: unmounting unsubscribes drag$

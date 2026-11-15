@@ -8,6 +8,7 @@ import {
 import {
   isEdit,
   isFocus,
+  isFocusColumn,
   isSelectColumn,
   lastCursorFocus,
   toSharedFocus,
@@ -58,6 +59,21 @@ describe('isFocus', () => {
     const focusTable = createFocusTable({ focusType: FocusType.tableComment });
 
     expect(isFocus(focusTable, FocusType.tableComment, 'table-1')).toBe(true);
+    expect(isFocus(focusTable, FocusType.tableName, 'table-1')).toBe(false);
+  });
+
+  it('matches the logical name of a table whatever column the focus names, as the name', () => {
+    const focusTable = createFocusTable({
+      focusType: FocusType.tableLogicalName,
+      columnId: 'column-1',
+    });
+
+    expect(isFocus(focusTable, FocusType.tableLogicalName, 'table-1')).toBe(
+      true
+    );
+    expect(
+      isFocus(focusTable, FocusType.tableLogicalName, 'table-1', 'other')
+    ).toBe(true);
     expect(isFocus(focusTable, FocusType.tableName, 'table-1')).toBe(false);
   });
 
@@ -141,6 +157,29 @@ describe('isSelectColumn', () => {
   });
 });
 
+describe('isFocusColumn', () => {
+  it('returns false when there is no focus table', () => {
+    expect(isFocusColumn(null, 'table-1', 'column-1')).toBe(false);
+  });
+
+  it('matches the focused column whatever its cell, in its own table alone', () => {
+    const focusTable = createFocusTable({
+      columnId: 'column-1',
+      focusType: FocusType.columnComment,
+    });
+
+    expect(isFocusColumn(focusTable, 'table-1', 'column-1')).toBe(true);
+    expect(isFocusColumn(focusTable, 'table-1', 'column-2')).toBe(false);
+    expect(isFocusColumn(focusTable, 'table-2', 'column-1')).toBe(false);
+  });
+
+  it('returns false while the focus stands on the table itself', () => {
+    expect(isFocusColumn(createFocusTable(), 'table-1', 'column-1')).toBe(
+      false
+    );
+  });
+});
+
 describe('isEdit', () => {
   it('returns false when there is no focus table', () => {
     expect(isEdit(null, FocusType.tableName, 'table-1')).toBe(false);
@@ -167,6 +206,26 @@ describe('isEdit', () => {
         'table-1'
       )
     ).toBe(true);
+  });
+
+  it('opens the logical name of a table on the edit flag alone, as the name', () => {
+    const focusTable = createFocusTable({
+      focusType: FocusType.tableLogicalName,
+      columnId: 'column-1',
+      edit: true,
+    });
+
+    expect(isEdit(focusTable, FocusType.tableLogicalName, 'table-1')).toBe(
+      true
+    );
+    expect(isEdit(focusTable, FocusType.tableName, 'table-1')).toBe(false);
+    expect(
+      isEdit(
+        { ...focusTable, edit: false },
+        FocusType.tableLogicalName,
+        'table-1'
+      )
+    ).toBe(false);
   });
 
   it('returns false when the table level focus type differs', () => {

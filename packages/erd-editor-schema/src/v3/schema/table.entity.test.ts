@@ -6,18 +6,21 @@ import { Table, TableUI } from '@/v3/schema/table.entity';
 const buildTable = (id: string, columnIds: string[] = []): Table => ({
   id,
   name: `table_${id}`,
+  logicalName: '',
   comment: '',
   columnIds,
   seqColumnIds: [...columnIds],
+  groupId: '',
+  nameDerived: false,
   ui: {
     x: 0,
     y: 0,
     zIndex: 2,
     widthName: 60,
+    widthLogicalName: 60,
     widthComment: 60,
     color: '',
   },
-  meta: { updateAt: 0, createAt: 0 },
 });
 
 describe('v3/schema/table.entity', () => {
@@ -31,22 +34,25 @@ describe('v3/schema/table.entity', () => {
       y: 240,
       zIndex: 7,
       widthName: 84,
+      widthLogicalName: 72,
       widthComment: 60,
       color: '#ff0000',
     };
     const table: Table = {
       id: 'table-1',
       name: 'actor',
+      logicalName: 'Actor',
       comment: 'film actors',
       columnIds: ['column-1', 'column-2'],
       seqColumnIds: ['column-1', 'column-2', 'column-3'],
+      groupId: 'group-1',
+      nameDerived: true,
       ui,
-      meta: { updateAt: 20, createAt: 10 },
     };
 
     expect(table.columnIds).toHaveLength(2);
     expect(table.ui.color).toBe('#ff0000');
-    expect(table.meta.updateAt).toBeGreaterThan(table.meta.createAt);
+    expect(table.groupId).toBe('group-1');
   });
 
   it('keeps seqColumnIds as a superset that retains deleted column ids', () => {
@@ -58,6 +64,14 @@ describe('v3/schema/table.entity', () => {
     expect(
       table.seqColumnIds.filter(id => !table.columnIds.includes(id))
     ).toEqual(['c1']);
+  });
+
+  it('holds its group membership as one id, empty for no group', () => {
+    const ungrouped = buildTable('a');
+    const grouped = { ...buildTable('b'), groupId: 'group-1' };
+
+    expect(ungrouped.groupId).toBe('');
+    expect(grouped.groupId).toBe('group-1');
   });
 
   it('orders tables by their ui zIndex', () => {

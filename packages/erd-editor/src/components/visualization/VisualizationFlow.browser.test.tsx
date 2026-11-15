@@ -3,6 +3,11 @@
 // that never reaches that landing, and the hover that fades the rest.
 
 import { type AnyAction, useProvider } from '@dineug/r-html';
+import {
+  MINIMAP_STAGE_NAME,
+  onBeforeFlush,
+  whenDrawn,
+} from '@dineug/r-html-konva';
 import type { Group } from 'konva/lib/Group';
 import type { Layer } from 'konva/lib/Layer';
 import type { Shape } from 'konva/lib/Shape';
@@ -35,14 +40,17 @@ import { Open } from '@/constants/open';
 import {
   CANVAS_ZOOM_MAX,
   CanvasType,
+  NameViewMode,
   RelationshipType,
 } from '@/constants/schema';
 import { TablePlacement } from '@/constants/tablePlacement';
 import {
   changeOpenMapAction,
   changeViewportAction,
+  selectAction,
 } from '@/engine/modules/editor/atom.actions';
 import {
+  SelectType,
   ShowMode,
   ViewKind,
   VisualizationMode,
@@ -63,16 +71,16 @@ import {
 import { changeCanvasTypeAction } from '@/engine/modules/settings/atom.actions';
 import {
   addTableAction,
+  changeTableLogicalNameAction,
   changeTableNameAction,
 } from '@/engine/modules/table/atom.actions';
 import {
   addColumnAction,
+  changeColumnLogicalNameAction,
   changeColumnNameAction,
   changeColumnPrimaryKeyAction,
 } from '@/engine/modules/table-column/atom.actions';
 import { Tag } from '@/engine/tag';
-import { onBeforeFlush, whenDrawn } from '@/konva/batchDraw';
-import { MINIMAP_STAGE_NAME } from '@/konva/host';
 import { getSceneContentRect } from '@/konva/scene/contentBounds';
 import { previewZoomLevel } from '@/konva/scene/fitZoom';
 import { getTableRect } from '@/konva/scene/metrics';
@@ -83,7 +91,7 @@ import {
   toScreenPoint,
 } from '@/konva/scene/viewport';
 import { calcTableHeight } from '@/utils/calcTable';
-import { KeyBindingName } from '@/utils/keyboard-shortcut';
+import { KeyBindingName, toShortcutTitle } from '@/utils/keyboard-shortcut';
 
 const hoisted = vi.hoisted(() => ({
   requests: [] as Array<{ placement: string; nodes: any[]; edges: any[] }>,
@@ -338,6 +346,24 @@ async function chooseShowMode(mounted: Mounted, title: string) {
   await settle();
 }
 
+/** Opens the bar's Name View list and picks the view it names. */
+async function chooseNameView(mounted: Mounted, title: string) {
+  click(
+    mounted.container.querySelector('.visualization-toolbar .name-view-trigger')
+  );
+  await settle();
+  const option =
+    Array.from(
+      mounted.container.querySelectorAll<HTMLElement>(
+        '.name-view-menu .context-menu-content > [data-id]'
+      )
+    ).find(item => item.textContent?.trim() === title) ?? null;
+  // A pick on nothing would leave the view as it was, as an unopened list does.
+  expect(option).not.toBeNull();
+  click(option);
+  await settle();
+}
+
 /** One keyboard chord, as the editor's own key handler would put it on the stream. */
 const chord = (app: AppContext, type: KeyBindingName) =>
   app.shortcut$.next({
@@ -540,6 +566,14 @@ const drawnConnectorIds = (ids: string[]) =>
   ids.filter(id => flowStage().findOne(`.${id}`) !== undefined);
 
 const rowCountOf = (id: string) => tableOf(id)!.find('.column-row').length;
+
+/** The text of a card's header cells, then of its row cells, in the order drawn. */
+const namesOf = (id: string) =>
+  tableOf(id)!
+    .find<Group>('.input-padding, .column-col')
+    .map(cell => cell.findOne<Shape>('.cell-text'))
+    .filter(text => text !== undefined)
+    .map(text => text.getAttr('text'));
 
 const typeOpacityOf = (id: string) =>
   tableOf(id)!
@@ -984,6 +1018,38 @@ describe('the Flow mode of the visualization tab', () => {
     expect(moved.b).toEqual(landed.b);
   });
 
+  it('selects and raises the card a press lands on in a readonly editor as in any other, and moves it on the view alone', async () => {
+    const flags = { readonly: false };
+    const app = createTestAppContext({
+      getReadonly: () => flags.readonly,
+      readonlyEditState: true,
+    });
+    seed(app);
+    flags.readonly = true;
+    const mounted = await mountVisualization(app);
+    await enterFlow(mounted);
+    const { tableEntities } = app.store.state.collections;
+    const highestOfTheRest = () =>
+      Math.max(...['b', 'c', 'd'].map(id => tableEntities[id].ui.zIndex));
+    const landed = positionsOf(app)!;
+    const documentUi = { ...tableEntities.a.ui };
+    expect(documentUi.zIndex).toBeLessThan(highestOfTheRest());
+
+    await clickTable('a');
+
+    expect(Object.keys(app.store.state.editor.selectedMap)).toEqual(['a']);
+    expect(tableEntities.a.ui.zIndex).toBeGreaterThan(highestOfTheRest());
+
+    fireScenePointer(bodyOf('a'), 'mousedown', { clientX: 100, clientY: 100 });
+    movePointer(160, 180);
+    releasePointer();
+    await settle();
+
+    expect(positionsOf(app)!.a).not.toEqual(landed.a);
+    expect(tableEntities.a.ui.x).toBe(documentUi.x);
+    expect(tableEntities.a.ui.y).toBe(documentUi.y);
+  });
+
   it('pins the light on a click of the table icon, which is no button', async () => {
     const app = createTestAppContext();
     seed(app);
@@ -1125,6 +1191,75 @@ describe('the Flow mode of the visualization tab', () => {
     await clickBackground(mounted, { ctrlKey: true, metaKey: true });
 
     expect(litTableIds(app)).toEqual(['a', 'b']);
+  });
+
+  /**
+   * The marquee and the particles are the two layers the Flow hands its scene,
+   * and nothing else in the tab draws either: the particles under the cards
+   * that hide their connectors, the marquee over them, picking by the view.
+   */
+  it('opens the marquee on a modifier press over the background and selects the card it covers where the view stands it', async () => {
+    const app = createTestAppContext();
+    seed(app);
+    const mounted = await mountVisualization(app);
+    await enterFlow(mounted);
+    const root = flowRootOf(mounted);
+    const rect = root.getBoundingClientRect();
+
+    expect(
+      flowStage()
+        .getLayers()
+        .map(layer => layer.name())
+    ).toEqual([
+      'canvas-background',
+      'view-particles',
+      'scene',
+      'overlay-marquee',
+    ]);
+
+    const { state } = app.store;
+    const view = state.editor.views.flow!;
+    const box = getTableRect(
+      state,
+      state.collections.tableEntities.b,
+      ViewKind.flow
+    );
+    const corner = toScreenPoint(view, { x: box.x, y: box.y });
+    const center = toScreenPoint(view, {
+      x: box.x + box.width / 2,
+      y: box.y + box.height / 2,
+    });
+
+    root.dispatchEvent(
+      new MouseEvent('mousedown', {
+        bubbles: true,
+        cancelable: true,
+        clientX: rect.left + corner.x - 8,
+        clientY: rect.top + corner.y - 8,
+        ctrlKey: true,
+        metaKey: true,
+      })
+    );
+    root.dispatchEvent(
+      new MouseEvent('mousemove', {
+        bubbles: true,
+        cancelable: true,
+        clientX: rect.left + center.x + 10,
+        clientY: rect.top + center.y + 10,
+      })
+    );
+    await settle();
+
+    expect(
+      flowStage().findOne<Layer>('.overlay-marquee')?.findOne('.drag-select')
+    ).toBeDefined();
+    expect(Object.keys(state.editor.selectedMap)).toEqual(['b']);
+
+    releasePointer();
+    await settle();
+
+    expect(flowStage().findOne('.drag-select')).toBeUndefined();
+    expect(Object.keys(state.editor.selectedMap)).toEqual(['b']);
   });
 
   /**
@@ -1354,6 +1489,74 @@ describe('the Flow mode of the visualization tab', () => {
     );
   });
 
+  it('steps back and forward through the centers it stood on, on the undo and redo chords and the two buttons', async () => {
+    const app = createTestAppContext();
+    seedFields(app);
+    const mounted = await mountVisualization(app);
+    await enterFocused(mounted, ['t1']);
+    await narrowByRelated('t2');
+
+    expect(app.store.state.editor.views.flow!.centerIds).toEqual(['t2']);
+    expect(drawnTableIds()).toEqual(['t1', 't2', 't3']);
+
+    chord(app, KeyBindingName.undo);
+    await settle();
+
+    expect(app.store.state.editor.views.flow!.centerIds).toEqual(['t1']);
+    expect(drawnTableIds()).toEqual(['t1', 't2']);
+
+    click(
+      menuOf(
+        mounted,
+        toShortcutTitle(app.keyBindingMap, 'Next table', KeyBindingName.redo)
+      )
+    );
+    await settle();
+
+    expect(app.store.state.editor.views.flow!.centerIds).toEqual(['t2']);
+    expect(drawnTableIds()).toEqual(['t1', 't2', 't3']);
+
+    click(
+      menuOf(
+        mounted,
+        toShortcutTitle(
+          app.keyBindingMap,
+          'Previous table',
+          KeyBindingName.undo
+        )
+      )
+    );
+    await settle();
+    chord(app, KeyBindingName.redo);
+    await settle();
+
+    expect(app.store.state.editor.views.flow!.centerIds).toEqual(['t2']);
+  });
+
+  // Graph draws no view, so the chords step nothing there, and the palette
+  // takes them as it takes the zoom chords.
+  it('steps nothing on the undo chord under Graph or while quick search is open', async () => {
+    const app = createTestAppContext();
+    seedFields(app);
+    const mounted = await mountVisualization(app);
+    await enterFocused(mounted, ['t1']);
+    await narrowByRelated('t2');
+
+    app.store.dispatchSync(changeOpenMapAction({ [Open.search]: true }));
+    chord(app, KeyBindingName.undo);
+    await settle();
+
+    expect(app.store.state.editor.views.flow!.centerIds).toEqual(['t2']);
+
+    app.store.dispatchSync(changeOpenMapAction({ [Open.search]: false }));
+    click(menuOf(mounted, 'Graph'));
+    await settle();
+    chord(app, KeyBindingName.undo);
+    await settle();
+
+    expect(app.store.state.editor.views.flow!.centerIds).toEqual(['t2']);
+  });
+
   it('leaves the display set and the tab where they stand on the stop chord (AC-49)', async () => {
     const app = createTestAppContext();
     seed(app);
@@ -1469,6 +1672,121 @@ describe('the Flow mode of the visualization tab', () => {
     expect(view.originY).toBeCloseTo(originY + 50, 4);
     expect(app.store.state.settings.originX).toBe(0);
     expect(app.store.state.settings.originY).toBe(0);
+  });
+
+  it('pans the view on a middle drag over a card, and leaves the card and the selection be', async () => {
+    const app = createTestAppContext();
+    seed(app);
+    const mounted = await mountVisualization(app);
+    await enterFlow(mounted);
+    app.store.dispatchSync(selectAction({ b: SelectType.table }));
+    await settle();
+    await whenPainted();
+    const landed = positionsOf(app)!;
+    const { originX, originY } = app.store.state.editor.views.flow!;
+    const closeColorPicker = vi.fn();
+    app.emitter.on({ closeColorPicker });
+    const stage = flowStage();
+    const card = bodyOf('a').getClientRect({ relativeTo: stage });
+    const content = stage.content.getBoundingClientRect();
+    const at = {
+      clientX: content.left + card.x + card.width / 2,
+      clientY: content.top + card.y + card.height / 2,
+    };
+
+    const press = new MouseEvent('mousedown', {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      button: 1,
+      ...at,
+    });
+    stage.content.querySelector('canvas')!.dispatchEvent(press);
+    movePointer(at.clientX + 30, at.clientY + 50);
+    releasePointer();
+    await settle();
+
+    const view = app.store.state.editor.views.flow!;
+    expect(press.defaultPrevented).toBe(true);
+    expect(view.originX).toBeCloseTo(originX + 30, 4);
+    expect(view.originY).toBeCloseTo(originY + 50, 4);
+    expect(positionsOf(app)).toEqual(landed);
+    expect({ ...app.store.state.editor.selectedMap }).toEqual({
+      b: SelectType.table,
+    });
+    expect(app.store.state.settings.originX).toBe(0);
+    expect(app.store.state.settings.originY).toBe(0);
+    // The picker a cached ERD tab may hold open is that tab's, not this scene's.
+    expect(closeColorPicker).not.toHaveBeenCalled();
+  });
+
+  it('keeps the selection and the pin through a middle click on the background', async () => {
+    const app = createTestAppContext();
+    seed(app);
+    const mounted = await mountVisualization(app);
+    await enterFlow(mounted);
+    await clickTable('a');
+    fireScenePointer(bodyOf('a'), 'mouseleave');
+    app.store.dispatchSync(selectAction({ b: SelectType.table }));
+    await settle();
+    const selected = { ...app.store.state.editor.selectedMap };
+    expect(Object.keys(selected)).toContain('b');
+    const rect = flowRootOf(mounted).getBoundingClientRect();
+    const init: MouseEventInit = {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      button: 1,
+      clientX: rect.left + 900,
+      clientY: rect.top + 500,
+    };
+    const canvas = flowStage().content.querySelector('canvas')!;
+
+    const press = new MouseEvent('mousedown', init);
+    canvas.dispatchEvent(press);
+    canvas.dispatchEvent(new MouseEvent('mouseup', init));
+    await settle();
+
+    expect(press.defaultPrevented).toBe(true);
+    expect(litTableIds(app)).toEqual(['a', 'b']);
+    expect({ ...app.store.state.editor.selectedMap }).toEqual(selected);
+  });
+
+  /**
+   * The pan stops its press at the stage container, short of the tree the bar
+   * reads a press outside its menu from, so the menu hears the forward instead.
+   */
+  it('closes the row display menu on a middle press over the scene, as a main press does', async () => {
+    const app = createTestAppContext();
+    seed(app);
+    const mounted = await mountVisualization(app);
+    await enterFlow(mounted);
+    const rect = flowRootOf(mounted).getBoundingClientRect();
+    const canvas = flowStage().content.querySelector('canvas')!;
+    const pressCanvas = (button: number) => {
+      const init: MouseEventInit = {
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+        button,
+        clientX: rect.left + 900,
+        clientY: rect.top + 500,
+      };
+      canvas.dispatchEvent(new MouseEvent('mousedown', init));
+      canvas.dispatchEvent(new MouseEvent('mouseup', init));
+      window.dispatchEvent(new MouseEvent('mouseup', init));
+    };
+
+    for (const button of [0, 1]) {
+      click(showModeTriggerOf(mounted));
+      await settle();
+      expect(showModeMenuOf(mounted), `button ${button}`).not.toBeNull();
+
+      pressCanvas(button);
+      await settle();
+
+      expect(showModeMenuOf(mounted), `button ${button}`).toBeNull();
+    }
   });
 
   it('runs particles on the connectors a hover lights, and none while nothing is hovered (AC-33)', async () => {
@@ -1631,6 +1949,46 @@ describe('the display set of the Flow view', () => {
     );
   });
 
+  it('redraws the cards in the name view picked on the bar and places them again at their new size', async () => {
+    const app = createTestAppContext();
+    seedFields(app);
+    app.store.dispatchSync(
+      changeTableLogicalNameAction({
+        id: 't1',
+        value: 'Registered users of the shop',
+      }),
+      changeColumnLogicalNameAction({
+        tableId: 't1',
+        id: 'c1',
+        value: 'User ID',
+      })
+    );
+    const mounted = await mountVisualization(app);
+    await enterFocused(mounted, ['t1']);
+    const t1 = app.store.state.collections.tableEntities.t1;
+    const physical = bodyOf('t1').width();
+
+    expect(namesOf('t1')).toEqual(['users', 'id', 'dataType']);
+    expect(hoisted.requests).toHaveLength(1);
+
+    await chooseNameView(mounted, 'Logical Names');
+
+    expect(app.store.state.settings.nameViewMode).toBe(NameViewMode.logical);
+    expect(namesOf('t1')).toEqual([
+      'Registered users of the shop',
+      'User ID',
+      'dataType',
+    ]);
+    // A name view writes other names on every card, so the placement is
+    // stale and asked for anew at the size the switch gives.
+    expect(hoisted.requests).toHaveLength(2);
+    const node = hoisted.requests[1].nodes.find(({ id }) => id === 't1');
+    const { width } = getTableRect(app.store.state, t1, ViewKind.flow);
+    expect(node.width).toBe(width);
+    expect(bodyOf('t1').width()).toBe(width - TABLE_BORDER);
+    expect(width).toBeGreaterThan(physical);
+  });
+
   it('shows the union of what several centers reach (AC-24)', async () => {
     const app = createTestAppContext();
     seedFields(app);
@@ -1668,7 +2026,7 @@ describe('the display set of the Flow view', () => {
     });
   });
 
-  it('lights the type cells of the hovered table and its hop, and leaves the rest dark (AC-27)', async () => {
+  it('draws the type cells of every card, whatever a hover lights (an owner decision of 2026-10-21)', async () => {
     const app = createTestAppContext();
     seedFields(app);
     const mounted = await mountVisualization(app);
@@ -1681,25 +2039,18 @@ describe('the display set of the Flow view', () => {
     );
     await settle();
 
+    const types = () => ['t1', 't2', 't3'].map(typeOpacityOf);
     expect(drawnTableIds()).toEqual(['t1', 't2', 't3', 't4']);
-    expect(typeOpacityOf('t1')).toEqual([0]);
-    expect(typeOpacityOf('t2')).toEqual([0]);
-    expect(typeOpacityOf('t3')).toEqual([0]);
+    expect(types()).toEqual([[1], [1], [1]]);
 
     fireScenePointer(tableOf('t1')!, 'mouseenter');
     await settle();
-
-    expect(typeOpacityOf('t1')).toEqual([1]);
-    expect(typeOpacityOf('t2')).toEqual([1]);
-    expect(typeOpacityOf('t3')).toEqual([0]);
+    expect(types()).toEqual([[1], [1], [1]]);
 
     fireScenePointer(tableOf('t1')!, 'mouseleave');
     fireScenePointer(tableOf('t3')!, 'mouseenter');
     await settle();
-
-    expect(typeOpacityOf('t3')).toEqual([1]);
-    expect(typeOpacityOf('t2')).toEqual([1]);
-    expect(typeOpacityOf('t1')).toEqual([0]);
+    expect(types()).toEqual([[1], [1], [1]]);
   });
 
   it('places the view again when an edit changes what a center reaches, and not when it does not (AC-13)', async () => {

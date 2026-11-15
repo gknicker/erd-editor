@@ -18,6 +18,7 @@ async function setup(props: Partial<SwitchProps> = {}) {
     html`<${Switch}
       size=${props.size}
       value=${props.value ?? false}
+      disabled=${props.disabled}
       .onChange=${props.onChange ?? onChange}
     />`
   );
@@ -35,6 +36,12 @@ describe('Switch', () => {
     expect(button.getAttribute('type')).toBe('button');
     expect(thumb).toBeTruthy();
     expect(thumb.classList.contains(String(styles.switchThumb))).toBe(true);
+  });
+
+  it('stays left to right in a right-to-left editor, its thumb on the side its value says', async () => {
+    const { button } = await setup();
+
+    expect(button.getAttribute('dir')).toBe('ltr');
   });
 
   it('always applies the base switchButton class', async () => {
@@ -61,6 +68,16 @@ describe('Switch', () => {
     expect(button.classList.contains(String(Reflect.get(styles, key)))).toBe(
       true
     );
+  });
+
+  it('tells assistive technology it is a switch, and whether it is on', async () => {
+    const off = await setup({ value: false });
+    expect(off.button.getAttribute('role')).toBe('switch');
+    expect(off.button.getAttribute('aria-checked')).toBe('false');
+    mounted?.unmount();
+
+    const on = await setup({ value: true });
+    expect(on.button.getAttribute('aria-checked')).toBe('true');
   });
 
   it('reflects a checked value onto both the button attribute and the thumb flag', async () => {
@@ -102,6 +119,26 @@ describe('Switch', () => {
     button.click();
 
     expect(onChange.mock.calls).toEqual([[true], [true]]);
+  });
+
+  it('shows its value and takes no press while disabled', async () => {
+    const { button, thumb, onChange } = await setup({
+      value: true,
+      disabled: true,
+    });
+
+    button.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
+    expect(button.disabled).toBe(true);
+    expect(button.getAttribute('aria-checked')).toBe('true');
+    expect(thumb.hasAttribute('data-checked')).toBe(true);
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it('stays enabled unless it is asked to be disabled', async () => {
+    const { button } = await setup();
+
+    expect(button.disabled).toBe(false);
   });
 
   it('re-renders the checked state when the value prop changes', async () => {

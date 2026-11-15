@@ -1,7 +1,7 @@
 import type { PeerStore } from '@dineug/erd-editor/peer.js';
 import { afterEach, describe, expect, it } from 'vite-plus/test';
 
-import { TOOL_SCENARIOS } from '@/__test-utils__/scenarios';
+import { APPEND_SCENARIOS, TOOL_SCENARIOS } from '@/__test-utils__/scenarios';
 import { createSeededPeer } from '@/__test-utils__/seed';
 import { actionTools } from '@/tools/registry';
 import { runTool } from '@/tools/run';
@@ -36,6 +36,15 @@ describe('undoable is what a run on the engine measures (AC-B4)', () => {
     }
   );
 
+  it.each(Object.keys(APPEND_SCENARIOS))(
+    '%s with mode append records the one undo entry it says it is undoable by',
+    name => {
+      const run = runTool(seededPeer(), name, APPEND_SCENARIOS[name]);
+
+      expect(run.historyEntries).toBe(1);
+    }
+  );
+
   it('leaves no undo entry only where AC-E9 lists the exception', () => {
     const exempt = (type: string) =>
       type === 'memo.resize' || type.startsWith('settings.');
@@ -45,18 +54,22 @@ describe('undoable is what a run on the engine measures (AC-B4)', () => {
       expect(tool.actionTypes.every(exempt), tool.name).toBe(true);
     }
     expect(sort.undoable).toBe(true);
-    expect(sort.actionTypes).toEqual(['table.moveTo']);
+    expect(sort.actionTypes).toEqual(['table.moveTo', 'tableGroup.resize']);
   });
 
-  it('keeps erd_set_show the one settings tool the engine can undo', () => {
+  it('keeps the database settings out of the editor history and the scripts in it', () => {
     const settings = actionTools.filter(({ actionTypes }) =>
       actionTypes.every(type => type.startsWith('settings.'))
     );
 
-    expect(settings).toHaveLength(12);
+    expect(settings.map(({ name }) => name)).toEqual([
+      'erd_set_database_name',
+      'erd_set_database',
+      'erd_set_ddl_script',
+    ]);
     expect(
       settings.filter(({ undoable }) => undoable).map(({ name }) => name)
-    ).toEqual(['erd_set_show']);
+    ).toEqual(['erd_set_ddl_script']);
   });
 
   it('says why a lone resize leaves no entry, citing the memo history', () => {

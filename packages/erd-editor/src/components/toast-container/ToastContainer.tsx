@@ -6,7 +6,7 @@ import {
   ref,
   repeat,
 } from '@dineug/r-html';
-import { nanoid } from 'nanoid';
+import { uuid25 } from '@dineug/uuid';
 
 import { useAppContext } from '@/components/appContext';
 import { useFlipAnimation } from '@/hooks/useFlipAnimation';
@@ -50,13 +50,17 @@ const ToastContainer: FC<ToastContainerProps> = (props, ctx) => {
     addUnsubscribe(
       emitter.on({
         openToast: ({ payload }) => {
-          const toast = Object.assign(
-            {
-              close: delay(DEFAULT_TIME),
-            },
-            payload,
-            { id: nanoid() }
-          );
+          const shown = payload.key
+            ? toasts.find(toast => toast.key === payload.key)
+            : undefined;
+          shown && handleClose(shown.id);
+
+          // A status toast sends close as undefined when it was given none,
+          // which must not take the place of the default.
+          const toast = Object.assign({}, payload, {
+            close: payload.close ?? delay(DEFAULT_TIME),
+            id: uuid25(),
+          });
           toasts.push(toast);
           toast.close.finally(() => handleClose(toast.id));
         },

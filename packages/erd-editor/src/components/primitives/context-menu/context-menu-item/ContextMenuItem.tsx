@@ -6,8 +6,9 @@ import {
   onMounted,
   ref,
 } from '@dineug/r-html';
-import { nanoid } from 'nanoid';
+import { uuid25 } from '@dineug/uuid';
 
+import { useI18n } from '@/components/localeContext';
 import ContextMenuContent from '@/components/primitives/context-menu/context-menu-content/ContextMenuContent';
 import { useContextMenuRootContext } from '@/components/primitives/context-menu/context-menu-root/contextMenuRootContext';
 import { useUnmounted } from '@/hooks/useUnmounted';
@@ -24,7 +25,8 @@ export type ContextMenuItemProps = {
 
 const ContextMenuItem: FC<ContextMenuItemProps> = (props, ctx) => {
   const root = useContextMenuRootContext(ctx);
-  const id = nanoid();
+  const i18n = useI18n(ctx);
+  const id = uuid25();
   const $div = createRef<HTMLDivElement>();
   const state = observable({
     selected: false,
@@ -84,6 +86,7 @@ const ContextMenuItem: FC<ContextMenuItemProps> = (props, ctx) => {
           y={state.y}
           fit={true}
           flipX={state.flipX}
+          openLeft={i18n.value.dir === 'rtl'}
           children={props.subChildren}
         />
       ) : null}

@@ -6,6 +6,7 @@ import * as vscode from 'vscode';
 const EXTENSION_ID = 'dineug.vuerd-vscode';
 const VIEW_TYPE = 'editor.erd';
 const THEME_SECTION = 'dineug.erd-editor.theme';
+const LOCALE_SETTING = 'dineug.erd-editor.locale';
 const FIXTURE_FILE = 'sample.erd';
 
 // This file is executed as out/test/integration/extension.test.js.
@@ -250,13 +251,13 @@ describe('vuerd-vscode in the Extension Host', () => {
       await clearThemeOverrides();
     });
 
-    it('resolves appearance to the documented "dark" default', () => {
+    it('resolves appearance to the documented "auto" default', () => {
       const config = getThemeConfiguration();
 
       // defaultValue proves VSCode registered the contributed property;
       // get proves that is also what getTheme() resolves to at runtime.
-      assert.strictEqual(config.inspect('appearance')?.defaultValue, 'dark');
-      assert.strictEqual(config.get('appearance'), 'dark');
+      assert.strictEqual(config.inspect('appearance')?.defaultValue, 'auto');
+      assert.strictEqual(config.get('appearance'), 'auto');
     });
 
     it('resolves grayColor to the documented "slate" default', () => {
@@ -271,6 +272,38 @@ describe('vuerd-vscode in the Extension Host', () => {
 
       assert.strictEqual(config.inspect('accentColor')?.defaultValue, 'indigo');
       assert.strictEqual(config.get('accentColor'), 'indigo');
+    });
+
+    it('resolves the display language to the documented "auto" default', () => {
+      const config = vscode.workspace.getConfiguration('dineug.erd-editor');
+
+      assert.strictEqual(config.inspect('locale')?.defaultValue, 'auto');
+      assert.strictEqual(config.get('locale'), 'auto');
+    });
+
+    it('offers auto and the 25 display languages, each under its own label', () => {
+      const [configuration] = manifest().contributes.configuration;
+      const { enum: values, enumItemLabels: labels } =
+        configuration.properties[LOCALE_SETTING];
+
+      // The bridge's list cannot be imported here, so the unit suite holds
+      // the values and names to it; this pins what VS Code parsed of them.
+      assert.strictEqual(values.length, 26);
+      assert.strictEqual(new Set(values).size, 26);
+      assert.deepStrictEqual(values.slice(0, 4), [
+        'auto',
+        'id-ID',
+        'de-DE',
+        'en',
+      ]);
+      assert.strictEqual(labels.length, values.length);
+      assert.deepStrictEqual(labels.slice(0, 4), [
+        'Auto',
+        'Bahasa Indonesia',
+        'Deutsch',
+        'English',
+      ]);
+      assert.strictEqual(labels[values.indexOf('ko-KR')], '한국어');
     });
 
     it('surfaces a workspace-scoped write as workspaceValue, which is the signal saveTheme scopes on', async () => {

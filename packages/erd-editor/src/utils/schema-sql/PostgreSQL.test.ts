@@ -1,19 +1,32 @@
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
 import { schemaV3Parser } from '@dineug/erd-editor-schema';
 import { describe, expect, it } from 'vite-plus/test';
 
-import { BracketType, ColumnOption, OrderType } from '@/constants/schema';
+import {
+  BracketType,
+  ColumnOption,
+  Database,
+  OrderType,
+  ReferentialAction,
+} from '@/constants/schema';
 import { RootState } from '@/engine/state';
 import { createIndex } from '@/utils/collection/index.entity';
 import { createIndexColumn } from '@/utils/collection/indexColumn.entity';
 import { createRelationship } from '@/utils/collection/relationship.entity';
 import { createTable } from '@/utils/collection/table.entity';
 import { createColumn } from '@/utils/collection/tableColumn.entity';
+import { createSchemaSQL } from '@/utils/schema-sql';
 import {
   createSchema,
+  formatDropBlock,
+  formatHeader,
   formatIndex,
   formatTable,
 } from '@/utils/schema-sql/PostgreSQL';
-import { Name } from '@/utils/schema-sql/utils';
+import { createWrittenObjects, Name } from '@/utils/schema-sql/utils';
 
 function createState(): RootState {
   return {
@@ -132,10 +145,121 @@ function createFixture() {
     users,
     posts,
     userId,
+    userEmail,
     postUserId,
     postsIndex,
     usersIndex,
   };
+}
+
+interface SampleVariant {
+  memberIdType?: string;
+  postIdType?: string;
+  postMemberIdType?: string;
+  onDelete?: number;
+}
+
+// The two-table sample every options fixture was written from; a variant
+// changes the key types or the delete action.
+function createSampleState({
+  memberIdType = 'INT',
+  postIdType = 'INT',
+  postMemberIdType = 'INT',
+  onDelete = ReferentialAction.cascade,
+}: SampleVariant = {}): RootState {
+  const state = {
+    ...schemaV3Parser({}),
+    editor: {},
+    lww: {},
+  } as unknown as RootState;
+  const key =
+    ColumnOption.primaryKey | ColumnOption.notNull | ColumnOption.autoIncrement;
+  const columns = [
+    createColumn({
+      id: 'm1',
+      tableId: 'tm',
+      name: 'id',
+      dataType: memberIdType,
+      options: key,
+    }),
+    createColumn({
+      id: 'm2',
+      tableId: 'tm',
+      name: 'email',
+      dataType: 'VARCHAR(255)',
+      options: ColumnOption.notNull | ColumnOption.unique,
+    }),
+    createColumn({
+      id: 'p1',
+      tableId: 'tp',
+      name: 'id',
+      dataType: postIdType,
+      options: key,
+    }),
+    createColumn({
+      id: 'p2',
+      tableId: 'tp',
+      name: 'member_id',
+      dataType: postMemberIdType,
+      options: ColumnOption.notNull,
+    }),
+    createColumn({
+      id: 'p3',
+      tableId: 'tp',
+      name: 'title',
+      dataType: 'VARCHAR(200)',
+      options: ColumnOption.notNull,
+    }),
+  ];
+
+  state.settings.databaseName = 'shop';
+  state.collections.tableEntities = {
+    tm: createTable({
+      id: 'tm',
+      name: 'member',
+      comment: 'Members',
+      columnIds: ['m1', 'm2'],
+    }),
+    tp: createTable({ id: 'tp', name: 'post', columnIds: ['p1', 'p2', 'p3'] }),
+  };
+  state.collections.tableColumnEntities = Object.fromEntries(
+    columns.map(column => [column.id, column])
+  );
+  state.collections.relationshipEntities = {
+    rp: createRelationship({
+      id: 'rp',
+      onDelete,
+      start: { tableId: 'tm', columnIds: ['m1'] },
+      end: { tableId: 'tp', columnIds: ['p2'] },
+    }),
+  };
+  state.collections.indexEntities = {
+    ix: createIndex({
+      id: 'ix',
+      name: 'idx_post_title',
+      tableId: 'tp',
+      indexColumnIds: ['ic'],
+    }),
+  };
+  state.collections.indexColumnEntities = {
+    ic: createIndexColumn({
+      id: 'ic',
+      indexId: 'ix',
+      columnId: 'p3',
+      orderType: OrderType.ASC,
+    }),
+  };
+  state.doc.tableIds = ['tm', 'tp'];
+  state.doc.relationshipIds = ['rp'];
+  state.doc.indexIds = ['ix'];
+
+  return state;
+}
+
+const FIXTURES = join(dirname(fileURLToPath(import.meta.url)), '__fixtures__');
+
+function readFixture(path: string): string {
+  return readFileSync(join(FIXTURES, 'options', path), 'utf8');
 }
 
 describe('PostgreSQL createSchema', () => {
@@ -214,7 +338,6 @@ describe('PostgreSQL createSchema', () => {
       end: { tableId: posts.id, columnIds: [postUserId.id] },
     });
     state.collections.relationshipEntities[second.id] = second;
-    state.doc.tableIds = [];
     state.doc.indexIds = [];
     state.doc.relationshipIds = ['r-1', 'r-2'];
 
@@ -224,19 +347,17 @@ describe('PostgreSQL createSchema', () => {
     expect(sql).toContain('  ADD CONSTRAINT FK_users_TO_posts1\n');
   });
 
-  it('skips relationships whose tables are missing', () => {
+  it('skips relationships whose tables are missing, blank line and all', () => {
     const { state } = createFixture();
     state.doc.tableIds = [];
     state.doc.indexIds = [];
     Reflect.deleteProperty(state.collections.tableEntities, 't-users');
 
-    expect(createSchema(state)).toBe('\n');
+    expect(createSchema(state)).toBe('');
   });
 
-  it('ignores columns that are not part of the relationship end/start', () => {
+  it('skips a relationship none of whose columns exist, blank line and all', () => {
     const { state } = createFixture();
-    state.doc.tableIds = [];
-    state.doc.indexIds = [];
     state.collections.relationshipEntities['r-1'].start.columnIds = [
       'missing-start',
     ];
@@ -244,16 +365,121 @@ describe('PostgreSQL createSchema', () => {
       'missing-end',
     ];
 
+    const sql = createSchema(state);
+    state.doc.relationshipIds = [];
+
+    expect(sql).not.toContain('FOREIGN KEY');
+    expect(sql).toBe(createSchema(state));
+  });
+});
+
+describe('PostgreSQL dotted table names', () => {
+  it('names foreign keys and indexes after the table part of an unquoted schema.table', () => {
+    const { state, users, posts } = createFixture();
+    users.name = 'sales.users';
+    posts.name = 'sales.posts';
+
     expect(createSchema(state)).toBe(
       [
         '',
-        'ALTER TABLE posts',
+        'CREATE TABLE sales.posts',
+        '(',
+        '  id      INT,',
+        '  user_id INT NOT NULL,',
+        '  PRIMARY KEY (id)',
+        ');',
+        '',
+        'CREATE TABLE sales.users',
+        '(',
+        '  id    INT          NOT NULL GENERATED ALWAYS AS IDENTITY,',
+        "  email VARCHAR(255) NOT NULL DEFAULT 'a@b.c' UNIQUE,",
+        "  name  VARCHAR(50)  DEFAULT 'guest',",
+        '  PRIMARY KEY (id)',
+        ');',
+        '',
+        "COMMENT ON TABLE sales.users IS 'user table';",
+        '',
+        "COMMENT ON COLUMN sales.users.id IS 'user id';",
+        '',
+        "COMMENT ON COLUMN sales.users.email IS 'email address';",
+        '',
+        'ALTER TABLE sales.posts',
         '  ADD CONSTRAINT FK_users_TO_posts',
-        '    FOREIGN KEY ()',
-        '    REFERENCES users ();',
+        '    FOREIGN KEY (user_id)',
+        '    REFERENCES sales.users (id);',
+        '',
+        'CREATE INDEX IDX_posts',
+        '  ON sales.posts (user_id ASC);',
+        '',
+        'CREATE UNIQUE INDEX IDX_EMAIL',
+        '  ON sales.users (email DESC);',
         '',
       ].join('\n')
     );
+  });
+
+  it('names keys after the table part of "sales"."users" without its quotes', () => {
+    const { state, users, usersIndex } = createFixture();
+    users.name = '"sales"."users"';
+    usersIndex.name = '';
+
+    const sql = createSchema(state);
+
+    expect(sql).toContain('  ADD CONSTRAINT FK_users_TO_posts\n');
+    expect(sql).toContain(
+      'CREATE UNIQUE INDEX IDX_users\n  ON "sales"."users" (email DESC);'
+    );
+  });
+
+  it('numbers a foreign key and an index name that repeat an earlier one but for case', () => {
+    const { state, users, posts, userId, userEmail, postUserId } =
+      createFixture();
+    users.name = 'sales.users';
+    posts.name = 'sales.posts';
+    // The hr table borrows the sales key and email columns, which the DDL reads
+    // by id alone, and its index the sales email index column.
+    const hrUsers = createTable({
+      id: 't-hr-users',
+      name: 'hr.Users',
+      columnIds: [userId.id, userEmail.id],
+    });
+    const hrRelationship = createRelationship({
+      id: 'r-hr',
+      start: { tableId: hrUsers.id, columnIds: [userId.id] },
+      end: { tableId: posts.id, columnIds: [postUserId.id] },
+    });
+    const hrIndex = createIndex({
+      id: 'i-hr',
+      name: '',
+      tableId: hrUsers.id,
+      indexColumnIds: ['ic-2'],
+    });
+    state.collections.tableEntities[hrUsers.id] = hrUsers;
+    state.collections.relationshipEntities[hrRelationship.id] = hrRelationship;
+    state.collections.indexEntities[hrIndex.id] = hrIndex;
+    state.collections.indexEntities['i-2'].name = '';
+    state.doc.tableIds.push(hrUsers.id);
+    state.doc.relationshipIds.push(hrRelationship.id);
+    state.doc.indexIds = ['i-2', hrIndex.id];
+
+    const sql = createSchema(state);
+
+    expect(sql).toContain('  ADD CONSTRAINT FK_users_TO_posts\n');
+    expect(sql).toContain('  ADD CONSTRAINT FK_Users_TO_posts1\n');
+    expect(sql).toContain('CREATE UNIQUE INDEX IDX_users\n  ON sales.users');
+    expect(sql).toContain('CREATE INDEX IDX_Users1\n  ON hr.Users');
+  });
+
+  it('keeps a quoted dotted name whole in every automatic name', () => {
+    const { state, users, posts } = createFixture();
+    users.name = 'sales.users';
+    posts.name = 'sales.posts';
+    state.settings.bracketType = BracketType.doubleQuote;
+
+    const sql = createSchema(state);
+
+    expect(sql).toContain('  ADD CONSTRAINT "FK_sales.users_TO_sales.posts"');
+    expect(sql).toContain('CREATE INDEX "IDX_sales.posts"\n  ON "sales.posts"');
   });
 });
 
@@ -321,6 +547,38 @@ describe('PostgreSQL formatTable', () => {
       '  b INT,',
       '  PRIMARY KEY (a, b)',
       ');',
+    ]);
+  });
+
+  it('wraps a DEFAULT expression PostgreSQL reads only in parentheses', () => {
+    const state = createState();
+    const created = createColumn({
+      id: 'c-created',
+      name: 'created',
+      dataType: 'TIMESTAMP',
+      default: "now() AT TIME ZONE 'utc'::text",
+    });
+    const seq = createColumn({
+      id: 'c-seq',
+      name: 'seq',
+      dataType: 'INT',
+      default: "nextval('s'::regclass)",
+    });
+    const table = createTable({
+      id: 't-log',
+      name: 'log',
+      columnIds: [created.id, seq.id],
+    });
+    state.collections.tableColumnEntities[created.id] = created;
+    state.collections.tableColumnEntities[seq.id] = seq;
+    state.collections.tableEntities[table.id] = table;
+
+    const buffer: string[] = [];
+    formatTable(state, { table, buffer });
+
+    expect(buffer.slice(2, 4)).toEqual([
+      "  created TIMESTAMP DEFAULT (now() AT TIME ZONE 'utc'::text),",
+      "  seq     INT       DEFAULT nextval('s'::regclass)",
     ]);
   });
 
@@ -422,5 +680,183 @@ describe('PostgreSQL formatIndex', () => {
     formatIndex(state, { index: postsIndex, buffer, indexNames: [] });
 
     expect(buffer[1]).toBe('  ON posts (user_id );');
+  });
+});
+
+describe('PostgreSQL identity types', () => {
+  it.each([
+    'INT',
+    'INTEGER',
+    'BIGINT',
+    'SMALLINT',
+    'INT2',
+    'INT4',
+    'INT8',
+    ' int ',
+  ])('makes an AUTOINCREMENT %j column an identity', dataType => {
+    const sql = createSchemaSQL(
+      createSampleState({ memberIdType: dataType }),
+      Database.PostgreSQL
+    );
+
+    expect(sql.split('GENERATED ALWAYS AS IDENTITY')).toHaveLength(3);
+    expect(sql).not.toContain('-- PostgreSQL takes IDENTITY');
+  });
+
+  it.each(['UUID', 'VARCHAR(36)', 'NUMERIC(10)', 'SERIAL'])(
+    'writes an AUTOINCREMENT %j column without IDENTITY and says why',
+    dataType => {
+      const state = createSampleState({ memberIdType: dataType });
+      state.collections.tableColumnEntities.m1.default = 'gen_random_uuid()';
+
+      const sql = createSchemaSQL(state, Database.PostgreSQL);
+
+      expect(sql.split('GENERATED ALWAYS AS IDENTITY')).toHaveLength(2);
+      expect(sql).toContain(
+        ');\n\n-- PostgreSQL takes IDENTITY only on smallint, integer or bigint, so member.id is written without it.\n\n'
+      );
+      expect(sql).not.toContain('DEFAULT');
+    }
+  );
+
+  it('matches the UUID key fixture', () => {
+    expect(
+      createSchemaSQL(
+        createSampleState({ memberIdType: 'UUID', postMemberIdType: 'UUID' }),
+        Database.PostgreSQL
+      )
+    ).toBe(readFixture('PostgreSQL/non-integer-identity-create-none.sql'));
+  });
+
+  it('names every column of a table that goes without IDENTITY, quoted as the table is', () => {
+    const state = createSampleState({ memberIdType: 'UUID' });
+    state.settings.bracketType = BracketType.doubleQuote;
+    state.collections.tableColumnEntities.m2.options |=
+      ColumnOption.autoIncrement;
+
+    const sql = createSchemaSQL(state, Database.PostgreSQL);
+
+    expect(sql).toContain(
+      [
+        ');',
+        '',
+        '-- PostgreSQL takes IDENTITY only on smallint, integer or bigint, so "member"."id" is written without it.',
+        '-- PostgreSQL takes IDENTITY only on smallint, integer or bigint, so "member"."email" is written without it.',
+        '',
+      ].join('\n')
+    );
+  });
+});
+
+describe('PostgreSQL options', () => {
+  it('drops each foreign key right above adding it back under ifNotExists', () => {
+    const state = createSampleState();
+    state.settings.bracketType = BracketType.doubleQuote;
+    state.collections.indexEntities.ix.unique = true;
+
+    const sql = createSchemaSQL(state, Database.PostgreSQL, undefined, {
+      statements: 'ifNotExists',
+    });
+
+    expect(sql).toContain('\nCREATE TABLE IF NOT EXISTS "member"\n');
+    expect(sql).toContain(
+      [
+        '',
+        'ALTER TABLE "post" DROP CONSTRAINT IF EXISTS "FK_member_TO_post";',
+        'ALTER TABLE "post"',
+        '  ADD CONSTRAINT "FK_member_TO_post"',
+      ].join('\n')
+    );
+    expect(sql).toContain(
+      '\nCREATE UNIQUE INDEX IF NOT EXISTS "idx_post_title"\n'
+    );
+  });
+
+  it('matches the UUID key fixture under the editor defaults', () => {
+    const state = createSampleState({
+      memberIdType: 'UUID',
+      postMemberIdType: 'UUID',
+    });
+    state.settings.databaseName = 'shop';
+
+    expect(
+      createSchemaSQL(state, Database.PostgreSQL, undefined, {
+        statements: 'ifNotExists',
+        header: 'createAndUse',
+      })
+    ).toBe(
+      readFixture(
+        'PostgreSQL/non-integer-identity-ifNotExists-createAndUse.sql'
+      )
+    );
+  });
+
+  it('writes the createAndUse header alone, quoted as the tables are', () => {
+    const state = createState();
+
+    expect(formatHeader(state, 'use', 'shop')).toBe('');
+    state.settings.bracketType = BracketType.doubleQuote;
+    expect(formatHeader(state, 'createAndUse', 'shop')).toBe(
+      'CREATE SCHEMA IF NOT EXISTS "shop";\nSET search_path TO "shop", public;'
+    );
+  });
+
+  it('names a table without a schema of its own in the header schema', () => {
+    const { state, users, posts } = createFixture();
+    users.name = 'sales.users';
+    const written = createWrittenObjects();
+    written.tables.push(users, posts);
+
+    expect(formatDropBlock(state, written, 'createAndUse', 'shop')).toBe(
+      'DROP TABLE IF EXISTS sales.users, shop.posts;'
+    );
+    expect(formatDropBlock(state, written, 'none', 'shop')).toBe(
+      'DROP TABLE IF EXISTS sales.users, posts;'
+    );
+    state.settings.bracketType = BracketType.doubleQuote;
+    expect(formatDropBlock(state, written, 'createAndUse', 'shop')).toBe(
+      'DROP TABLE IF EXISTS "shop"."sales.users", "shop"."posts";'
+    );
+    expect(formatDropBlock(state, createWrittenObjects(), 'none', 'shop')).toBe(
+      ''
+    );
+  });
+
+  it('writes the header and the schema on the DROP for recreate', () => {
+    const state = createSampleState();
+    state.settings.databaseName = 'shop';
+    state.settings.bracketType = BracketType.doubleQuote;
+
+    expect(
+      createSchemaSQL(state, Database.PostgreSQL, undefined, {
+        statements: 'recreate',
+        header: 'createAndUse',
+      })
+    ).toMatch(
+      /^\nCREATE SCHEMA IF NOT EXISTS "shop";\nSET search_path TO "shop", public;\n\nDROP TABLE IF EXISTS "shop"."member", "shop"."post";\n\nCREATE TABLE "member"\n/
+    );
+  });
+});
+
+describe('PostgreSQL logical names as comments', () => {
+  it('writes COMMENT ON for a logical name where the comment is empty, a comment kept, and none without the option', () => {
+    const { state, users, posts, userId, postUserId } = createFixture();
+    users.logicalName = 'User';
+    posts.logicalName = 'Post';
+    userId.logicalName = 'User ID';
+    postUserId.logicalName = "Post's writer";
+
+    const written = createSchema(state, undefined, {
+      logicalNameAsComment: true,
+    });
+
+    expect(written).toContain("\nCOMMENT ON TABLE posts IS 'Post';\n");
+    expect(written).toContain(
+      "\nCOMMENT ON COLUMN posts.user_id IS 'Post''s writer';\n"
+    );
+    expect(written).toContain("\nCOMMENT ON TABLE users IS 'user table';\n");
+    expect(written).toContain("\nCOMMENT ON COLUMN users.id IS 'user id';\n");
+    expect(written).not.toContain('User');
+    expect(createSchema(state)).not.toContain('Post');
   });
 });

@@ -1,27 +1,29 @@
-import merge from 'deepmerge';
-import { nanoid } from 'nanoid';
+import { uuid25 } from '@dineug/uuid';
 
 import { COLUMN_MIN_WIDTH } from '@/constants/layout';
 import { DeepPartial, Table } from '@/internal-types';
-import { getDefaultEntityMeta } from '@/utils';
+import { deepMerge } from '@/utils/deepMerge';
 
 export const createTable = (value?: DeepPartial<Table>): Table =>
-  merge(
+  deepMerge<Table>(
     {
-      id: nanoid(),
+      id: uuid25(),
       name: '',
+      logicalName: '',
       comment: '',
       columnIds: [],
       seqColumnIds: [],
+      groupId: '',
+      nameDerived: false,
       ui: {
         x: 200,
         y: 100,
         zIndex: 2,
         widthName: COLUMN_MIN_WIDTH,
+        widthLogicalName: COLUMN_MIN_WIDTH,
         widthComment: COLUMN_MIN_WIDTH,
         color: '',
       },
-      meta: getDefaultEntityMeta(),
     },
-    (value as Table) ?? {}
+    value ?? {}
   );

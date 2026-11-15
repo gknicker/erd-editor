@@ -6,19 +6,26 @@ import {
   isMod,
   KeyBindingName,
   KeyBindingNameList,
+  matchesShortcut,
+  PANEL_PASSING_BINDINGS,
+  pickKeyBindingMap,
   shortcutToTuple,
   simpleShortcutToString,
+  stopsAtPanel,
+  toShortcutTitle,
 } from '@/utils/keyboard-shortcut';
 
-const device = vi.hoisted(() => ({ apple: false }));
+const device = vi.hoisted(() => ({ apple: false, windows: false }));
 
 vi.mock('@/utils/device-detect', () => ({
   hasAppleDevice: () => device.apple,
+  hasWindows: () => device.windows,
 }));
 
 describe('keyboard-shortcut', () => {
   beforeEach(() => {
     device.apple = false;
+    device.windows = false;
   });
 
   describe('KeyBindingName', () => {
@@ -28,11 +35,26 @@ describe('keyboard-shortcut', () => {
       }
     });
 
-    it('lists all 24 binding names', () => {
-      expect(KeyBindingNameList).toHaveLength(24);
+    it('lists all 28 binding names', () => {
+      expect(KeyBindingNameList).toHaveLength(28);
       expect(KeyBindingNameList).toEqual(Object.values(KeyBindingName));
       expect(KeyBindingNameList).toContain('zenMode');
       expect(KeyBindingNameList).toContain('focusView');
+      expect(KeyBindingNameList).toContain('removeSelection');
+    });
+
+    it('binds Delete and Backspace to removing the selection, prevented and left to bubble', () => {
+      const map = createKeyBindingMap();
+      const shortcuts = KeyBindingNameList.filter(
+        name => name !== KeyBindingName.removeSelection
+      ).flatMap(name => map[name].map(option => option.shortcut));
+
+      expect(map[KeyBindingName.removeSelection]).toEqual([
+        { shortcut: 'Delete', preventDefault: true },
+        { shortcut: 'Backspace', preventDefault: true },
+      ]);
+      expect(shortcuts).not.toContain('Delete');
+      expect(shortcuts).not.toContain('Backspace');
     });
 
     it('gives the focusView binding a chord no other binding claims', () => {
@@ -45,6 +67,222 @@ describe('keyboard-shortcut', () => {
         { shortcut: 'Alt+KeyF', preventDefault: true, stopPropagation: true },
       ]);
       expect(shortcuts).not.toContain('Alt+KeyF');
+    });
+
+    it("binds find and replace to every host's find, $mod+KeyF, which no other binding claims", () => {
+      const map = createKeyBindingMap();
+      const shortcuts = KeyBindingNameList.filter(
+        name => name !== KeyBindingName.findReplace
+      ).flatMap(name => map[name].map(option => option.shortcut));
+
+      // Prevented and stopped: no browser find bar, no VS Code workbench find.
+      expect(map[KeyBindingName.findReplace]).toEqual([
+        { shortcut: '$mod+KeyF', preventDefault: true, stopPropagation: true },
+      ]);
+      expect(shortcuts).not.toContain('$mod+KeyF');
+      expect(shortcuts).not.toContain('$mod+Shift+KeyH');
+    });
+  });
+
+  describe('matchesShortcut', () => {
+    const press = (init: KeyboardEventInit) =>
+      new KeyboardEvent('keydown', init);
+
+    it('matches a chord by its code with exactly the modifiers named', () => {
+      const options = [{ shortcut: '$mod+Shift+KeyH' }];
+
+      expect(
+        matchesShortcut(
+          press({ key: 'H', code: 'KeyH', ctrlKey: true, shiftKey: true }),
+          options
+        )
+      ).toBe(true);
+      expect(
+        matchesShortcut(
+          press({ key: 'h', code: 'KeyH', ctrlKey: true }),
+          options
+        )
+      ).toBe(false);
+      expect(
+        matchesShortcut(
+          press({
+            key: 'H',
+            code: 'KeyH',
+            ctrlKey: true,
+            shiftKey: true,
+            altKey: true,
+          }),
+          options
+        )
+      ).toBe(false);
+    });
+
+    it('reads $mod as Meta on an apple device', () => {
+      device.apple = true;
+      const options = [{ shortcut: '$mod+KeyK' }];
+
+      expect(
+        matchesShortcut(
+          press({ key: 'k', code: 'KeyK', metaKey: true }),
+          options
+        )
+      ).toBe(true);
+      expect(
+        matchesShortcut(
+          press({ key: 'k', code: 'KeyK', ctrlKey: true }),
+          options
+        )
+      ).toBe(false);
+    });
+
+    it('tells the find and replace chord from the Alt+F of the Flow focus', () => {
+      const map = createKeyBindingMap();
+      const modF = press({ key: 'f', code: 'KeyF', ctrlKey: true });
+      const altF = press({ key: 'ƒ', code: 'KeyF', altKey: true });
+      const shiftModF = press({
+        key: 'F',
+        code: 'KeyF',
+        ctrlKey: true,
+        shiftKey: true,
+      });
+
+      expect(matchesShortcut(modF, map.findReplace)).toBe(true);
+      expect(matchesShortcut(modF, map.focusView)).toBe(false);
+      expect(matchesShortcut(altF, map.focusView)).toBe(true);
+      expect(matchesShortcut(altF, map.findReplace)).toBe(false);
+      expect(matchesShortcut(shiftModF, map.findReplace)).toBe(false);
+
+      device.apple = true;
+      expect(
+        matchesShortcut(
+          press({ key: 'f', code: 'KeyF', metaKey: true }),
+          map.findReplace
+        )
+      ).toBe(true);
+      expect(matchesShortcut(modF, map.findReplace)).toBe(false);
+    });
+
+    it('tells a bare Delete or Backspace from the removals that hold a modifier', () => {
+      const map = createKeyBindingMap();
+      const bare = press({ key: 'Delete', code: 'Delete' });
+      const withAlt = press({
+        key: 'Backspace',
+        code: 'Backspace',
+        altKey: true,
+      });
+
+      expect(matchesShortcut(bare, map.removeSelection)).toBe(true);
+      expect(matchesShortcut(bare, map.removeTable)).toBe(false);
+      expect(matchesShortcut(bare, map.removeColumn)).toBe(false);
+      expect(matchesShortcut(withAlt, map.removeSelection)).toBe(false);
+      expect(matchesShortcut(withAlt, map.removeColumn)).toBe(true);
+    });
+
+    it('matches a bare key by its value as well as its code', () => {
+      expect(
+        matchesShortcut(press({ key: 'Escape' }), [{ shortcut: 'Escape' }])
+      ).toBe(true);
+      expect(
+        matchesShortcut(press({ key: 'Enter', code: 'Enter' }), [
+          { shortcut: 'Escape' },
+        ])
+      ).toBe(false);
+    });
+
+    it('reads AltGraph on windows as the Control and Alt a chord names, as the binder does', () => {
+      device.windows = true;
+      const altGr = press({ key: '¡', code: 'Digit1' });
+      Object.defineProperty(altGr, 'getModifierState', {
+        value: (mod: string) => mod === 'AltGraph',
+      });
+      const map = createKeyBindingMap();
+
+      expect(matchesShortcut(altGr, map.relationshipZeroOne)).toBe(true);
+      expect(matchesShortcut(altGr, [{ shortcut: 'Digit1' }])).toBe(false);
+    });
+
+    it('tries every option and matches a sequence by its last press alone', () => {
+      const event = press({ key: 'Delete', code: 'Delete', altKey: true });
+
+      expect(
+        matchesShortcut(event, [
+          { shortcut: 'Alt+Backspace' },
+          { shortcut: 'Alt+Delete' },
+        ])
+      ).toBe(true);
+      // The press that completes a sequence at the root is the one a panel stops.
+      expect(
+        matchesShortcut(event, [{ shortcut: 'Alt+KeyG Alt+Delete' }])
+      ).toBe(true);
+      expect(
+        matchesShortcut(event, [{ shortcut: 'Alt+Delete Alt+KeyG' }])
+      ).toBe(false);
+      expect(matchesShortcut(event, [])).toBe(false);
+    });
+  });
+
+  describe('stopsAtPanel', () => {
+    const press = (init: KeyboardEventInit) =>
+      new KeyboardEvent('keydown', init);
+    const map = createKeyBindingMap();
+
+    it('stops the keys a panel moves or presses with', () => {
+      ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Tab'].forEach(key =>
+        expect(stopsAtPanel(press({ key, code: key }), map), key).toBe(true)
+      );
+      expect(stopsAtPanel(press({ key: 'Enter', code: 'Enter' }), map)).toBe(
+        true
+      );
+      expect(stopsAtPanel(press({ key: ' ', code: 'Space' }), map)).toBe(true);
+      expect(stopsAtPanel(press({ key: 'Home', code: 'Home' }), map)).toBe(
+        true
+      );
+      expect(stopsAtPanel(press({ key: 'End', code: 'End' }), map)).toBe(true);
+    });
+
+    it('stops a chord of the map outside the passing list, Escape among them', () => {
+      expect(stopsAtPanel(press({ key: 'Escape', code: 'Escape' }), map)).toBe(
+        true
+      );
+      expect(
+        stopsAtPanel(
+          press({ key: 'Backspace', code: 'Backspace', altKey: true }),
+          map
+        )
+      ).toBe(true);
+    });
+
+    it('lets the passing chords and any other press go on', () => {
+      expect(PANEL_PASSING_BINDINGS).toContain(KeyBindingName.undo);
+      expect(
+        stopsAtPanel(press({ key: 'z', code: 'KeyZ', ctrlKey: true }), map)
+      ).toBe(false);
+      expect(
+        stopsAtPanel(press({ key: 's', code: 'KeyS', ctrlKey: true }), map)
+      ).toBe(false);
+      expect(stopsAtPanel(press({ key: 'a', code: 'KeyA' }), map)).toBe(false);
+    });
+
+    it('stops the G that would group the selected tables, and lets its T go on', () => {
+      expect(stopsAtPanel(press({ key: 'g', code: 'KeyG' }), map)).toBe(true);
+      expect(stopsAtPanel(press({ key: 't', code: 'KeyT' }), map)).toBe(false);
+    });
+
+    it('lets Escape through for a host that passes stop', () => {
+      const passing = [...PANEL_PASSING_BINDINGS, KeyBindingName.stop];
+
+      expect(
+        stopsAtPanel(press({ key: 'Escape', code: 'Escape' }), map, passing)
+      ).toBe(false);
+    });
+
+    it('stops a press an IME still holds', () => {
+      expect(
+        stopsAtPanel(
+          press({ key: 'Process', code: 'KeyA', isComposing: true }),
+          map
+        )
+      ).toBe(true);
     });
   });
 
@@ -82,6 +320,9 @@ describe('keyboard-shortcut', () => {
 
       expect(map.search).toEqual([
         { shortcut: '$mod+KeyK', preventDefault: true, stopPropagation: true },
+      ]);
+      expect(map.findReplace).toEqual([
+        { shortcut: '$mod+KeyF', preventDefault: true, stopPropagation: true },
       ]);
       expect(map.undo).toEqual([
         { shortcut: '$mod+KeyZ', preventDefault: true, stopPropagation: true },
@@ -130,6 +371,26 @@ describe('keyboard-shortcut', () => {
       ]);
     });
 
+    it('binds a table group to Alt+G and the selected tables to T then G, chords no other binding claims', () => {
+      const map = createKeyBindingMap();
+      const shortcuts = KeyBindingNameList.filter(
+        name =>
+          name !== KeyBindingName.addTableGroup &&
+          name !== KeyBindingName.groupSelectedTables
+      ).flatMap(name => map[name].map(option => option.shortcut));
+
+      expect(map.addTableGroup).toEqual([
+        { shortcut: 'Alt+KeyG', preventDefault: true, stopPropagation: true },
+      ]);
+      expect(map.groupSelectedTables).toEqual([
+        { shortcut: 'KeyT KeyG', preventDefault: true },
+      ]);
+      expect(shortcuts).not.toContain('Alt+KeyG');
+      expect(shortcuts.some(shortcut => /^Key[TG]\b/.test(shortcut))).toBe(
+        false
+      );
+    });
+
     it('binds both Backspace and Delete for the remove actions', () => {
       const map = createKeyBindingMap();
 
@@ -157,6 +418,68 @@ describe('keyboard-shortcut', () => {
         '$mod+Alt+Digit3',
         '$mod+Alt+Digit4',
       ]);
+    });
+  });
+
+  describe('pickKeyBindingMap', () => {
+    const VIEW = [
+      KeyBindingName.zoomIn,
+      KeyBindingName.zoomOut,
+      KeyBindingName.zoomReset,
+      KeyBindingName.search,
+      KeyBindingName.stop,
+    ];
+
+    const boundNames = (map: ReturnType<typeof createKeyBindingMap>) =>
+      KeyBindingNameList.filter(name => map[name].length);
+
+    it('keeps the chords of the bindings named, as they were', () => {
+      const full = createKeyBindingMap();
+      const map = createKeyBindingMap();
+
+      pickKeyBindingMap(map, VIEW);
+
+      expect(boundNames(map).sort()).toEqual([...VIEW].sort());
+      for (const name of VIEW) expect(map[name]).toEqual(full[name]);
+    });
+
+    it('leaves every other binding an empty list, so each name still reads as one', () => {
+      const map = createKeyBindingMap();
+
+      pickKeyBindingMap(map, VIEW);
+
+      expect(Object.keys(map)).toEqual(KeyBindingNameList);
+      expect(map[KeyBindingName.removeSelection]).toEqual([]);
+      expect(map[KeyBindingName.selectAllTable]).toEqual([]);
+      expect(map[KeyBindingName.findReplace]).toEqual([]);
+      expect(toShortcutTitle(map, 'Undo', KeyBindingName.undo)).toBe('Undo');
+    });
+
+    it('narrows the object it is given, and again to fewer names', () => {
+      const map = createKeyBindingMap();
+      const zoomIn = map[KeyBindingName.zoomIn];
+
+      pickKeyBindingMap(map, VIEW);
+      pickKeyBindingMap(map, [KeyBindingName.zoomIn]);
+
+      expect(boundNames(map)).toEqual([KeyBindingName.zoomIn]);
+      expect(map[KeyBindingName.zoomIn]).toBe(zoomIn);
+    });
+
+    it('matches no press against a binding it emptied', () => {
+      const map = createKeyBindingMap();
+      const deletePress = new KeyboardEvent('keydown', {
+        key: 'Delete',
+        code: 'Delete',
+      });
+
+      expect(stopsAtPanel(deletePress, map, [])).toBe(true);
+      pickKeyBindingMap(map, VIEW);
+
+      expect(
+        matchesShortcut(deletePress, map[KeyBindingName.removeSelection])
+      ).toBe(false);
+      expect(stopsAtPanel(deletePress, map, [])).toBe(false);
     });
   });
 
@@ -273,6 +596,27 @@ describe('keyboard-shortcut', () => {
 
       expect(event.isComposing).toBe(false);
       expect(isComposing(event)).toBe(true);
+    });
+  });
+
+  describe('toShortcutTitle', () => {
+    it('names the first chord bound to the command', () => {
+      expect(
+        toShortcutTitle(createKeyBindingMap(), 'Delete', 'removeTable')
+      ).toBe('Delete (Ctrl + ⌫)');
+    });
+
+    it('gives the name alone for a command bound to nothing', () => {
+      const map = { ...createKeyBindingMap(), undo: [] };
+
+      expect(toShortcutTitle(map, 'Undo', 'undo')).toBe('Undo');
+      expect(
+        toShortcutTitle(
+          {} as ReturnType<typeof createKeyBindingMap>,
+          'Undo',
+          'undo'
+        )
+      ).toBe('Undo');
     });
   });
 

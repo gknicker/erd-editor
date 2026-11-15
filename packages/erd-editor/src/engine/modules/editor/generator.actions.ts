@@ -1,20 +1,26 @@
-import { query } from '@dineug/erd-editor-schema';
+import {
+  type ERDEditorSchemaV3,
+  parser,
+  query,
+} from '@dineug/erd-editor-schema';
+import { uuid25 } from '@dineug/uuid';
 import { cloneDeep, isEqual, omit, uniq } from 'es-toolkit';
 import { isEmpty, round } from 'es-toolkit/compat';
-import { nanoid } from 'nanoid';
 
-import { START_ADD } from '@/constants/layout';
+import { APPEND_GAP, START_ADD, TABLE_SORT_START } from '@/constants/layout';
 import { ColumnOption } from '@/constants/schema';
+import type { EngineContext } from '@/engine/context';
 import { GeneratorAction } from '@/engine/generator.actions';
+import { toPastedDomainId } from '@/engine/modules/dictionary/membership';
 import {
   changeMemoColorAction,
   moveMemoAction,
 } from '@/engine/modules/memo/atom.actions';
 import { removeMemoAction$ } from '@/engine/modules/memo/generator.actions';
+import { ActionType as TableActionType } from '@/engine/modules/table/actions';
 import {
   changeTableColorAction,
-  moveTableAction,
-  sortTableAction,
+  tableReducers,
 } from '@/engine/modules/table/atom.actions';
 import { removeTableAction$ } from '@/engine/modules/table/generator.actions';
 import {
@@ -23,7 +29,10 @@ import {
   changeColumnCommentAction,
   changeColumnDataTypeAction,
   changeColumnDefaultAction,
+  changeColumnDomainAction,
+  changeColumnLogicalNameAction,
   changeColumnNameAction,
+  changeColumnNameDerivedAction,
   changeColumnNotNullAction,
   changeColumnPrimaryKeyAction,
   changeColumnUniqueAction,
@@ -33,16 +42,34 @@ import {
   addColumnAction$,
   removeColumnAction$,
 } from '@/engine/modules/table-column/generator.actions';
+import { changeTableGroupColorAction } from '@/engine/modules/table-group/atom.actions';
+import {
+  getCarriedTableIds,
+  removeTableGroupAction$,
+  toMoveTableGroupActions,
+} from '@/engine/modules/table-group/generator.actions';
 import { RootState } from '@/engine/state';
 import { attachActionTag, Tag } from '@/engine/tag';
 import { Point } from '@/internal-types';
-import { getTableRect } from '@/konva/scene/metrics';
+import {
+  getContentRect,
+  type TableMove,
+  unionRect,
+} from '@/konva/scene/contentBounds';
+import { getMemoRect, getTableRect, type Rect } from '@/konva/scene/metrics';
 import { getVisibleIds } from '@/konva/scene/viewLayout';
 import { getSceneTransform } from '@/konva/scene/viewport';
+import { nextZIndex } from '@/utils';
 import { bHas } from '@/utils/bit';
 import { calcMemoHeight, calcMemoWidth } from '@/utils/calcMemo';
-import { isOverlapPosition, Rect } from '@/utils/dragSelect';
+import { measureTableSize, recalculateTableWidth } from '@/utils/calcTable';
+import {
+  isInsideDragRect,
+  isOverlapPosition,
+  Rect as DragRect,
+} from '@/utils/dragSelect';
 import type { GeometrySource } from '@/utils/draw-relationship/geometrySource';
+import { isMemoShown } from '@/utils/memo';
 import { schemaAMLParserToSchemaJson } from '@/utils/schema-aml-parser';
 import { schemaDBMLParserToSchemaJson } from '@/utils/schema-dbml-parser';
 import { schemaGraphQLParserToSchemaJson } from '@/utils/schema-graphql-parser';
@@ -59,7 +86,14 @@ import {
   toClipboardIndexes,
   toClipboardRelationships,
 } from '@/utils/table-clipboard/copy';
+import {
+  getTableGroupRects,
+  isTableGroupShown,
+  nextTableGroupZIndex,
+  padRect,
+} from '@/utils/tableGroup';
 
+import { DictionaryLoadFlag } from './actions';
 import {
   clearAction,
   dragstartColumnAction,
@@ -78,46 +112,46 @@ import {
   unselectAllAction,
 } from './atom.actions';
 import { FocusType, MoveKey, SelectType } from './state';
-import { CreateEntityInput, toCreateEntityActions } from './utils/duplicate';
+import { getColoredSelection, getColorTargets } from './utils/color';
+import {
+  CreateEntityActions,
+  CreateEntityInput,
+  CreateEntityTableGroup,
+  toCreateEntityActions,
+} from './utils/duplicate';
 import { findRelationshipColumn } from './utils/findRelationshipColumn';
 import {
+  getFirstColumnType,
+  getFocusedColumnIds,
   isColumns,
   isLastColumn,
   isLastRowColumn,
   isLastTable,
   isTableFocusType,
 } from './utils/focus';
+import { getSelectTypeIds, SelectTypeIds } from './utils/selection';
 import { viewMoveTableAction } from './view.actions';
 import { viewActions$ } from './view.generator.actions';
 
-type SelectTypeIds = {
-  tableIds: string[];
-  memoIds: string[];
-};
-
 const CENTER_BOX_SIZE = 15;
 
-function getSelectTypeIds(
-  selectedMap: Record<string, SelectType>
-): SelectTypeIds {
-  return Object.entries(selectedMap).reduce<SelectTypeIds>(
-    (acc, [id, type]) => {
-      if (type === SelectType.table) {
-        acc.tableIds.push(id);
-      } else if (type === SelectType.memo) {
-        acc.memoIds.push(id);
-      }
-
-      return acc;
-    },
-    { tableIds: [], memoIds: [] }
-  );
-}
-
-export const loadJsonAction$ = (value: string): GeneratorAction =>
+/**
+ * Replaces the document. A schema import passes keepDictionaries, since its
+ * text holds no dictionary and the store's words, terms and domains stay.
+ *
+ * @example
+ * store.dispatch(loadJsonAction$(json, { keepDictionaries: true }));
+ */
+export const loadJsonAction$ = (
+  value: string,
+  { keepDictionaries = false }: DictionaryLoadFlag = {}
+): GeneratorAction =>
   function* () {
-    yield clearAction();
-    yield loadJsonAction({ value });
+    // An unflagged load sends the payloads it always did.
+    const flag = keepDictionaries ? { keepDictionaries } : undefined;
+
+    yield clearAction(flag);
+    yield loadJsonAction({ value, ...flag });
   };
 
 export const initialLoadJsonAction$ = (value: string): GeneratorAction =>
@@ -127,17 +161,27 @@ export const initialLoadJsonAction$ = (value: string): GeneratorAction =>
   };
 
 /**
- * Moves the selection by a pointer step, scaled by the zoom of the scene the
- * drag runs in. From a view scene the step goes to that view's own placement,
- * which holds tables alone, and the document's placement is left where it is.
+ * One drag of the selection: the document groups and tables it carries, read at its first step and
+ * kept to its last, since steps summed per list would split if a peer changed a group's members, or
+ * hid the groups and so took them out of the selection, midway.
+ */
+export type MoveAllGesture = { tableGroupIds?: string[]; tableIds?: string[] };
+
+/**
+ * Moves the selection by a pointer step the scene's zoom scales, a selected
+ * group carrying its members, each table once. From a view scene the step goes
+ * to that view's own placement, which holds tables alone, the document's kept.
  */
 export const moveAllAction$ = (
   movementX: number,
   movementY: number,
-  source: GeometrySource = 'document'
+  source: GeometrySource = 'document',
+  gesture: MoveAllGesture = {}
 ): GeneratorAction =>
   function* (state) {
-    const { tableIds, memoIds } = getSelectTypeIds(state.editor.selectedMap);
+    const { tableIds, memoIds, tableGroupIds } = getSelectTypeIds(
+      state.editor.selectedMap
+    );
     const { zoomLevel } = getSceneTransform(state, source);
     const newMovementX = movementX / zoomLevel;
     const newMovementY = movementY / zoomLevel;
@@ -157,16 +201,18 @@ export const moveAllAction$ = (
       return;
     }
 
-    if (tableIds.length) {
-      yield attachActionTag(
-        Tag.drag,
-        moveTableAction({
-          ids: tableIds,
-          movementX: newMovementX,
-          movementY: newMovementY,
-        })
-      );
-    }
+    gesture.tableGroupIds ??= tableGroupIds;
+    gesture.tableIds ??= getCarriedTableIds(
+      state,
+      gesture.tableGroupIds,
+      tableIds
+    );
+    yield toMoveTableGroupActions(
+      gesture.tableGroupIds,
+      gesture.tableIds,
+      newMovementX,
+      newMovementY
+    );
 
     if (memoIds.length) {
       yield attachActionTag(
@@ -184,6 +230,7 @@ export const removeSelectedAction$ = (): GeneratorAction =>
   function* () {
     yield removeTableAction$();
     yield removeMemoAction$();
+    yield removeTableGroupAction$();
   };
 
 export type DuplicateConfig = {
@@ -201,7 +248,12 @@ export const pasteEntitiesAction$ = (
     yield* createEntities$(state, {
       input: {
         tables: payload.tables,
-        columns: payload.columns,
+        // A copy from another document, or one taken before its domain's type
+        // changed, keeps no link to a domain off the type it pastes.
+        columns: payload.columns.map(column => ({
+          ...column,
+          domainId: toPastedDomainId(state, column.domainId, column.dataType),
+        })),
         memos: payload.memos,
         relationships: payload.relationships ?? [],
         indexes: payload.indexes ?? [],
@@ -251,8 +303,8 @@ function* createEntities$(
 
   const placement = resolvePlacement({
     entities: [
-      ...input.tables.map(toPlacementEntity),
-      ...input.memos.map(toPlacementEntity),
+      ...input.tables.map(table => toPlacementEntity(table, 'table')),
+      ...input.memos.map(memo => toPlacementEntity(memo, 'memo')),
     ],
     offset,
     escapeCollision,
@@ -277,18 +329,22 @@ function* createEntities$(
       acc[id] = SelectType.table;
       return acc;
     }, {}),
-    ...newMemoIds.reduce<Record<string, SelectType>>((acc, id) => {
+    // Hidden memos never stay selected, so a paste adds them unselected.
+    ...(isMemoShown(state) ? newMemoIds : []).reduce<
+      Record<string, SelectType>
+    >((acc, id) => {
       acc[id] = SelectType.memo;
       return acc;
     }, {}),
   });
 }
 
-const toPlacementEntity = ({
+const toPlacementEntity = (
+  { sourceId, ui: { x, y, zIndex } }: ClipboardTable | ClipboardMemo,
+  kind: 'table' | 'memo'
+): PlacementEntity => ({
   sourceId,
-  ui: { x, y, zIndex },
-}: ClipboardTable | ClipboardMemo): PlacementEntity => ({
-  sourceId,
+  kind,
   ui: { x, y, zIndex },
 });
 
@@ -303,9 +359,19 @@ function roundPlacement(
   );
 }
 
+/**
+ * What a duplicate or an append makes new entities from, the logical names,
+ * derived flags and domain links included. Only an append names groups, each
+ * with the copied tables it holds; a duplicate, like a paste, brings none.
+ */
 function toDuplicateInput(
   state: RootState,
-  { tableIds, memoIds }: SelectTypeIds
+  {
+    tableIds,
+    memoIds,
+    tableGroupIds = [],
+  }: Pick<SelectTypeIds, 'tableIds' | 'memoIds'> &
+    Partial<Pick<SelectTypeIds, 'tableGroupIds'>>
 ): CreateEntityInput {
   const { collections } = state;
   const tables = query(collections)
@@ -325,8 +391,10 @@ function toDuplicateInput(
     tables: tables.map(table => ({
       sourceId: table.id,
       name: table.name,
+      logicalName: table.logicalName,
       comment: table.comment,
       columnIds: [...table.columnIds],
+      nameDerived: table.nameDerived,
       ui: {
         x: table.ui.x,
         y: table.ui.y,
@@ -344,6 +412,8 @@ function toDuplicateInput(
       dataType: column.dataType,
       default: column.default,
       options: column.options,
+      logicalName: column.logicalName,
+      domainId: column.domainId,
       ui: {
         keys: column.ui.keys,
         widthName: column.ui.widthName,
@@ -366,8 +436,374 @@ function toDuplicateInput(
     })),
     relationships: toClipboardRelationships(state, copiedTableIds),
     indexes: toClipboardIndexes(state, copiedTableIds),
+    tableGroups: query(collections)
+      .collection('tableGroupEntities')
+      .selectByIds(tableGroupIds)
+      .map(group => ({
+        sourceId: group.id,
+        name: group.name,
+        color: group.color,
+        tableIds: tables
+          .filter(table => table.groupId === group.id)
+          .map(({ id }) => id),
+        ui: { ...group.ui },
+      })),
   };
 }
+
+/**
+ * Where the tables of a document an append brings take their points from,
+ * before the block they make goes under the diagram: as the file has them, as
+ * the grid an import lands in has them, or as a placement answered them.
+ */
+export type AppendLayout = 'file' | 'grid' | ReadonlyArray<TableMove>;
+
+/** What an append adds: its actions, the new ids, and the box they make where they land. */
+export type SchemaAppend = CreateEntityActions & { rect: Rect };
+
+/**
+ * Lays a parsed document's tables out in the grid and wraps its groups round
+ * them, in place: the sort, on the document's own copy, its widths measured
+ * first as this store measures them, in the name view it shows, so the points are this store's alone.
+ */
+function sortGrid(
+  state: RootState,
+  schema: ERDEditorSchemaV3,
+  ctx: EngineContext
+): void {
+  const { nameViewMode } = state.settings;
+  const copy: RootState = {
+    ...state,
+    ...schema,
+    settings: { ...schema.settings, nameViewMode },
+  };
+
+  recalculateTableWidth(copy, ctx);
+  tableReducers[TableActionType.sortTable](
+    copy,
+    { type: TableActionType.sortTable, payload: undefined },
+    ctx
+  );
+}
+
+/**
+ * An import's document with each table at its point in the grid and each group
+ * with members round them, written into the text it loads: every peer takes the
+ * points the sender laid out, where a sort replayed would measure with its own fonts.
+ *
+ * @example
+ * store.dispatchSync(loadJsonAction$(withGridPoints(json, store.state, ctx)));
+ */
+export function withGridPoints(
+  json: string,
+  state: RootState,
+  ctx: EngineContext
+): string {
+  const schema = parser(json);
+  sortGrid(state, schema, ctx);
+
+  const raw = JSON.parse(json);
+  const write = (
+    entities: Record<string, { ui?: object }> | undefined,
+    id: string,
+    ui: object
+  ) => {
+    const entity = entities?.[id];
+    if (entity) entity.ui = { ...entity.ui, ...ui };
+  };
+  const { doc, collections } = schema;
+
+  query(collections)
+    .collection('tableEntities')
+    .selectByIds(doc.tableIds)
+    .forEach(({ id, ui: { x, y } }) =>
+      write(raw.collections?.tableEntities, id, { x, y })
+    );
+  query(collections)
+    .collection('tableGroupEntities')
+    .selectByIds(doc.tableGroupIds)
+    .forEach(({ id, ui: { x, y, width, height } }) =>
+      write(raw.collections?.tableGroupEntities, id, { x, y, width, height })
+    );
+
+  return JSON.stringify(raw);
+}
+
+/**
+ * Each table and memo of the document read in, at the point the layout gives
+ * it. The grid is the sort an import lands in, run on the document's own copy,
+ * so its rows wrap at the width its own table count gives, as a replace's do.
+ */
+function toLayoutPoints(
+  state: RootState,
+  schema: ERDEditorSchemaV3,
+  { tables, memos }: CreateEntityInput,
+  layout: AppendLayout,
+  ctx: EngineContext
+): Map<string, Point> {
+  const { tableEntities } = schema.collections;
+
+  if (layout === 'grid') sortGrid(state, schema, ctx);
+
+  const answered = new Map(
+    typeof layout === 'string'
+      ? []
+      : layout.map(({ id, x, y }) => [id, { x, y }])
+  );
+
+  return new Map([
+    ...tables.map(({ sourceId }): [string, Point] => {
+      const { x, y } = tableEntities[sourceId].ui;
+      return [sourceId, answered.get(sourceId) ?? { x, y }];
+    }),
+    ...memos.map(({ sourceId, ui: { x, y } }): [string, Point] => [
+      sourceId,
+      { x, y },
+    ]),
+  ]);
+}
+
+/**
+ * The rects the groups of an append take in the layout, before the block
+ * moves: a file's as it has them, and for a grid or a placement each group's
+ * members wrapped where they stand, which is where the block starts too.
+ */
+function toLayoutGroupRects(
+  { tableGroups = [] }: CreateEntityInput,
+  layout: AppendLayout,
+  points: Map<string, Point>,
+  sizes: Map<string, { width: number; height: number }>
+): Rect[] {
+  if (layout === 'file') return tableGroups.map(({ ui }) => ui);
+
+  return tableGroups.flatMap(({ tableIds }) => {
+    const rects = tableIds.flatMap(id => {
+      const point = points.get(id);
+      const size = sizes.get(id);
+      return point && size ? [{ ...point, ...size }] : [];
+    });
+    return rects.length ? [padRect(rects.reduce(unionRect))] : [];
+  });
+}
+
+/**
+ * Where the block an append brings starts: under every table, memo and group the diagram holds,
+ * hidden groups and memos included, since they still stand there, a gap below them and in line with
+ * their left edge, or where the grid of an import starts in a diagram holding none.
+ */
+function toAppendOrigin(state: RootState): Point {
+  const hiddenGroups = isTableGroupShown(state)
+    ? []
+    : [...getTableGroupRects(state).values()];
+  const hiddenMemos = isMemoShown(state)
+    ? []
+    : query(state.collections)
+        .collection('memoEntities')
+        .selectByIds(state.doc.memoIds)
+        .map(getMemoRect);
+  const hidden = [...hiddenGroups, ...hiddenMemos];
+  const content = [getContentRect(state), ...hidden]
+    .filter((rect): rect is Rect => rect !== null)
+    .reduce<Rect | null>(
+      (box, rect) => (box ? unionRect(box, rect) : rect),
+      null
+    );
+
+  return content
+    ? { x: content.x, y: content.y + content.height + APPEND_GAP }
+    : { x: TABLE_SORT_START, y: TABLE_SORT_START };
+}
+
+/**
+ * A document's tables, relationships, indexes and memos as new entities here,
+ * made as a paste makes them, no field at its default and no domain link sent,
+ * a gap under the diagram. Null for unreadable text or a document of nothing.
+ *
+ * @example
+ * const append = toSchemaAppend(state, json, 'grid', ctx);
+ */
+export function toSchemaAppend(
+  state: RootState,
+  json: string,
+  layout: AppendLayout,
+  ctx: EngineContext
+): SchemaAppend | null {
+  let schema: ERDEditorSchemaV3;
+  try {
+    schema = parser(json);
+  } catch {
+    return null;
+  }
+
+  const { doc, collections } = schema;
+  const read: RootState = { ...state, doc, collections };
+  const copied = toDuplicateInput(read, doc);
+  if (!copied.tables.length && !copied.memos.length) return null;
+
+  // The file's dictionaries stay behind, so no column links one of its domains.
+  const input: CreateEntityInput = {
+    ...copied,
+    columns: copied.columns.map(column => ({ ...column, domainId: '' })),
+  };
+
+  const points = toLayoutPoints(state, schema, input, layout, ctx);
+  // Measured as the tables land, with none of the file's domains listed, so a
+  // type cell or a domain cell takes no width from a link the append drops.
+  const appended: RootState = { ...read, doc: { ...doc, domainIds: [] } };
+  const sizes = new Map(
+    query(collections)
+      .collection('tableEntities')
+      .selectByIds(doc.tableIds)
+      .map(table => [table.id, measureTableSize(table, appended, ctx.toWidth)])
+  );
+  let minX = Infinity;
+  let minY = Infinity;
+  for (const { x, y } of [
+    ...points.values(),
+    ...toLayoutGroupRects(input, layout, points, sizes),
+  ]) {
+    minX = Math.min(minX, x);
+    minY = Math.min(minY, y);
+  }
+
+  const origin = toAppendOrigin(state);
+  const baseZIndex = nextZIndex(
+    query(state.collections)
+      .collection('tableEntities')
+      .selectByIds(state.doc.tableIds),
+    query(state.collections)
+      .collection('memoEntities')
+      .selectByIds(state.doc.memoIds)
+  );
+  // A stable sort keeps the document's own order among equal stacks.
+  const stacked = [...input.tables, ...input.memos].sort(
+    (a, b) => a.ui.zIndex - b.ui.zIndex
+  );
+  const placement = new Map<string, PlacementPoint>();
+
+  stacked.forEach(({ sourceId }, index) => {
+    const point = points.get(sourceId)!;
+
+    placement.set(sourceId, {
+      x: round(origin.x + point.x - minX, 4),
+      y: round(origin.y + point.y - minY, 4),
+      zIndex: baseZIndex + index,
+    });
+  });
+
+  const tableRects = new Map(
+    query(collections)
+      .collection('tableEntities')
+      .selectByIds(doc.tableIds)
+      .map((table): [string, Rect] => {
+        const { x, y } = placement.get(table.id)!;
+        return [table.id, { x, y, ...sizes.get(table.id)! }];
+      })
+  );
+  const memoRects = query(collections)
+    .collection('memoEntities')
+    .selectByIds(doc.memoIds)
+    .map(memo =>
+      getMemoRect({ ...memo, ui: { ...memo.ui, ...placement.get(memo.id)! } })
+    );
+
+  const tableGroups = toAppendTableGroups(state, input, layout, tableRects, {
+    x: origin.x - minX,
+    y: origin.y - minY,
+  });
+
+  return {
+    ...toCreateEntityActions({ ...input, tableGroups }, placement, {
+      valuesOnly: true,
+    }),
+    rect: [
+      ...tableRects.values(),
+      ...memoRects,
+      ...tableGroups.map(({ ui: { x, y, width, height } }) => ({
+        x,
+        y,
+        width,
+        height,
+      })),
+    ].reduce(unionRect),
+  };
+}
+
+/**
+ * The groups an append brings, stacked over the groups already there: a file
+ * keeps each rect where the block moves it, while a layout that moved the
+ * tables gives a group with members their bounds and the padding instead.
+ */
+function toAppendTableGroups(
+  state: RootState,
+  { tableGroups = [] }: CreateEntityInput,
+  layout: AppendLayout,
+  tableRects: Map<string, Rect>,
+  offset: Point
+): CreateEntityTableGroup[] {
+  const baseZIndex = nextTableGroupZIndex(
+    query(state.collections)
+      .collection('tableGroupEntities')
+      .selectByIds(state.doc.tableGroupIds)
+  );
+
+  return [...tableGroups]
+    .sort((a, b) => a.ui.zIndex - b.ui.zIndex)
+    .map((group, index) => {
+      const members = group.tableIds
+        .map(id => tableRects.get(id))
+        .filter((rect): rect is Rect => Boolean(rect));
+      const { x, y, width, height } =
+        layout === 'file' || !members.length
+          ? {
+              ...group.ui,
+              x: round(group.ui.x + offset.x, 4),
+              y: round(group.ui.y + offset.y, 4),
+            }
+          : padRect(members.reduce(unionRect));
+
+      return {
+        ...group,
+        ui: { x, y, width, height, zIndex: baseZIndex + index },
+      };
+    });
+}
+
+/**
+ * Adds a document read from a file below the diagram as new entities in one undo
+ * step, leaving the tables already there and every setting as they are; unreadable
+ * text, or a document holding nothing, adds nothing.
+ *
+ * @example
+ * store.dispatch(appendSchemaJsonAction$(json, 'file'));
+ */
+export const appendSchemaJsonAction$ = (
+  json: string,
+  layout: AppendLayout = 'file'
+): GeneratorAction =>
+  function* (state, ctx) {
+    const append = toSchemaAppend(state, json, layout, ctx);
+    if (append) yield append.actions;
+  };
+
+/**
+ * Adds a schema read from SQL, GraphQL, DBML or AML to this document, its
+ * tables laid out in the grid below the diagram, as appendSchemaJsonAction$
+ * adds a document.
+ *
+ * @example
+ * store.dispatch(appendSchemaAction$('sql', value));
+ */
+export const appendSchemaAction$ = (
+  type: SchemaImportType,
+  value: string
+): GeneratorAction =>
+  function* (state, ctx) {
+    yield appendSchemaJsonAction$(
+      toSchemaImportJson(type, value, state, ctx),
+      'grid'
+    );
+  };
 
 /**
  * Selects what the rect covers among what the source shows, each entity read
@@ -375,7 +811,7 @@ function toDuplicateInput(
  * and shows no memo, so a marquee drawn over it picks by the view, not the document.
  */
 export const dragSelectAction$ = (
-  dragRect: Rect,
+  dragRect: DragRect,
   source: GeometrySource = 'document'
 ): GeneratorAction =>
   function* (state) {
@@ -426,6 +862,7 @@ export const dragSelectAction$ = (
 
           return acc;
         }, {}),
+      ...takenTableGroups(state, dragRect, source),
     };
 
     yield unselectAllAction$();
@@ -434,6 +871,27 @@ export const dragSelectAction$ = (
       yield selectAction(selectedMap);
     }
   };
+
+/**
+ * The shown groups whose whole drawn box a marquee in the document encloses (an owner decision of
+ * 2026-10-11). A centre rule would take a group with every marquee drawn inside it to pick a few
+ * of its tables, and the drag or Delete that follows would reach the whole group.
+ */
+function takenTableGroups(
+  state: RootState,
+  dragRect: DragRect,
+  source: GeometrySource
+): Record<string, SelectType> {
+  if (source !== 'document' || !isTableGroupShown(state)) return {};
+
+  const taken: Record<string, SelectType> = {};
+  getTableGroupRects(state).forEach(({ x, y, width, height }, id) => {
+    if (isInsideDragRect(dragRect, { x, y, w: width, h: height })) {
+      taken[id] = SelectType.tableGroup;
+    }
+  });
+  return taken;
+}
 
 export const unselectAllAction$ = (): GeneratorAction =>
   function* () {
@@ -481,7 +939,8 @@ export const drawStartRelationshipAction$ = (
 export const drawStartAddRelationshipAction$ = (
   tableId: string
 ): GeneratorAction =>
-  function* ({ collections }) {
+  function* (state) {
+    const { collections } = state;
     const table = query(collections)
       .collection('tableEntities')
       .selectById(tableId);
@@ -494,7 +953,7 @@ export const drawStartAddRelationshipAction$ = (
     if (
       !columns.some(column => bHas(column.options, ColumnOption.primaryKey))
     ) {
-      const columnId = nanoid();
+      const columnId = uuid25();
       yield addColumnAction({
         tableId,
         id: columnId,
@@ -507,7 +966,7 @@ export const drawStartAddRelationshipAction$ = (
       yield focusColumnAction({
         tableId,
         columnId,
-        focusType: FocusType.columnName,
+        focusType: getFirstColumnType(state),
         $mod: false,
         shiftKey: false,
       });
@@ -516,120 +975,179 @@ export const drawStartAddRelationshipAction$ = (
     yield drawStartAddRelationshipAction({ tableId });
   };
 
+/**
+ * Paints every selected table, memo and group the color, sending nothing for
+ * one that already is, in any letter case, so a color pressed again adds no
+ * undo entry while one an undo took back is painted again; one stream group.
+ */
 export const changeColorAllAction$ = (color: string): GeneratorAction =>
-  function* ({ editor: { selectedMap }, collections }) {
-    const { tableIds, memoIds } = getSelectTypeIds(selectedMap);
-    const tables = query(collections)
-      .collection('tableEntities')
-      .selectByIds(tableIds);
-    const memos = query(collections)
-      .collection('memoEntities')
-      .selectByIds(memoIds);
+  function* (state) {
+    const { tables, memos, tableGroups } = getColorTargets(state);
+    const target = color.toLowerCase();
+
+    yield tables
+      .filter(table => table.ui.color.toLowerCase() !== target)
+      .map(table =>
+        changeTableColorAction({
+          id: table.id,
+          color,
+          prevColor: table.ui.color,
+        })
+      );
+    yield memos
+      .filter(memo => memo.ui.color.toLowerCase() !== target)
+      .map(memo =>
+        changeMemoColorAction({ id: memo.id, color, prevColor: memo.ui.color })
+      );
+    yield tableGroups
+      .filter(group => group.color.toLowerCase() !== target)
+      .map(group =>
+        changeTableGroupColorAction({
+          id: group.id,
+          color,
+          prevColor: group.color,
+        })
+      );
+  };
+
+/**
+ * Clears the color of every selected table, memo and group that has one: one
+ * stream group, so one undo entry, and none for a selection that has no color.
+ */
+export const removeColorAllAction$ = (): GeneratorAction =>
+  function* (state) {
+    const { tables, memos, tableGroups } = getColoredSelection(state);
 
     yield tables.map(table =>
-      changeTableColorAction({ id: table.id, color, prevColor: table.ui.color })
+      changeTableColorAction({
+        id: table.id,
+        color: '',
+        prevColor: table.ui.color,
+      })
     );
     yield memos.map(memo =>
-      changeMemoColorAction({ id: memo.id, color, prevColor: memo.ui.color })
+      changeMemoColorAction({
+        id: memo.id,
+        color: '',
+        prevColor: memo.ui.color,
+      })
+    );
+    yield tableGroups.map(group =>
+      changeTableGroupColorAction({
+        id: group.id,
+        color: '',
+        prevColor: group.color,
+      })
+    );
+  };
+
+/** The four text formats an import parses into a document of its own. */
+export type SchemaImportType = 'sql' | 'graphql' | 'dbml' | 'aml';
+
+/**
+ * The settings an import takes from the parser rather than from the document
+ * it replaces: the view.
+ */
+const IMPORT_OMIT_SETTINGS = ['originX', 'originY', 'zoomLevel'] as const;
+
+/**
+ * Writes the settings of the document an import replaces over the parser's,
+ * all but the view, locks included, the view locked where the parser left it.
+ * A placed import writes them again as it lands.
+ *
+ * @example
+ * withImportSettings(schema, store.state.settings);
+ */
+export function withImportSettings(
+  schema: Pick<ERDEditorSchemaV3, 'settings'>,
+  settings: RootState['settings']
+): void {
+  const kept = omit(cloneDeep(settings), IMPORT_OMIT_SETTINGS);
+  const { originX, originY, zoomLevel } = schema.settings;
+
+  schema.settings = {
+    ...schema.settings,
+    ...kept,
+    lockedValues: { ...kept.lockedValues, originX, originY, zoomLevel },
+  };
+}
+
+/**
+ * The document an import parses to, carrying the settings of the one it
+ * replaces. Its tables still stand where the parser left them: the grid or a
+ * placement decides where they go.
+ *
+ * @example
+ * const json = toSchemaImportJson('sql', value, store.state, ctx);
+ */
+export function toSchemaImportJson(
+  type: SchemaImportType,
+  value: string,
+  { settings }: RootState,
+  ctx: EngineContext
+): string {
+  const prepare = (schema: ERDEditorSchemaV3) => {
+    withImportSettings(schema, settings);
+    return schema;
+  };
+
+  switch (type) {
+    case 'sql':
+      return schemaSQLParserToSchemaJson(
+        value,
+        ctx,
+        prepare,
+        settings.database
+      );
+    case 'graphql':
+      return schemaGraphQLParserToSchemaJson(value, ctx, prepare);
+    case 'dbml':
+      return schemaDBMLParserToSchemaJson(value, ctx, prepare);
+    case 'aml':
+      return schemaAMLParserToSchemaJson(value, ctx, prepare);
+  }
+}
+
+/**
+ * The load each of the four text imports runs: the parsed document replaces
+ * this one, its tables at the points the grid gives them here, while the
+ * words, terms and domains stay, since the text brings none.
+ */
+export const loadSchemaAction$ = (
+  type: SchemaImportType,
+  value: string
+): GeneratorAction =>
+  function* (state, ctx) {
+    yield loadJsonAction$(
+      withGridPoints(toSchemaImportJson(type, value, state, ctx), state, ctx),
+      { keepDictionaries: true }
     );
   };
 
 export const loadSchemaSQLAction$ = (value: string): GeneratorAction =>
-  function* ({ settings }, ctx) {
-    yield loadJsonAction$(
-      schemaSQLParserToSchemaJson(value, ctx, schema => {
-        schema.settings = {
-          ...schema.settings,
-          ...omit(cloneDeep(settings), [
-            'width',
-            'height',
-            'originX',
-            'originY',
-            'scrollTop',
-            'scrollLeft',
-            'zoomLevel',
-          ]),
-        };
-        return schema;
-      })
-    );
-    yield sortTableAction();
-  };
+  loadSchemaAction$('sql', value);
 
 export const loadSchemaGraphQLAction$ = (value: string): GeneratorAction =>
-  function* ({ settings }, ctx) {
-    yield loadJsonAction$(
-      schemaGraphQLParserToSchemaJson(value, ctx, schema => {
-        schema.settings = {
-          ...schema.settings,
-          ...omit(cloneDeep(settings), [
-            'width',
-            'height',
-            'originX',
-            'originY',
-            'scrollTop',
-            'scrollLeft',
-            'zoomLevel',
-          ]),
-        };
-        return schema;
-      })
-    );
-    yield sortTableAction();
-  };
+  loadSchemaAction$('graphql', value);
 
 export const loadSchemaDBMLAction$ = (value: string): GeneratorAction =>
-  function* ({ settings }, ctx) {
-    yield loadJsonAction$(
-      schemaDBMLParserToSchemaJson(value, ctx, schema => {
-        schema.settings = {
-          ...schema.settings,
-          ...omit(cloneDeep(settings), [
-            'width',
-            'height',
-            'originX',
-            'originY',
-            'scrollTop',
-            'scrollLeft',
-            'zoomLevel',
-          ]),
-        };
-        return schema;
-      })
-    );
-    yield sortTableAction();
-  };
+  loadSchemaAction$('dbml', value);
 
 export const loadSchemaAMLAction$ = (value: string): GeneratorAction =>
-  function* ({ settings }, ctx) {
-    yield loadJsonAction$(
-      schemaAMLParserToSchemaJson(value, ctx, schema => {
-        schema.settings = {
-          ...schema.settings,
-          ...omit(cloneDeep(settings), [
-            'width',
-            'height',
-            'originX',
-            'originY',
-            'scrollTop',
-            'scrollLeft',
-            'zoomLevel',
-          ]),
-        };
-        return schema;
-      })
-    );
-    yield sortTableAction();
-  };
+  loadSchemaAction$('aml', value);
 
-export const dragstartColumnAction$ = ($mod: boolean): GeneratorAction =>
-  function* ({ editor: { focusTable } }) {
-    if (!focusTable || !focusTable.columnId) return;
+/**
+ * Lifts the focused column, or the whole selection while the focused column is
+ * one of two or more selected in its table, as a table's press lifts the
+ * selected tables.
+ */
+export const dragstartColumnAction$ = (): GeneratorAction =>
+  function* (state) {
+    const { focusTable } = state.editor;
+    const columnIds = getFocusedColumnIds(state);
+    if (!focusTable || columnIds.length === 0) return;
 
-    yield dragstartColumnAction({
-      tableId: focusTable.tableId,
-      columnIds: $mod ? [...focusTable.selectColumnIds] : [focusTable.columnId],
-    });
+    yield dragstartColumnAction({ tableId: focusTable.tableId, columnIds });
   };
 
 type MoveColumnAction = ReturnType<typeof moveColumnAction>;
@@ -709,7 +1227,7 @@ export const dragoverColumnAction$ = (
     if (columns.length === 0) return;
 
     yield removeColumnAction$(tableId, columnIds);
-    const newColumnIds = columns.map(() => nanoid());
+    const newColumnIds = columns.map(() => uuid25());
 
     for (let i = 0; i < columns.length; i++) {
       const column = columns[i];
@@ -752,6 +1270,18 @@ export const dragoverColumnAction$ = (
         changeColumnAutoIncrementAction({
           ...payload,
           value: bHas(column.options, ColumnOption.autoIncrement),
+        }),
+        changeColumnLogicalNameAction({
+          ...payload,
+          value: column.logicalName,
+        }),
+        changeColumnDomainAction({
+          ...payload,
+          value: column.domainId,
+        }),
+        changeColumnNameDerivedAction({
+          ...payload,
+          value: bHas(column.options, ColumnOption.nameDerived),
         }),
         // An append keeps the end of the table, where addColumn put it.
         ...(targetId === null
@@ -815,10 +1345,13 @@ export const actions$ = {
   drawStartRelationshipAction$,
   drawStartAddRelationshipAction$,
   changeColorAllAction$,
+  removeColorAllAction$,
   loadSchemaSQLAction$,
   loadSchemaGraphQLAction$,
   loadSchemaDBMLAction$,
   loadSchemaAMLAction$,
+  appendSchemaAction$,
+  appendSchemaJsonAction$,
   dragstartColumnAction$,
   dragoverColumnAction$,
   columnKeyHoverStartAction$,

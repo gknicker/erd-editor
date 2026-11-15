@@ -12,8 +12,11 @@ export const ActionType = {
   changeTableName: 'table.changeName',
   changeTableComment: 'table.changeComment',
   changeTableColor: 'table.changeColor',
+  changeTableGroup: 'table.changeGroup',
   changeZIndex: 'table.changeZIndex',
   sortTable: 'table.sort',
+  changeTableLogicalName: 'table.changeLogicalName',
+  changeTableNameDerived: 'table.changeNameDerived',
 } as const;
 export type ActionType = ValuesType<typeof ActionType>;
 
@@ -47,11 +50,23 @@ export type ActionMap = {
     color: string;
     prevColor: string;
   };
+  [ActionType.changeTableGroup]: ChangeTableValuePayload & {
+    /**
+     * The groupId the table held, sent by a drop alone: its undo is written as
+     * the drag it ends closes, after the reducer has run, so it cannot read it.
+     */
+    prevValue?: string;
+  };
   [ActionType.changeZIndex]: {
     id: string;
     zIndex: number;
   };
   [ActionType.sortTable]: void;
+  [ActionType.changeTableLogicalName]: ChangeTableValuePayload;
+  [ActionType.changeTableNameDerived]: {
+    id: string;
+    value: boolean;
+  };
 };
 
 export type ReducerType<T extends keyof ActionMap> = Reducer<

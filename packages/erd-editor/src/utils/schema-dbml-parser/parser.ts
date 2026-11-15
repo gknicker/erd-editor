@@ -1,3 +1,5 @@
+import { fromDBMLColor } from '@/utils/tableColor';
+
 import { Token, tokenize, TokenKind } from './tokenizer';
 import {
   DBMLColumn,
@@ -8,7 +10,10 @@ import {
   DBMLParseResult,
   DBMLRef,
   DBMLTable,
+  DBMLTableGroup,
 } from './types';
+
+type Skip = (kind: string) => void;
 
 type Setting = {
   key: string;
@@ -48,15 +53,25 @@ function createReader(tokens: Token[]): Reader {
 
 function parseDocument(tokens: Token[]): DBMLModel {
   const reader = createReader(tokens);
-  const model: DBMLModel = { tables: [], refs: [], enums: {}, skipped: [] };
+  const model: DBMLModel = {
+    tables: [],
+    refs: [],
+    tableGroups: [],
+    enums: {},
+    skipped: [],
+  };
   const partials = new Map<string, DBMLColumn[]>();
   const skipped = new Set<string>();
 
-  const skip = (kind: string) => {
+  const record: Skip = kind => {
     if (!skipped.has(kind)) {
       skipped.add(kind);
       model.skipped.push(kind);
     }
+  };
+
+  const skip = (kind: string) => {
+    record(kind);
     skipElement(reader);
   };
 
@@ -105,10 +120,81 @@ function parseDocument(tokens: Token[]): DBMLModel {
       continue;
     }
 
+    if (keyword === 'tablegroup' && token.kind === TokenKind.identifier) {
+      reader.next();
+      model.tableGroups.push(parseTableGroup(reader, record));
+      continue;
+    }
+
     skip(keyword);
   }
 
   return model;
+}
+
+/**
+ * A TableGroup's name, color and member lines. Its note, inner or as a
+ * setting, and every other setting have no place in a group, so each kind is
+ * recorded as skipped.
+ */
+function parseTableGroup(reader: Reader, record: Skip): DBMLTableGroup {
+  const { name } = readQualifiedName(reader);
+  const group: DBMLTableGroup = { name, color: '', tables: [] };
+
+  readSettings(reader).forEach(({ key, tokens }) => {
+    if (key === 'color') {
+      group.color = fromDBMLColor(colorOf(tokens));
+    } else if (key !== '') {
+      record(`tablegroup ${key}`);
+    }
+  });
+
+  if (!consumeBrace(reader)) {
+    skipLine(reader);
+    return group;
+  }
+
+  while (!reader.atEnd()) {
+    if (skipNewlines(reader)) {
+      continue;
+    }
+
+    const token = reader.peek();
+    if (!token) break;
+
+    if (isPunctuation(token, '}')) {
+      reader.next();
+      break;
+    }
+
+    const following = reader.peek(1);
+
+    if (
+      token.kind === TokenKind.identifier &&
+      token.value.toLowerCase() === 'note' &&
+      following &&
+      (isPunctuation(following, ':') || isPunctuation(following, '{'))
+    ) {
+      reader.next();
+      reader.next();
+      if (isPunctuation(following, '{')) {
+        skipBlock(reader);
+      } else {
+        skipLine(reader);
+      }
+      record('tablegroup note');
+      continue;
+    }
+
+    if (isName(token)) {
+      const { schemaName, name: tableName } = readQualifiedName(reader);
+      group.tables.push({ schemaName, tableName });
+    }
+
+    skipLine(reader);
+  }
+
+  return group;
 }
 
 function parseTable(
@@ -121,6 +207,7 @@ function parseTable(
     name,
     alias: '',
     comment: '',
+    color: '',
     columns: [],
     indexes: [],
   };
@@ -135,7 +222,7 @@ function parseTable(
     table.alias = readName(reader);
   }
 
-  applyNoteSetting(table, readSettings(reader));
+  applyTableSettings(table, readSettings(reader));
 
   if (!consumeBrace(reader)) {
     return name === '' ? null : table;
@@ -410,11 +497,34 @@ function readRefBody(reader: Reader): DBMLRef | null {
   }
 
   const right = readEndpoint(reader);
-  readSettings(reader);
+  const actions = refActionsOf(readSettings(reader));
 
   return left.tableName === '' || right.tableName === ''
     ? null
-    : { operator, left, right };
+    : { operator, left, right, ...actions };
+}
+
+function refActionsOf(
+  settings: Setting[]
+): Pick<DBMLRef, 'onDelete' | 'onUpdate'> {
+  const actions = { onDelete: '', onUpdate: '' };
+
+  settings.forEach(({ key, tokens }) => {
+    if (key === 'delete') {
+      actions.onDelete = wordsOf(tokens);
+    } else if (key === 'update') {
+      actions.onUpdate = wordsOf(tokens);
+    }
+  });
+
+  return actions;
+}
+
+function wordsOf(tokens: Token[]): string {
+  return tokens
+    .filter(token => token.kind !== TokenKind.newline)
+    .map(token => token.value)
+    .join(' ');
 }
 
 function readOperator(reader: Reader): string {
@@ -619,12 +729,34 @@ function applyIndexSettings(index: DBMLIndex, settings: Setting[]) {
   });
 }
 
-function applyNoteSetting(table: DBMLTable, settings: Setting[]) {
+function applyTableSettings(table: DBMLTable, settings: Setting[]) {
   settings.forEach(({ key, tokens }) => {
     if (key === 'note') {
       table.comment = textOf(tokens);
+    } else if (key === 'headercolor') {
+      table.color = fromDBMLColor(colorOf(tokens));
     }
   });
+}
+
+/**
+ * The tokenizer cuts #3498DB into a mark, a number and a name, so the color is
+ * those tokens joined back while each touches the last; a space between them,
+ * a string or a quoted name is no color literal.
+ */
+function colorOf(tokens: Token[]): string {
+  const literal = tokens.every((token, index) => {
+    const previous = tokens[index - 1];
+
+    return (
+      (token.kind === TokenKind.punctuation ||
+        token.kind === TokenKind.number ||
+        token.kind === TokenKind.identifier) &&
+      (!previous || token.offset === previous.offset + previous.value.length)
+    );
+  });
+
+  return literal ? tokens.map(token => token.value).join('') : '';
 }
 
 function inlineRefOf(tokens: Token[]): DBMLInlineRef | null {

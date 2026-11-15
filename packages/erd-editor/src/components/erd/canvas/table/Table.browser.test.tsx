@@ -1,6 +1,7 @@
 /** @jsxHost konva */
 
-import { type DOMTemplateLiterals } from '@dineug/r-html';
+import { type DOMTemplateLiterals, type FC, useProvider } from '@dineug/r-html';
+import { renderKonva, whenDrawn } from '@dineug/r-html-konva';
 import { Group } from 'konva/lib/Group';
 import type { Node as KonvaNode } from 'konva/lib/Node';
 import type { Path } from 'konva/lib/shapes/Path';
@@ -22,6 +23,7 @@ import {
   whenPainted,
 } from '@/__test-utils__';
 import type { AppContext } from '@/components/appContext';
+import { diffContext } from '@/components/diffContext';
 import {
   TABLE_CORNER_RADIUS,
   TABLE_INSET,
@@ -36,7 +38,7 @@ import {
   TABLE_HEADER_ICON_SIZE,
   TABLE_PADDING,
 } from '@/constants/layout';
-import { Show } from '@/constants/schema';
+import { ColumnType, Show } from '@/constants/schema';
 import {
   dragendColumnAction,
   editTableAction,
@@ -53,6 +55,12 @@ import {
   type SharedFocus,
 } from '@/engine/modules/editor/state';
 import {
+  addIndexAction,
+  changeIndexUniqueAction,
+} from '@/engine/modules/index/atom.actions';
+import { addIndexColumnAction } from '@/engine/modules/index-column/atom.actions';
+import {
+  changeColumnOrderAction,
   changeMaxWidthCommentAction,
   changeShowAction,
 } from '@/engine/modules/settings/atom.actions';
@@ -72,11 +80,11 @@ import {
 } from '@/engine/modules/table-column/generator.actions';
 import { Tag } from '@/engine/tag';
 import type { Table as TableEntity } from '@/internal-types';
-import { whenDrawn } from '@/konva/batchDraw';
-import { renderKonva } from '@/konva/host';
 import { getColumnRect, getTableRect } from '@/konva/scene/metrics';
 import { renderScene } from '@/konva/scene/renderScene';
 import type { Theme } from '@/themes/tokens';
+import { Diff, type DiffMap } from '@/utils/diff/diff';
+import { dragendColumnAllAction } from '@/utils/emitter';
 
 type SceneProps = {
   hovered?: boolean;
@@ -88,6 +96,7 @@ type SceneProps = {
 
 type SetupOptions = {
   columns?: number;
+  diff?: (tableId: string) => DiffMap;
   props?: SceneProps;
   prepare?: (app: AppContext) => void;
 };
@@ -108,8 +117,17 @@ afterEach(async () => {
   await whenDrawn();
 });
 
+type DiffSceneProps = { diffMap: DiffMap; children: DOMTemplateLiterals };
+
+/** A diff pane's scene: the provider is up before the table resolves it. */
+const DiffScene: FC<DiffSceneProps> = (props, ctx) => {
+  useProvider(ctx, diffContext, props.diffMap);
+  return () => props.children;
+};
+
 async function setup({
   columns = 0,
+  diff,
   props = {},
   prepare,
 }: SetupOptions = {}): Promise<Fixture> {
@@ -133,18 +151,25 @@ async function setup({
   document.body.append(container);
   const theme = createTestTheme();
 
-  const scene = (next: SceneProps): DOMTemplateLiterals => (
-    <k-layer name="scene">
-      <Table
-        table={table}
-        hovered={next.hovered}
-        hoveredColumnId={next.hoveredColumnId}
-        ghostColumnId={next.ghostColumnId}
-        editorFocused={next.editorFocused}
-        visible={next.visible}
-      />
-    </k-layer>
-  );
+  const scene = (next: SceneProps): DOMTemplateLiterals => {
+    const layer = (
+      <k-layer name="scene">
+        <Table
+          table={table}
+          hovered={next.hovered}
+          hoveredColumnId={next.hoveredColumnId}
+          ghostColumnId={next.ghostColumnId}
+          editorFocused={next.editorFocused}
+          visible={next.visible}
+        />
+      </k-layer>
+    );
+    return diff ? (
+      <DiffScene diffMap={diff(tableId)}>{layer}</DiffScene>
+    ) : (
+      layer
+    );
+  };
 
   const rendered = renderScene({
     app,
@@ -584,6 +609,48 @@ describe('the table header', () => {
     expect(root.findOne('.tableName')).toBeTruthy();
   });
 
+  it('marks the name with a comment change the header draws no cell for', async () => {
+    const { stage, theme } = await setup({
+      prepare: app => {
+        app.store.dispatchSync(
+          changeShowAction({ show: Show.tableComment, value: false })
+        );
+      },
+      diff: id =>
+        new Map([[id, new Map([[FocusType.tableComment, Diff.modify]])]]),
+    });
+    const name = named<Group>(rootOf(stage), 'tableName').findOne<Text>(
+      '.cell-text'
+    ) as Text;
+
+    expect(name.fill()).toBe(theme.diffModifyForeground);
+  });
+
+  it('keeps a rename colour ahead of a hidden comment change', async () => {
+    const { stage, theme } = await setup({
+      prepare: app => {
+        app.store.dispatchSync(
+          changeShowAction({ show: Show.tableComment, value: false })
+        );
+      },
+      diff: id =>
+        new Map([
+          [
+            id,
+            new Map([
+              [FocusType.tableName, Diff.rename],
+              [FocusType.tableComment, Diff.modify],
+            ]),
+          ],
+        ]),
+    });
+    const name = named<Group>(rootOf(stage), 'tableName').findOne<Text>(
+      '.cell-text'
+    ) as Text;
+
+    expect(name.fill()).toBe(theme.diffRenameForeground);
+  });
+
   it('places the comment cell past the table icon, one name width and one gap along', async () => {
     const { stage, table } = await setup();
     const comment = named<Group>(rootOf(stage), 'tableComment');
@@ -797,6 +864,185 @@ describe('the column rows a table holds', () => {
   });
 });
 
+describe('the alternate key marks a table shows', () => {
+  /** Three rows, and one unique index keying the third then the first. */
+  async function keyed() {
+    const fixture = await setup({ columns: 3 });
+    const { store } = fixture.app;
+    const [first, , third] = fixture.table.columnIds;
+
+    store.dispatchSync(
+      addIndexAction({ id: 'i1', tableId: fixture.table.id }),
+      addIndexColumnAction({
+        id: 'ic1',
+        indexId: 'i1',
+        tableId: fixture.table.id,
+        columnId: third,
+      }),
+      addIndexColumnAction({
+        id: 'ic2',
+        indexId: 'i1',
+        tableId: fixture.table.id,
+        columnId: first,
+      }),
+      changeIndexUniqueAction({
+        id: 'i1',
+        tableId: fixture.table.id,
+        value: true,
+      })
+    );
+    await settle();
+
+    return fixture;
+  }
+
+  const marksOf = (stage: Stage) =>
+    rootOf(stage)
+      .find<Text>('.column-alternate-key')
+      .map(mark => mark.text());
+
+  it('draws none until the setting shows them', async () => {
+    const { stage } = await keyed();
+
+    expect(marksOf(stage)).toEqual([]);
+  });
+
+  it('marks each member with its place in the key once shown, and widens the table', async () => {
+    const { app, stage, table } = await keyed();
+    const before = getTableRect(app.store.state, table).width;
+
+    app.store.dispatchSync(
+      changeShowAction({ show: Show.columnAlternateKey, value: true })
+    );
+    await settle();
+
+    expect(marksOf(stage)).toEqual(['AK1.2', '', 'AK1.1']);
+    expect(getTableRect(app.store.state, table).width).toBeGreaterThan(before);
+    expect(named<Rect>(rootOf(stage), 'table-body').width()).toBe(
+      getTableRect(app.store.state, table).width - TABLE_BORDER
+    );
+  });
+
+  it('follows the key when it loses its unique flag', async () => {
+    const { app, stage, table } = await keyed();
+    app.store.dispatchSync(
+      changeShowAction({ show: Show.columnAlternateKey, value: true })
+    );
+    await settle();
+
+    app.store.dispatchSync(
+      changeIndexUniqueAction({ id: 'i1', tableId: table.id, value: false })
+    );
+    await settle();
+
+    expect(marksOf(stage)).toEqual([]);
+  });
+
+  /** Every row's mark, and the cells it is drawn after, in scene x. */
+  const rowsOf = (stage: Stage) =>
+    rootOf(stage)
+      .find<Group>('.column-row')
+      .map(row => ({
+        mark: named<Text>(row, 'column-alternate-key'),
+        cells: row
+          .find<Group>('.column-col')
+          .filter(cell => !cell.hasName('column-key')),
+        remove: named<Group>(row, 'column-remove'),
+      }));
+
+  it('leaves the column names in line with the header name', async () => {
+    const { app, stage } = await keyed();
+    const nameX = () =>
+      named<Group>(
+        rootOf(stage).findOne<Group>('.column-row') as Group,
+        FocusType.columnName
+      ).getAbsolutePosition().x;
+    const before = nameX();
+
+    app.store.dispatchSync(
+      changeShowAction({ show: Show.columnAlternateKey, value: true })
+    );
+    await settle();
+
+    expect(marksOf(stage)).toEqual(['AK1.2', '', 'AK1.1']);
+    expect(nameX()).toBe(before);
+    expect(nameX()).toBe(
+      named<Group>(rootOf(stage), FocusType.tableName).getAbsolutePosition().x
+    );
+  });
+
+  const reorders: Array<
+    [string, () => Array<ReturnType<typeof changeColumnOrderAction>>]
+  > = [
+    ['the order the settings start with', () => []],
+    [
+      'the comment ordered first',
+      () => [
+        changeColumnOrderAction({
+          value: ColumnType.columnComment,
+          target: ColumnType.columnName,
+        }),
+      ],
+    ],
+  ];
+
+  it.each(reorders)(
+    'stands every mark past the last cell of its row, with %s',
+    async (_, reorder) => {
+      const { app, stage } = await keyed();
+
+      app.store.dispatchSync(
+        ...reorder(),
+        changeShowAction({ show: Show.columnAlternateKey, value: true })
+      );
+      await settle();
+
+      for (const { mark, cells, remove } of rowsOf(stage)) {
+        const ends = cells.map(
+          cell => cell.x() + named<Text>(cell, 'cell-text').width()
+        );
+
+        expect(cells.length).toBeGreaterThan(1);
+        expect(mark.x()).toBe(Math.max(...ends) + INPUT_MARGIN_RIGHT);
+        expect(mark.x() + mark.width()).toBeLessThanOrEqual(remove.x());
+      }
+    }
+  );
+
+  /**
+   * A mark answers no hit, so a pointer on it lands on the row behind, as one
+   * between two cells does: the table is selected, and no cell takes the focus
+   * or opens an editor.
+   */
+  it('hands a press on a mark to its row, which focuses and edits no cell', async () => {
+    const { app, stage } = await keyed();
+    app.store.dispatchSync(
+      changeShowAction({ show: Show.columnAlternateKey, value: true })
+    );
+    await settle();
+    await whenPainted();
+
+    const [{ mark }] = rowsOf(stage);
+    const box = mark.getClientRect({ relativeTo: stage });
+    const hit = stage.getIntersection({
+      x: box.x + box.width / 2,
+      y: box.y + box.height / 2,
+    }) as KonvaNode;
+
+    expect(hit.name()).toBe('column-row-background');
+
+    fireScenePointer(hit, 'mousedown', { button: 0 });
+    releasePointer();
+    fireScenePointer(hit, 'dblclick', { detail: 2 });
+    await settle();
+
+    const { focusTable } = app.store.state.editor;
+    expect(focusTable?.focusType).toBe(FocusType.tableName);
+    expect(focusTable?.columnId ?? null).toBeNull();
+    expect(focusTable?.edit).toBe(false);
+  });
+});
+
 describe('the header buttons a table owns', () => {
   it('emits openColorPicker with the pointer position and the current color', async () => {
     const { app, stage, table } = await setup();
@@ -827,6 +1073,38 @@ describe('the header buttons a table owns', () => {
     const { app, stage, table } = await setup();
 
     fireScenePointer(named(rootOf(stage), 'table-remove'), 'click');
+    await settle();
+
+    expect(app.store.state.doc.tableIds).not.toContain(table.id);
+  });
+
+  it('answers a right click on none of its buttons, which the context menu owns', async () => {
+    const { app, stage, table } = await setup();
+    const openColorPicker = vi.fn();
+    app.emitter.on({ openColorPicker });
+    const right = { button: 2 };
+
+    fireScenePointer(
+      named(rootOf(stage), 'table-header-color'),
+      'click',
+      right
+    );
+    fireScenePointer(named(rootOf(stage), 'table-add-column'), 'click', right);
+    fireScenePointer(named(rootOf(stage), 'table-remove'), 'click', right);
+    await settle();
+
+    expect(openColorPicker).not.toHaveBeenCalled();
+    expect(table.columnIds).toHaveLength(0);
+    expect(app.store.state.doc.tableIds).toContain(table.id);
+  });
+
+  it('removes the table on a Mac control click, which is the main button', async () => {
+    const { app, stage, table } = await setup();
+
+    fireScenePointer(named(rootOf(stage), 'table-remove'), 'click', {
+      button: 0,
+      ctrlKey: true,
+    });
     await settle();
 
     expect(app.store.state.doc.tableIds).not.toContain(table.id);
@@ -924,15 +1202,25 @@ describe('the move a table pointer start owns', () => {
     expect(table.ui.x).toBe(startX);
   });
 
-  it('never starts a drag from the colour edge, an icon or a row', async () => {
+  it('never starts a drag from the colour edge, an icon or the column drag handle', async () => {
     const { app, stage, table } = await setup({ columns: 1 });
+    app.store.dispatchSync(
+      focusColumnAction({
+        tableId: table.id,
+        columnId: table.columnIds[0],
+        focusType: FocusType.columnName,
+        $mod: false,
+        shiftKey: false,
+      })
+    );
+    await settle();
     const root = rootOf(stage);
     const startX = table.ui.x;
 
     for (const name of [
       'table-header-color',
       'table-add-column',
-      'column-row',
+      'column-drag-handle',
     ]) {
       fireScenePointer(named(root, name), 'mousedown', {
         clientX: 0,
@@ -946,6 +1234,21 @@ describe('the move a table pointer start owns', () => {
     expect(table.ui.x).toBe(startX);
     // the blocked areas still select, exactly as they did in the dom scene
     expect(app.store.state.editor.selectedMap[table.id]).toBe(SelectType.table);
+  });
+
+  it('carries the table from a column row once the pointer travels, as from a header cell', async () => {
+    const { stage, table } = await setup({ columns: 1 });
+    const startX = table.ui.x;
+
+    fireScenePointer(named(rootOf(stage), 'column-row'), 'mousedown', {
+      clientX: 0,
+      clientY: 0,
+    });
+    movePointer(80, 0);
+    await settle();
+    releasePointer();
+
+    expect(table.ui.x).toBe(startX + 80);
   });
 
   it('carries the table from a header cell, and focuses the cell on the way', async () => {
@@ -1000,9 +1303,9 @@ describe('the move a table pointer start owns', () => {
   });
 });
 
-// P4-41: the column drag the browser used to run through native dnd. The row
-// reports its own gesture and the table judges the drop, because which row a
-// drop lands on is a question about the whole sibling order.
+// P4-41: the column drag the browser used to run through native dnd. The row's
+// handle reports its own gesture and the table judges the drop, because which
+// row a drop lands on is a question about the whole sibling order.
 
 type DragFixture = {
   app: AppContext;
@@ -1010,13 +1313,15 @@ type DragFixture = {
   tables: TableEntity[];
 };
 
-type DragOptions = { columns?: number; tables?: number };
+type DragOptions = { columns?: number; tables?: number; readonly?: boolean };
 
 async function setupDrag({
   columns = 3,
   tables: tableCount = 1,
+  readonly = false,
 }: DragOptions = {}): Promise<DragFixture> {
-  const app = createTestAppContext();
+  let locked = false;
+  const app = createTestAppContext({ getReadonly: () => locked });
   const { store } = app;
   const tables: TableEntity[] = [];
 
@@ -1037,6 +1342,7 @@ async function setupDrag({
   }
 
   store.dispatchSync(unselectAllAction(), focusTableEndAction());
+  locked = readonly;
 
   const container = document.createElement('div');
   document.body.append(container);
@@ -1092,15 +1398,21 @@ const focusColumn = (fixture: DragFixture, table: TableEntity, index: number) =>
     })
   );
 
-/** Presses a row and moves once, which is what a dragstart used to be. */
-async function pressRow(
+const handleNode = (fixture: DragFixture, columnId: string) =>
+  rowNode(fixture, columnId).findOne<Group>('.column-drag-handle') ?? null;
+
+/** Presses a row's drag handle and moves once, which is what a dragstart used to be. */
+async function pressHandle(
   fixture: DragFixture,
   table: TableEntity,
   index: number,
   init: MouseEventInit = {}
 ) {
+  // The handle comes with the focus, which the scene draws a commit later.
+  await settle();
   const point = rowPoint(fixture, table, index);
-  const node = rowNode(fixture, table.columnIds[index]);
+  const node = handleNode(fixture, table.columnIds[index]);
+  if (!node) throw new Error(`row ${index} carries no drag handle`);
 
   fireScenePointer(node, 'mousedown', { button: 0, ...point, ...init });
   movePointer(point.clientX + 1, point.clientY + 1);
@@ -1135,12 +1447,12 @@ async function moveUnderRows(fixture: DragFixture, table: TableEntity) {
 }
 
 describe('the column drag the table coordinates', () => {
-  it('starts a column drag from a focused column row', async () => {
+  it('starts a column drag from the handle of the focused row', async () => {
     const fixture = await setupDrag();
     const [table] = fixture.tables;
     focusColumn(fixture, table, 1);
 
-    await pressRow(fixture, table, 1);
+    await pressHandle(fixture, table, 1);
 
     const { editor } = fixture.app.store.state;
     expect(editor.draggableColumn).toEqual({
@@ -1150,7 +1462,56 @@ describe('the column drag the table coordinates', () => {
     expect(editor.draggingColumnMap[table.columnIds[1]]).toBe(true);
   });
 
-  it('drags every selected column when the modifier key is held', async () => {
+  it('gives the handle to the focused row alone, whichever of its cells holds the focus', async () => {
+    const fixture = await setupDrag();
+    const [table] = fixture.tables;
+    fixture.app.store.dispatchSync(
+      focusColumnAction({
+        tableId: table.id,
+        columnId: table.columnIds[1],
+        focusType: FocusType.columnDataType,
+        $mod: false,
+        shiftKey: false,
+      })
+    );
+    await settle();
+
+    expect(table.columnIds.map(id => handleNode(fixture, id) !== null)).toEqual(
+      [false, true, false]
+    );
+  });
+
+  it.each([
+    ['nothing is focused', () => {}],
+    [
+      'only the table header is focused',
+      (fixture: DragFixture, table: TableEntity) =>
+        fixture.app.store.dispatchSync(
+          focusTableAction({
+            tableId: table.id,
+            focusType: FocusType.tableName,
+          })
+        ),
+    ],
+  ])('gives no row a handle while %s', async (_, focus) => {
+    const fixture = await setupDrag();
+    const [table] = fixture.tables;
+    focus(fixture, table);
+    await settle();
+
+    expect(table.columnIds.some(id => handleNode(fixture, id))).toBe(false);
+  });
+
+  it('gives no row a handle in a readonly store, which reorders nothing', async () => {
+    const fixture = await setupDrag({ readonly: true });
+    const [table] = fixture.tables;
+    focusColumn(fixture, table, 1);
+    await settle();
+
+    expect(handleNode(fixture, table.columnIds[1])).toBeNull();
+  });
+
+  it('lifts every selected column from the handle of the focused one, as a press lifts selected tables', async () => {
     const fixture = await setupDrag();
     const [table] = fixture.tables;
     const { store } = fixture.app;
@@ -1159,48 +1520,104 @@ describe('the column drag the table coordinates', () => {
     store.dispatchSync(
       focusColumnAction({
         tableId: table.id,
-        columnId: table.columnIds[1],
+        columnId: table.columnIds[2],
         focusType: FocusType.columnName,
         $mod: true,
         shiftKey: false,
       })
     );
+    await settle();
 
-    await pressRow(fixture, table, 1, { metaKey: true, ctrlKey: true });
+    await pressHandle(fixture, table, 2);
 
     expect(store.state.editor.draggableColumn?.columnIds).toEqual([
       table.columnIds[0],
-      table.columnIds[1],
+      table.columnIds[2],
     ]);
   });
 
-  it('ignores a dragstart while nothing is focused', async () => {
+  it('carries the table and no column from a press on a row, as from the header', async () => {
     const fixture = await setupDrag();
     const [table] = fixture.tables;
+    const before = [...table.columnIds];
+    const startX = table.ui.x;
+    const startY = table.ui.y;
+    focusColumn(fixture, table, 1);
+    await settle();
 
-    await pressRow(fixture, table, 1);
+    const point = rowPoint(fixture, table, 1);
+    fireScenePointer(rowNode(fixture, table.columnIds[1]), 'mousedown', {
+      button: 0,
+      ...point,
+    });
+    movePointer(point.clientX + 40, point.clientY + 30);
+    await settle();
+    releasePointer();
+    await settle();
 
     expect(fixture.app.store.state.editor.draggableColumn).toBeNull();
+    expect(columnIdsOf(fixture, table.id)).toEqual(before);
+    expect(table.ui.x).toBe(startX + 40);
+    expect(table.ui.y).toBe(startY + 30);
   });
 
-  it('ignores a dragstart while only the table header is focused', async () => {
+  it('takes the hover off the row and the table when the focus moves the handle from under the pointer', async () => {
     const fixture = await setupDrag();
     const [table] = fixture.tables;
-    fixture.app.store.dispatchSync(
-      focusTableAction({ tableId: table.id, focusType: FocusType.tableName })
+    const row = () => rowNode(fixture, table.columnIds[1]);
+    focusColumn(fixture, table, 1);
+    await settle();
+
+    fireScenePointer(
+      handleNode(fixture, table.columnIds[1]) as Group,
+      'mouseenter'
     );
+    await settle();
+    expect(named<Rect>(row(), 'column-row-background').fill()).not.toBe(
+      TRANSPARENT
+    );
+    expect(strokesOf(rootOf(fixture.stage), 'table-add-column')).not.toContain(
+      TRANSPARENT
+    );
+    expect(fixture.stage.container().style.cursor).toBe('grab');
 
-    await pressRow(fixture, table, 1);
+    // An arrow key moves the focus while the pointer rests where the handle was.
+    focusColumn(fixture, table, 2);
+    await settle();
 
-    expect(fixture.app.store.state.editor.draggableColumn).toBeNull();
+    expect(handleNode(fixture, table.columnIds[1])).toBeNull();
+    expect(named<Rect>(row(), 'column-row-background').fill()).toBe(
+      TRANSPARENT
+    );
+    expect(strokesOf(rootOf(fixture.stage), 'table-add-column')).toEqual([
+      TRANSPARENT,
+      TRANSPARENT,
+    ]);
+    expect(fixture.stage.container().style.cursor).toBe('');
+  });
+
+  it('holds the closed hand over the canvas for the whole drag', async () => {
+    const fixture = await setupDrag();
+    const [table] = fixture.tables;
+    const container = fixture.stage.container();
+    focusColumn(fixture, table, 1);
+    await settle();
+
+    await pressHandle(fixture, table, 1);
+    expect(container.style.cursor).toBe('grabbing');
+
+    releasePointer();
+    await settle();
+    expect(container.style.cursor).not.toBe('grabbing');
   });
 
   it('ignores a press that is not the primary button', async () => {
     const fixture = await setupDrag();
     const [table] = fixture.tables;
     focusColumn(fixture, table, 1);
+    await settle();
 
-    await pressRow(fixture, table, 1, { button: 2 });
+    await pressHandle(fixture, table, 1, { button: 2 });
 
     expect(fixture.app.store.state.editor.draggableColumn).toBeNull();
   });
@@ -1211,7 +1628,7 @@ describe('the column drag the table coordinates', () => {
     const [first, second, third] = table.columnIds;
     focusColumn(fixture, table, 2);
 
-    await pressRow(fixture, table, 2);
+    await pressHandle(fixture, table, 2);
     await moveOver(fixture, table, 0);
 
     expect(columnIdsOf(fixture, table.id)).toEqual([third, first, second]);
@@ -1223,7 +1640,7 @@ describe('the column drag the table coordinates', () => {
     const before = [...table.columnIds];
     focusColumn(fixture, table, 1);
 
-    await pressRow(fixture, table, 1);
+    await pressHandle(fixture, table, 1);
     await moveOver(fixture, table, 1);
 
     expect(columnIdsOf(fixture, table.id)).toEqual(before);
@@ -1235,7 +1652,7 @@ describe('the column drag the table coordinates', () => {
     const before = [...table.columnIds];
     focusColumn(fixture, table, 2);
 
-    await pressRow(fixture, table, 2);
+    await pressHandle(fixture, table, 2);
     fixture.app.store.dispatchSync(dragendColumnAction());
     await moveOver(fixture, table, 0);
 
@@ -1260,7 +1677,7 @@ describe('the column drag the table coordinates', () => {
     const moved = source.columnIds[0];
     focusColumn(fixture, source, 0);
 
-    await pressRow(fixture, source, 0);
+    await pressHandle(fixture, source, 0);
     await moveOver(fixture, target, 1);
 
     expect(columnIdsOf(fixture, source.id)).not.toContain(moved);
@@ -1278,7 +1695,7 @@ describe('the column drag the table coordinates', () => {
     const movedName = columns[source.columnIds[0]].name;
     focusColumn(fixture, source, 0);
 
-    await pressRow(fixture, source, 0);
+    await pressHandle(fixture, source, 0);
     await moveUnderRows(fixture, target);
 
     const ids = columnIdsOf(fixture, target.id);
@@ -1298,7 +1715,7 @@ describe('the column drag the table coordinates', () => {
     await settle();
     focusColumn(fixture, source, 1);
 
-    await pressRow(fixture, source, 1);
+    await pressHandle(fixture, source, 1);
     await moveUnderRows(fixture, target);
 
     expect(columnIdsOf(fixture, source.id)).toHaveLength(1);
@@ -1311,7 +1728,7 @@ describe('the column drag the table coordinates', () => {
     const [first, second, third] = table.columnIds;
     focusColumn(fixture, table, 0);
 
-    await pressRow(fixture, table, 0);
+    await pressHandle(fixture, table, 0);
     await moveUnderRows(fixture, table);
 
     expect(columnIdsOf(fixture, table.id)).toEqual([second, third, first]);
@@ -1323,7 +1740,7 @@ describe('the column drag the table coordinates', () => {
     const moved = source.columnIds[0];
     focusColumn(fixture, source, 0);
 
-    await pressRow(fixture, source, 0);
+    await pressHandle(fixture, source, 0);
     await moveOver(fixture, target, 1);
 
     const ghost = fixture.stage.findOne<Group>(`#column-${moved}`) as Group;
@@ -1338,7 +1755,7 @@ describe('the column drag the table coordinates', () => {
     const off = fixture.app.emitter.on({ dragendColumnAll: notified });
     focusColumn(fixture, table, 1);
 
-    await pressRow(fixture, table, 1);
+    await pressHandle(fixture, table, 1);
     releasePointer();
     await settle();
 
@@ -1355,11 +1772,38 @@ describe('the column drag the table coordinates', () => {
     const moved = source.columnIds[0];
     focusColumn(fixture, source, 0);
 
-    await pressRow(fixture, source, 0);
+    await pressHandle(fixture, source, 0);
     await moveOver(fixture, target, 1);
     releasePointer();
     await settle();
 
     expect(fixture.stage.findOne(`#column-${moved}`)).toBeUndefined();
+  });
+
+  it('lets go of the drag it began once every table is told the drag ended, so its release ends nothing again', async () => {
+    const fixture = await setupDrag({ tables: 2, columns: 2 });
+    const [source, target] = fixture.tables;
+    const moved = source.columnIds[0];
+    focusColumn(fixture, source, 0);
+
+    await pressHandle(fixture, source, 0);
+    await moveOver(fixture, target, 1);
+    expect(fixture.stage.findOne(`#column-${moved}`)).toBeTruthy();
+
+    fixture.app.emitter.emit(dragendColumnAllAction());
+    await settle();
+    expect(fixture.stage.find(`#column-${moved}`)).toHaveLength(0);
+    expect(fixture.stage.container().style.cursor).not.toBe('grabbing');
+
+    const ended = vi.fn();
+    const off = fixture.app.emitter.on({ dragendColumnAll: ended });
+    const order = columnIdsOf(fixture, target.id).slice();
+    await moveOver(fixture, target, 0);
+    releasePointer();
+    await settle();
+
+    expect(columnIdsOf(fixture, target.id)).toEqual(order);
+    expect(ended).not.toHaveBeenCalled();
+    off();
   });
 });

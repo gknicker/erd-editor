@@ -20,6 +20,19 @@ export type Rect = {
   height: number;
 };
 
+/** The smallest box holding both. */
+export function unionRect(a: Rect, b: Rect): Rect {
+  const x = Math.min(a.x, b.x);
+  const y = Math.min(a.y, b.y);
+
+  return {
+    x,
+    y,
+    width: Math.max(a.x + a.width, b.x + b.width) - x,
+    height: Math.max(a.y + a.height, b.y + b.height) - y,
+  };
+}
+
 /** The border and padding a table's own size is built out of, on one side. */
 const TABLE_INSET = TABLE_BORDER + TABLE_PADDING;
 
@@ -78,6 +91,20 @@ export function getColumnRect(
     width: width - TABLE_INSET * 2,
     height: rowHeight,
   };
+}
+
+/**
+ * The band across the top of a table, from its top edge down to where the
+ * first row starts, which holds the name and the comment beside it.
+ */
+export function getTableHeaderRect(
+  state: RootState,
+  table: Table,
+  source: GeometrySource = 'document'
+): Rect {
+  const { x, y, width } = getTableRect(state, table, source);
+
+  return { x, y, width, height: TABLE_INSET + tableHeaderHeight(source) };
 }
 
 /** The box a memo occupies, sash and header included. */

@@ -1,35 +1,55 @@
 import { query } from '@dineug/erd-editor-schema';
-import { nanoid } from 'nanoid';
+import { uuid25 } from '@dineug/uuid';
 
-import { ColumnOption } from '@/constants/schema';
+import { ColumnOption, Database } from '@/constants/schema';
 import { RootState } from '@/engine/state';
 import { bHas } from '@/utils/bit';
-
 import {
   autoName,
+  autoNameIgnoreCase,
+  getBracket,
+  primaryKeyColumns,
+  splitTableName,
+  tableNamePart,
+  unquoteNamePart,
+} from '@/utils/tableName';
+
+import { SchemaSQLHeader } from './options';
+import {
+  commentToWrite,
+  CreateSchemaOptions,
+  createWrittenObjects,
   FormatColumnOptions,
   FormatCommentOptions,
   FormatIndexOptions,
   formatNames,
+  formatReferentialActions,
   FormatRelationOptions,
   formatSize,
   formatSpace,
   FormatTableOptions,
-  getBracket,
-  KeyColumn,
   Name,
-  orderByNameASC,
   primaryKey,
-  primaryKeyColumns,
+  referentialActionSupport,
+  selectIndexColumns,
+  toForeignKeyPairs,
   toOrderName,
+  toSchemaEntities,
+  toStringLiteral,
   unique,
   uniqueColumns,
+  WrittenObjects,
 } from './utils';
 
-export function createSchema(state: RootState): string {
+const ACTION_SUPPORT = referentialActionSupport(Database.Oracle);
+
+export function createSchema(
+  state: RootState,
+  tableIds?: readonly string[],
+  { written, logicalNameAsComment }: CreateSchemaOptions = {}
+): string {
   const {
     settings: { bracketType },
-    doc: { tableIds, relationshipIds, indexIds },
     collections,
   } = state;
   const fkNames: Name[] = [];
@@ -37,81 +57,75 @@ export function createSchema(state: RootState): string {
   const trgNames: Name[] = [];
   const indexNames: Name[] = [];
   const stringBuffer: string[] = [''];
-  const bracket = getBracket(bracketType);
-  const tables = query(collections)
-    .collection('tableEntities')
-    .selectByIds(tableIds)
-    .sort(orderByNameASC);
-  const relationships = query(collections)
-    .collection('relationshipEntities')
-    .selectByIds(relationshipIds);
-  const indexes = query(collections)
-    .collection('indexEntities')
-    .selectByIds(indexIds);
+  const { tables, relationships, indexes } = toSchemaEntities(state, tableIds);
 
   tables.forEach(table => {
-    formatTable(state, { table, buffer: stringBuffer });
+    written?.tables.push(table);
+    formatTable(state, { table, buffer: stringBuffer, written });
     stringBuffer.push('');
+
+    formatUnique(state, { table, buffer: stringBuffer, written });
 
     const columns = query(collections)
       .collection('tableColumnEntities')
       .selectByIds(table.columnIds);
-
-    // unique
-    if (unique(columns)) {
-      const uqColumns = uniqueColumns(columns);
-      uqColumns.forEach(column => {
-        stringBuffer.push(`ALTER TABLE ${bracket}${table.name}${bracket}`);
-        stringBuffer.push(
-          `  ADD CONSTRAINT ${bracket}UQ_${table.name}_${column.name}${bracket} UNIQUE (${bracket}${column.name}${bracket});`
-        );
-        stringBuffer.push('');
-      });
-    }
+    // The sequence and its trigger go beside the table, as an index does.
+    const [schema] = splitTableName(table.name, bracketType);
+    const tableName = tableNamePart(table.name, bracketType);
+    const owner = schema === '' ? '' : `${schema}.`;
 
     // Sequence
     columns.forEach(column => {
       if (bHas(column.options, ColumnOption.autoIncrement)) {
-        let aiName = `SEQ_${table.name}`;
-        aiName = autoName(aiNames, '', aiName);
+        const aiName = autoName(aiNames, '', `SEQ_${tableName}`);
         aiNames.push({
-          id: nanoid(),
+          id: uuid25(),
           name: aiName,
         });
+        const sequence = `${owner}${aiName}`;
+        written?.sequences.push(sequence);
+        written?.identifiers.push(aiName);
 
-        stringBuffer.push(`CREATE SEQUENCE ${aiName}`);
+        stringBuffer.push(`CREATE SEQUENCE ${sequence}`);
         stringBuffer.push(`START WITH 1`);
         stringBuffer.push(`INCREMENT BY 1;`);
         stringBuffer.push('');
 
-        let trgName = `SEQ_TRG_${table.name}`;
-        trgName = autoName(aiNames, '', trgName);
+        const trgName = autoName(aiNames, '', `SEQ_TRG_${tableName}`);
         trgNames.push({
-          id: nanoid(),
+          id: uuid25(),
           name: trgName,
         });
-        stringBuffer.push(`CREATE OR REPLACE TRIGGER ${trgName}`);
+        written?.identifiers.push(trgName);
+        stringBuffer.push(`CREATE OR REPLACE TRIGGER ${owner}${trgName}`);
         stringBuffer.push(`BEFORE INSERT ON ${table.name}`);
         stringBuffer.push(`REFERENCING NEW AS NEW FOR EACH ROW`);
         stringBuffer.push(`BEGIN`);
-        stringBuffer.push(`  SELECT ${aiName}.NEXTVAL`);
-        stringBuffer.push(`  INTO: NEW.${column.name}`);
+        stringBuffer.push(`  SELECT ${sequence}.NEXTVAL`);
+        stringBuffer.push(`  INTO :NEW.${column.name}`);
         stringBuffer.push(`  FROM DUAL;`);
         stringBuffer.push(`END;`);
+        // SQL*Plus and SQLcl run a PL/SQL block at the slash line after it.
+        stringBuffer.push('/');
         stringBuffer.push('');
       }
     });
 
-    formatComment(state, { table, buffer: stringBuffer });
+    formatComment(state, {
+      table,
+      buffer: stringBuffer,
+      logicalNameAsComment,
+    });
   });
 
   relationships.forEach(relationship => {
-    formatRelation(state, {
+    const wrote = formatRelation(state, {
       relationship,
       buffer: stringBuffer,
       fkNames,
+      written,
     });
-    stringBuffer.push('');
+    if (wrote) stringBuffer.push('');
   });
 
   indexes.forEach(index => {
@@ -119,6 +133,7 @@ export function createSchema(state: RootState): string {
       index,
       buffer: stringBuffer,
       indexNames,
+      written,
     });
     stringBuffer.push('');
   });
@@ -128,7 +143,7 @@ export function createSchema(state: RootState): string {
 
 export function formatTable(
   state: RootState,
-  { buffer, table }: FormatTableOptions
+  { buffer, table, written }: FormatTableOptions
 ) {
   const {
     settings: { bracketType },
@@ -139,6 +154,12 @@ export function formatTable(
     .collection('tableColumnEntities')
     .selectByIds(table.columnIds);
 
+  if (written) {
+    const [schema, tableName] = splitTableName(table.name, bracketType);
+    if (schema !== '') written.identifiers.push(unquoteNamePart(schema));
+    written.identifiers.push(unquoteNamePart(tableName));
+    written.identifiers.push(...columns.map(column => column.name));
+  }
   buffer.push(`CREATE TABLE ${bracket}${table.name}${bracket}`);
   buffer.push(`(`);
   const pk = primaryKey(columns);
@@ -164,13 +185,39 @@ export function formatTable(
 
   if (pk) {
     const pkColumns = primaryKeyColumns(columns);
+    const pkName = `PK_${tableNamePart(table.name, bracketType)}`;
+    written?.identifiers.push(pkName);
     buffer.push(
-      `  CONSTRAINT ${bracket}PK_${
-        table.name
-      }${bracket} PRIMARY KEY (${formatNames(pkColumns, bracket)})`
+      `  CONSTRAINT ${bracket}${pkName}${bracket} PRIMARY KEY (${formatNames(pkColumns, bracket)})`
     );
   }
   buffer.push(`);`);
+}
+
+/**
+ * One named constraint per column the diagram marks unique, after the table.
+ * The whole export and the per-table Schema SQL tab both write it.
+ */
+export function formatUnique(
+  { settings: { bracketType }, collections }: RootState,
+  { buffer, table, written }: FormatTableOptions
+) {
+  const bracket = getBracket(bracketType);
+  const columns = query(collections)
+    .collection('tableColumnEntities')
+    .selectByIds(table.columnIds);
+
+  if (!unique(columns)) return;
+
+  uniqueColumns(columns).forEach(column => {
+    const uqName = `UQ_${tableNamePart(table.name, bracketType)}_${column.name}`;
+    written?.identifiers.push(uqName);
+    buffer.push(`ALTER TABLE ${bracket}${table.name}${bracket}`);
+    buffer.push(
+      `  ADD CONSTRAINT ${bracket}${uqName}${bracket} UNIQUE (${bracket}${column.name}${bracket});`
+    );
+    buffer.push('');
+  });
 }
 
 function formatColumn(
@@ -197,15 +244,21 @@ function formatColumn(
   buffer.push(stringBuffer.join(' ') + `${isComma ? ',' : ''}`);
 }
 
+// SQL*Plus ends a statement at a blank line and skips the rest of it, exiting 0,
+// so each run of blank lines in a comment is written as one line break.
+const toCommentLiteral = (comment: string) =>
+  toStringLiteral(comment.replace(/(\r?\n)(?:[ \t\r]*\n)+/g, '$1'));
+
 function formatComment(
   { settings: { bracketType }, collections }: RootState,
-  { table, buffer }: FormatCommentOptions
+  { table, buffer, logicalNameAsComment }: FormatCommentOptions
 ) {
   const bracket = getBracket(bracketType);
+  const tableComment = commentToWrite(table, logicalNameAsComment);
 
-  if (table.comment.trim() !== '') {
+  if (tableComment !== '') {
     buffer.push(
-      `COMMENT ON TABLE ${bracket}${table.name}${bracket} IS '${table.comment}';`
+      `COMMENT ON TABLE ${bracket}${table.name}${bracket} IS ${toCommentLiteral(tableComment)};`
     );
     buffer.push('');
   }
@@ -213,9 +266,10 @@ function formatComment(
     .collection('tableColumnEntities')
     .selectByIds(table.columnIds)
     .forEach(column => {
-      if (column.comment.trim() !== '') {
+      const comment = commentToWrite(column, logicalNameAsComment);
+      if (comment !== '') {
         buffer.push(
-          `COMMENT ON COLUMN ${bracket}${table.name}${bracket}.${bracket}${column.name}${bracket} IS '${column.comment}';`
+          `COMMENT ON COLUMN ${bracket}${table.name}${bracket}.${bracket}${column.name}${bracket} IS ${toCommentLiteral(comment)};`
         );
         buffer.push('');
       }
@@ -223,59 +277,48 @@ function formatComment(
 }
 
 function formatRelation(
-  { settings: { bracketType }, collections }: RootState,
-  { buffer, relationship, fkNames }: FormatRelationOptions
-) {
+  state: RootState,
+  { buffer, relationship, fkNames, written }: FormatRelationOptions
+): boolean {
+  const {
+    settings: { bracketType },
+  } = state;
+  const columns = toForeignKeyPairs(state, relationship);
+  if (!columns) return false;
+
+  const { startTable, endTable } = columns;
   const bracket = getBracket(bracketType);
-  const tableCollection = query(collections).collection('tableEntities');
-  const columnCollection = query(collections).collection('tableColumnEntities');
-  const startTable = tableCollection.selectById(relationship.start.tableId);
-  const endTable = tableCollection.selectById(relationship.end.tableId);
+  buffer.push(`ALTER TABLE ${bracket}${endTable.name}${bracket}`);
 
-  if (startTable && endTable) {
-    buffer.push(`ALTER TABLE ${bracket}${endTable.name}${bracket}`);
+  // FK
+  const startName = tableNamePart(startTable.name, bracketType);
+  const endName = tableNamePart(endTable.name, bracketType);
+  const fkName = autoNameIgnoreCase(fkNames, `FK_${startName}_TO_${endName}`);
+  fkNames.push({
+    id: uuid25(),
+    name: fkName,
+  });
+  written?.identifiers.push(fkName);
 
-    // FK
-    let fkName = `FK_${startTable.name}_TO_${endTable.name}`;
-    fkName = autoName(fkNames, '', fkName);
-    fkNames.push({
-      id: nanoid(),
-      name: fkName,
-    });
+  buffer.push(`  ADD CONSTRAINT ${bracket}${fkName}${bracket}`);
 
-    buffer.push(`  ADD CONSTRAINT ${bracket}${fkName}${bracket}`);
-
-    // key
-    const columns: KeyColumn = {
-      start: [],
-      end: [],
-    };
-    relationship.end.columnIds.forEach(columnId => {
-      const column = columnCollection.selectById(columnId);
-      if (column) {
-        columns.end.push(column);
-      }
-    });
-    relationship.start.columnIds.forEach(columnId => {
-      const column = columnCollection.selectById(columnId);
-      if (column) {
-        columns.start.push(column);
-      }
-    });
-
-    buffer.push(`    FOREIGN KEY (${formatNames(columns.end, bracket)})`);
-    buffer.push(
-      `    REFERENCES ${bracket}${startTable.name}${bracket} (${formatNames(
-        columns.start,
-        bracket
-      )});`
-    );
-  }
+  buffer.push(`    FOREIGN KEY (${formatNames(columns.end, bracket)})`);
+  buffer.push(
+    `    REFERENCES ${bracket}${startTable.name}${bracket} (${formatNames(
+      columns.start,
+      bracket
+    )})`,
+    ...formatReferentialActions(relationship, ACTION_SUPPORT).map(
+      clause => `    ${clause}`
+    )
+  );
+  buffer[buffer.length - 1] += ';';
+  return true;
 }
 
 export function formatIndex(
   { settings: { bracketType }, collections }: RootState,
-  { buffer, index, indexNames }: FormatIndexOptions
+  { buffer, index, indexNames, written }: FormatIndexOptions
 ) {
   const bracket = getBracket(bracketType);
   const table = query(collections)
@@ -283,42 +326,107 @@ export function formatIndex(
     .selectById(index.tableId);
   if (!table) return;
 
-  const columnNames = query(collections)
-    .collection('indexColumnEntities')
-    .selectByIds(index.indexColumnIds)
-    .map(indexColumn => {
-      const column = query(collections)
-        .collection('tableColumnEntities')
-        .selectById(indexColumn.columnId);
-      if (column) {
-        return {
-          name: `${bracket}${column.name}${bracket} ${toOrderName(
-            indexColumn.orderType
-          )}`,
-        };
-      }
-      return null;
+  const columnNames = selectIndexColumns(collections, table, index).map(
+    ({ indexColumn, column }) => ({
+      name: `${bracket}${column.name}${bracket} ${toOrderName(
+        indexColumn.orderType
+      )}`,
     })
-    .filter(columnName => columnName !== null) as { name: string }[];
+  );
 
   if (columnNames.length !== 0) {
+    const [schema] = splitTableName(table.name, bracketType);
     let indexName = index.name;
     if (index.name.trim() === '') {
-      indexName = `IDX_${table.name}`;
-      indexName = autoName(indexNames, '', indexName);
+      const tableName = tableNamePart(table.name, bracketType);
+      indexName = autoNameIgnoreCase(indexNames, `IDX_${tableName}`);
       indexNames.push({
-        id: nanoid(),
+        id: uuid25(),
         name: indexName,
       });
     }
+    // Unqualified, the index lands in the current user's schema, where one name
+    // given in two schemas clashes; a name the user already qualified keeps the
+    // schema it names.
+    const indexSchema =
+      schema === '' || indexName.includes('.') ? '' : `${schema}.`;
+    const indexRef = `${indexSchema}${bracket}${indexName}${bracket}`;
+    written?.identifiers.push(indexName.slice(indexName.lastIndexOf('.') + 1));
 
     if (index.unique) {
-      buffer.push(`CREATE UNIQUE INDEX ${bracket}${indexName}${bracket}`);
+      buffer.push(`CREATE UNIQUE INDEX ${indexRef}`);
     } else {
-      buffer.push(`CREATE INDEX ${bracket}${indexName}${bracket}`);
+      buffer.push(`CREATE INDEX ${indexRef}`);
     }
     buffer.push(
       `  ON ${bracket}${table.name}${bracket} (${formatNames(columnNames)});`
     );
   }
+}
+
+/**
+ * The names an Oracle script of the document, or of the tables given, writes
+ * past the 30 bytes Oracle 12.1 and older allow.
+ */
+export function oracleLongNames(
+  state: RootState,
+  tableIds?: readonly string[]
+): string[] {
+  const written = createWrittenObjects();
+  createSchema(state, tableIds, { written });
+  const encoder = new TextEncoder();
+
+  return [...new Set(written.identifiers)].filter(
+    name => encoder.encode(name).length > 30
+  );
+}
+
+/** ALTER SESSION SET CURRENT_SCHEMA for use; Oracle creates no schema apart from a user. */
+export function formatHeader(
+  { settings: { bracketType } }: RootState,
+  header: Exclude<SchemaSQLHeader, 'none'>,
+  name: string
+): string {
+  if (header !== SchemaSQLHeader.use) return '';
+
+  const bracket = getBracket(bracketType);
+  return `ALTER SESSION SET CURRENT_SCHEMA = ${bracket}${name}${bracket};`;
+}
+
+// A PL/SQL block that runs one statement and lets the error pass that says
+// what it drops is not there; SQL*Plus runs it at the slash line.
+function ignoringError(statement: string, code: number): string {
+  return [
+    'BEGIN',
+    `  EXECUTE IMMEDIATE ${toStringLiteral(statement)};`,
+    'EXCEPTION WHEN OTHERS THEN',
+    `  IF SQLCODE != ${code} THEN RAISE; END IF;`,
+    'END;',
+    '/',
+  ].join('\n');
+}
+
+/**
+ * Each table written dropped with its constraints, then each sequence, every one
+ * in a block that passes over ORA-00942 or ORA-02289, since Oracle has no DROP
+ * IF EXISTS before 23ai.
+ */
+export function formatDropBlock(
+  { settings: { bracketType } }: RootState,
+  { tables, sequences }: WrittenObjects
+): string {
+  if (tables.length === 0) return '';
+
+  const bracket = getBracket(bracketType);
+  return [
+    ...tables.map(({ name }) =>
+      ignoringError(
+        `DROP TABLE ${bracket}${name}${bracket} CASCADE CONSTRAINTS`,
+        -942
+      )
+    ),
+    ...sequences.map(sequence =>
+      ignoringError(`DROP SEQUENCE ${sequence}`, -2289)
+    ),
+  ].join('\n\n');
 }

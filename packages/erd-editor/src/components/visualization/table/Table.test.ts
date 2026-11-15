@@ -3,25 +3,39 @@ import { afterEach, beforeEach, describe, expect, it } from 'vite-plus/test';
 
 import {
   createTestAppContext,
+  createTestI18n,
   flush,
   mountAndFlush,
   Mounted,
+  provideI18n,
+  pseudoMessages,
 } from '@/__test-utils__/index';
 import { AppContext } from '@/components/appContext';
 import * as styles from '@/components/table-view/Table.styles';
 import Table from '@/components/visualization/table/Table';
-import { Show } from '@/constants/schema';
-import { changeShowAction } from '@/engine/modules/settings/atom.actions';
+import { NameViewMode, Show } from '@/constants/schema';
+import {
+  addIndexAction,
+  changeIndexUniqueAction,
+} from '@/engine/modules/index/atom.actions';
+import { addIndexColumnAction } from '@/engine/modules/index-column/atom.actions';
+import {
+  changeShowAction,
+  toNameViewModeAction,
+} from '@/engine/modules/settings/atom.actions';
 import {
   addTableAction,
   changeTableColorAction,
   changeTableCommentAction,
+  changeTableLogicalNameAction,
   changeTableNameAction,
 } from '@/engine/modules/table/atom.actions';
 import {
   addColumnAction,
+  changeColumnLogicalNameAction,
   changeColumnNameAction,
 } from '@/engine/modules/table-column/atom.actions';
+import { createI18n } from '@/i18n/translate';
 import type { Table as TableEntity } from '@/internal-types';
 import { calcTableHeight, calcTableWidths } from '@/utils/calcTable';
 
@@ -73,6 +87,54 @@ afterEach(() => {
 });
 
 describe('visualization Table', () => {
+  describe('alternate key marks', () => {
+    const marksOf = (m: Mounted) =>
+      Array.from(m.container.querySelectorAll('[data-alternate-key]')).map(
+        mark => mark.textContent
+      );
+
+    beforeEach(() => {
+      addColumn('c1', 'code');
+      addColumn('c2', 'name');
+      app.store.dispatchSync(
+        addIndexAction({ id: 'i1', tableId: TABLE_ID }),
+        addIndexColumnAction({
+          id: 'ic1',
+          indexId: 'i1',
+          tableId: TABLE_ID,
+          columnId: 'c2',
+        }),
+        addIndexColumnAction({
+          id: 'ic2',
+          indexId: 'i1',
+          tableId: TABLE_ID,
+          columnId: 'c1',
+        }),
+        changeIndexUniqueAction({ id: 'i1', tableId: TABLE_ID, value: true })
+      );
+    });
+
+    it('draws none until the setting shows them', async () => {
+      mounted = await mountAndFlush(tableTemplate(table), app);
+
+      expect(marksOf(mounted)).toEqual([]);
+    });
+
+    it('marks the key columns once shown, as the ERD scene does', async () => {
+      app.store.dispatchSync(
+        changeShowAction({ show: Show.columnAlternateKey, value: true })
+      );
+      mounted = await mountAndFlush(tableTemplate(table), app);
+
+      expect(marksOf(mounted)).toEqual(['AK1.2', 'AK1.1']);
+      expect(
+        Array.from(mounted.container.querySelectorAll('.column-row')).map(row =>
+          row.lastElementChild?.hasAttribute('data-alternate-key')
+        )
+      ).toEqual([true, true]);
+    });
+  });
+
   describe('root element', () => {
     it('renders a fixed positioned preview at the given coordinates', async () => {
       mounted = await mountAndFlush(tableTemplate(table), app);
@@ -158,6 +220,30 @@ describe('visualization Table', () => {
       expect(inputs[1].style.width).toBe(`${table.ui.widthComment}px`);
     });
 
+    it('draws the placeholders of an empty header in the language the element shows', async () => {
+      const i18n = createTestI18n('en');
+      const provider = provideI18n(document.body, i18n);
+
+      try {
+        app.store.dispatchSync(
+          changeTableNameAction({ id: TABLE_ID, value: '' })
+        );
+        mounted = await mountAndFlush(tableTemplate(table), app);
+        expect(headerInputs(mounted).map(el => el.textContent?.trim())).toEqual(
+          ['table', 'comment']
+        );
+
+        Object.assign(i18n, createI18n('ko-KR', pseudoMessages('ko')));
+        await flush();
+
+        expect(headerInputs(mounted).map(el => el.textContent?.trim())).toEqual(
+          ['ko:table', 'ko:comment']
+        );
+      } finally {
+        provider.destroy();
+      }
+    });
+
     it('drops the comment input when table comments are hidden', async () => {
       mounted = await mountAndFlush(tableTemplate(table), app);
       expect(headerInputs(mounted)).toHaveLength(2);
@@ -236,6 +322,77 @@ describe('visualization Table', () => {
       await flush();
 
       expect(rowsOf(mounted)).toHaveLength(2);
+    });
+  });
+
+  describe('name views', () => {
+    const switchTo = (mode: (typeof NameViewMode)[keyof typeof NameViewMode]) =>
+      app.store.dispatchSync(
+        toNameViewModeAction(app.store.state, mode, false)
+      );
+    const texts = (elements: HTMLElement[]) =>
+      elements.map(element => element.textContent?.trim());
+
+    beforeEach(() => {
+      addColumn('c1', 'member_id');
+      app.store.dispatchSync(
+        changeShowAction({ show: Show.tableComment, value: false }),
+        changeTableLogicalNameAction({ id: TABLE_ID, value: 'Site Users' }),
+        changeColumnLogicalNameAction({
+          id: 'c1',
+          tableId: TABLE_ID,
+          value: 'Member ID',
+        })
+      );
+    });
+
+    it('puts the logical name in the header in the logical view, at its own width', async () => {
+      switchTo(NameViewMode.logical);
+      mounted = await mountAndFlush(tableTemplate(table), app);
+      const [name] = headerInputs(mounted);
+
+      expect(texts(headerInputs(mounted))).toEqual(['Site Users']);
+      expect(name.style.width).toBe(`${table.ui.widthLogicalName}px`);
+      expect(table.ui.widthLogicalName).not.toBe(table.ui.widthName);
+    });
+
+    it('dims the name standing in for a blank logical name, at the name width', async () => {
+      app.store.dispatchSync(
+        changeTableLogicalNameAction({ id: TABLE_ID, value: '' })
+      );
+      switchTo(NameViewMode.logical);
+      mounted = await mountAndFlush(tableTemplate(table), app);
+      const [name] = headerInputs(mounted);
+
+      expect(name.textContent?.trim()).toBe('users');
+      expect(name.classList.contains('placeholder')).toBe(true);
+      expect(name.style.width).toBe(`${table.ui.widthName}px`);
+    });
+
+    it('sets the logical name before the name in the view of both, header and rows', async () => {
+      switchTo(NameViewMode.both);
+      mounted = await mountAndFlush(tableTemplate(table), app);
+      const widths = calcTableWidths(table, app.store.state);
+      const [logicalName] =
+        rowsOf(mounted)[0].querySelectorAll<HTMLElement>('.edit-input');
+
+      expect(texts(headerInputs(mounted))).toEqual(['Site Users', 'users']);
+      expect(logicalName.textContent?.trim()).toBe('Member ID');
+      expect(logicalName.style.width).toBe(`${widths.logicalName}px`);
+      expect(rootOf(mounted).style.width).toBe(`${widths.width}px`);
+    });
+
+    it('follows a switch while it is open', async () => {
+      mounted = await mountAndFlush(tableTemplate(table), app);
+      expect(texts(headerInputs(mounted))).toEqual(['users']);
+
+      switchTo(NameViewMode.logical);
+      await flush();
+
+      expect(texts(headerInputs(mounted))).toEqual(['Site Users']);
+      expect(
+        rowsOf(mounted)[0].querySelector('.edit-input')?.textContent?.trim()
+      ).toBe('Member ID');
     });
   });
 });

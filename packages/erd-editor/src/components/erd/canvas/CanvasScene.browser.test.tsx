@@ -4,7 +4,8 @@
 // css one and the culling that keeps a table never seen out of the tree, and
 // hides one that scrolled off rather than building it again on the way back.
 
-import { createRef, useProvider } from '@dineug/r-html';
+import { createRef, type FC, useProvider } from '@dineug/r-html';
+import { whenDrawn } from '@dineug/r-html-konva';
 import type { Container } from 'konva/lib/Container';
 import type { Layer } from 'konva/lib/Layer';
 import type { Text } from 'konva/lib/shapes/Text';
@@ -19,15 +20,24 @@ import {
   whenPainted,
 } from '@/__test-utils__';
 import type { AppContext } from '@/components/appContext';
-import CanvasScene from '@/components/erd/canvas/CanvasScene';
+import CanvasScene, {
+  type CanvasLayers,
+} from '@/components/erd/canvas/CanvasScene';
+import { editingLayers } from '@/components/erd/canvas/editingLayers';
+import {
+  beginEntityDrag,
+  endEntityDrag,
+} from '@/components/erd/canvas/entityDrag';
 import { sceneSourceContext } from '@/components/sceneSourceContext';
+import ParticleLayer from '@/components/visualization/particles/ParticleLayer';
 import { RelationshipType, Show } from '@/constants/schema';
 import {
   changeViewportAction,
   drawStartAddRelationshipAction,
   drawStartRelationshipAction,
+  selectAction,
 } from '@/engine/modules/editor/atom.actions';
-import { ViewKind } from '@/engine/modules/editor/state';
+import { SelectType, ViewKind } from '@/engine/modules/editor/state';
 import {
   viewChangeZoomLevelAction,
   viewOpenAction,
@@ -40,15 +50,19 @@ import {
   changeZoomLevelAction,
   scrollToAction,
 } from '@/engine/modules/settings/atom.actions';
-import { addTableAction } from '@/engine/modules/table/atom.actions';
+import {
+  addTableAction,
+  changeTableGroupAction,
+  changeZIndexAction,
+} from '@/engine/modules/table/atom.actions';
 import {
   addColumnAction,
   changeColumnNameAction,
   changeColumnPrimaryKeyAction,
 } from '@/engine/modules/table-column/atom.actions';
+import { addTableGroupAction } from '@/engine/modules/table-group/atom.actions';
 import { Tag } from '@/engine/tag';
 import type { Point } from '@/internal-types';
-import { whenDrawn } from '@/konva/batchDraw';
 import { renderScene } from '@/konva/scene/renderScene';
 import { getViewHoverTable } from '@/konva/scene/viewLayout';
 import type { GeometrySource } from '@/utils/draw-relationship/geometrySource';
@@ -75,11 +89,14 @@ type MountOptions = {
   app?: AppContext;
   /** Hung on the shell around the Stage, the way the editor mounts a scene. */
   source?: GeometrySource;
+  /** What the host hands the scene: the ERD tab's own unless a case says otherwise. */
+  layers?: CanvasLayers;
 };
 
 async function mountScene({
   app = createTestAppContext(),
   source,
+  layers = editingLayers,
 }: MountOptions = {}): Promise<Mounted> {
   const $root = document.createElement('div');
   const shell = document.createElement('div');
@@ -101,7 +118,9 @@ async function mountScene({
   const scene = renderScene({
     app,
     container,
-    scene: <CanvasScene root={createRef<HTMLDivElement>($root)} />,
+    scene: (
+      <CanvasScene root={createRef<HTMLDivElement>($root)} layers={layers} />
+    ),
     width: VIEWPORT,
     height: VIEWPORT,
     theme: createTestTheme(),
@@ -142,8 +161,26 @@ const drawnTableIdsOf = (stage: Stage) =>
     .filter(node => node.visible())
     .map(node => node.getAttr('id'));
 
+/** The tables and memos of the scene layer in the order it paints them, bottom first. */
+const stackOf = (stage: Stage) =>
+  stage
+    .findOne<Layer>('.scene')!
+    .getChildren()
+    .filter(node => node.hasName('table') || node.hasName('memo'))
+    .map(node => node.id());
+
 const backgroundLayerOf = (stage: Stage) =>
   stage.findOne<Layer>('.canvas-background')!;
+
+const seedGroup = (app: AppContext, id: string, zIndex: number) => {
+  app.store.dispatchSync(
+    addTableGroupAction({
+      id,
+      color: '#3b82f6',
+      ui: { x: 50, y: 50, width: 400, height: 300, zIndex },
+    })
+  );
+};
 
 describe('the canvas scene', () => {
   it('roots four layers in the Stage, background first and presence last', async () => {
@@ -414,6 +451,117 @@ describe('the canvas scene', () => {
     expect(tableIdsOf(stage)).toEqual(['table-below', 'table-above']);
   });
 
+  it('stacks tables and memos by one z-index, a memo over a table of its own', async () => {
+    const { app, stage } = await mountScene();
+
+    seedTable(app, 'raised', 100, 9);
+    seedTable(app, 'low', 200, 2);
+    app.store.dispatchSync(
+      addMemoAction({ id: 'note', ui: { x: 300, y: 0, zIndex: 5 } }),
+      addMemoAction({ id: 'tie', ui: { x: 400, y: 0, zIndex: 2 } })
+    );
+    await flush();
+
+    expect(stackOf(stage)).toEqual([
+      'table-low',
+      'memo-tie',
+      'memo-note',
+      'table-raised',
+    ]);
+
+    app.store.dispatchSync(changeZIndexAction({ id: 'low', zIndex: 10 }));
+    await flush();
+
+    expect(stackOf(stage)).toEqual([
+      'memo-tie',
+      'memo-note',
+      'table-raised',
+      'table-low',
+    ]);
+  });
+
+  it('stacks the tables and memos a drag carries by one z-index in the drag layer', async () => {
+    const { app, stage } = await mountScene();
+    seedTable(app, 'raised', 100, 9);
+    seedTable(app, 'low', 200, 2);
+    app.store.dispatchSync(
+      addMemoAction({ id: 'note', ui: { x: 300, y: 0, zIndex: 5 } }),
+      selectAction({
+        raised: SelectType.table,
+        low: SelectType.table,
+        note: SelectType.memo,
+      })
+    );
+    beginEntityDrag(app.store.state);
+    await flush();
+
+    try {
+      expect(
+        stage
+          .findOne<Layer>('.drag-entity')!
+          .getChildren()
+          .filter(node => node.hasName('table') || node.hasName('memo'))
+          .map(node => node.id())
+      ).toEqual(['table-low', 'memo-note', 'table-raised']);
+    } finally {
+      endEntityDrag(app.store.state);
+    }
+  });
+
+  it('keeps a memo the same node across the high level threshold, its pointer state with it', async () => {
+    const { app, stage } = await mountScene();
+    app.store.dispatchSync(
+      addMemoAction({ id: 'note', ui: { x: 300, y: 0, zIndex: 5 } })
+    );
+    await flush();
+    const before = stage.findOne('#memo-note');
+
+    app.store.dispatchSync(changeZoomLevelAction({ value: 0.5 }));
+    await flush();
+
+    expect(stage.findOne('#memo-note')).toBe(before);
+  });
+
+  it('hands the cursor a memo took back once hiding the memos takes it from under the pointer', async () => {
+    const { app, stage } = await mountScene();
+    app.store.dispatchSync(
+      addMemoAction({
+        id: 'note',
+        ui: { x: 100, y: 100, width: 200, height: 150, zIndex: 5 },
+      })
+    );
+    await flush();
+    await whenPainted();
+    const body = stage
+      .findOne('.memo-text-clip')!
+      .getClientRect({ relativeTo: stage, skipShadow: true });
+    moveScenePointer(stage, body.x + body.width / 2, body.y + body.height / 2);
+    await flush();
+    expect(stage.container().style.cursor).toBe('text');
+
+    app.store.dispatchSync(
+      changeShowAction({ show: Show.hideMemo, value: true })
+    );
+    await flush();
+
+    expect(stage.find('.memo')).toHaveLength(0);
+    expect(stage.container().style.cursor).toBe('');
+  });
+
+  it('keeps that one stack at a zoom that draws high level tables', async () => {
+    const { app, stage } = await mountScene();
+
+    seedTable(app, 'raised', 100, 9);
+    app.store.dispatchSync(
+      addMemoAction({ id: 'note', ui: { x: 300, y: 0, zIndex: 5 } }),
+      changeZoomLevelAction({ value: 0.5 })
+    );
+    await flush();
+
+    expect(stage.find('.high-level-table')).toHaveLength(1);
+    expect(stackOf(stage)).toEqual(['memo-note', 'table-raised']);
+  });
+
   it('swaps to high level tables at or below a zoom level of 0.7', async () => {
     const { app, stage } = await mountScene();
 
@@ -443,6 +591,23 @@ describe('the canvas scene', () => {
     expect(memos[0].y()).toBe(6);
   });
 
+  it('draws no memo while memos are hidden, and brings them back', async () => {
+    const { app, stage } = await mountScene();
+
+    app.store.dispatchSync(
+      addMemoAction({ id: 'm1', ui: { x: 5, y: 6, zIndex: 1 } }),
+      changeShowAction({ show: Show.hideMemo, value: true })
+    );
+    await flush();
+    expect(stage.find('.memo')).toHaveLength(0);
+
+    app.store.dispatchSync(
+      changeShowAction({ show: Show.hideMemo, value: false })
+    );
+    await flush();
+    expect(stage.find('.memo')).toHaveLength(1);
+  });
+
   it('draws the connectors under the tables while the show bit is set', async () => {
     const { app, stage } = await mountScene();
     const scene = stage.findOne<Layer>('.scene')!;
@@ -462,6 +627,64 @@ describe('the canvas scene', () => {
     );
     await flush();
     expect(stage.find('.relationship-group')).toHaveLength(1);
+  });
+
+  it('draws the groups first, under the connectors, by the z-index among themselves, every body before every frame', async () => {
+    const { app, stage } = await mountScene();
+    const scene = stage.findOne<Layer>('.scene')!;
+
+    seedTable(app, 't1', 100);
+    seedGroup(app, 'above', 9);
+    seedGroup(app, 'below', 3);
+    await flush();
+
+    expect(scene.getChildren().map(node => node.name())).toEqual([
+      'table-group-body',
+      'table-group-body',
+      'table-group',
+      'table-group',
+      'relationship-group',
+      'table',
+    ]);
+    expect(
+      scene
+        .getChildren()
+        .slice(0, 4)
+        .map(node => node.id())
+    ).toEqual([
+      'table-group-body-below',
+      'table-group-body-above',
+      'table-group-below',
+      'table-group-above',
+    ]);
+  });
+
+  it('draws no group while the show bit hides them, and brings them back', async () => {
+    const { app, stage } = await mountScene();
+
+    seedGroup(app, 'g1', 1);
+    seedTable(app, 't1', 100);
+    app.store.dispatchSync(changeTableGroupAction({ id: 't1', value: 'g1' }));
+    await flush();
+    expect(stage.find('.table-group')).toHaveLength(1);
+
+    app.store.dispatchSync(
+      changeShowAction({ show: Show.hideTableGroup, value: true })
+    );
+    await flush();
+    expect(stage.find('.table-group')).toHaveLength(0);
+    expect(stage.findOne('.table-header-band')?.getAttr('fill')).not.toBe(
+      '#3b82f6'
+    );
+
+    app.store.dispatchSync(
+      changeShowAction({ show: Show.hideTableGroup, value: false })
+    );
+    await flush();
+    expect(stage.find('.table-group')).toHaveLength(1);
+    expect(stage.findOne('.table-header-band')?.getAttr('fill')).toBe(
+      '#3b82f6'
+    );
   });
 
   it('renders the draw relationship preview only once a start point exists', async () => {
@@ -514,6 +737,150 @@ describe('the bottom layer', () => {
       scene.scaleX(),
       scene.scaleY(),
     ]);
+  });
+});
+
+/**
+ * A probe in each slot, so a case reads where the scene puts what its host
+ * hands in, and that a host handing in nothing gets the scene's own layers.
+ */
+describe('the layers a host hands in', () => {
+  const Beneath: FC = () => () => (
+    <k-layer name="probe-beneath" listening={false} />
+  );
+  const DropTarget: FC = () => () => <k-rect name="probe-drop-target" />;
+  const PresenceA: FC = () => () => <k-rect name="probe-presence-a" />;
+  const PresenceB: FC = () => () => <k-rect name="probe-presence-b" />;
+
+  const layerNamesOf = (stage: Stage) =>
+    stage.getLayers().map(layer => layer.name());
+
+  const childNamesOf = (stage: Stage, layer: string) =>
+    stage
+      .findOne<Layer>(`.${layer}`)!
+      .getChildren()
+      .map(node => node.name());
+
+  it('roots the bottom layer and the scene alone for a host that hands in none', async () => {
+    const { stage } = await mountScene({ layers: {} });
+
+    expect(layerNamesOf(stage)).toEqual(['canvas-background', 'scene']);
+  });
+
+  it('roots each layer it is handed in its place, the presence parts in order on top', async () => {
+    const roots: HTMLDivElement[] = [];
+    const Marquee: NonNullable<CanvasLayers['marquee']> = props => {
+      roots.push(props.root.value);
+      return () => <k-rect name="probe-marquee" />;
+    };
+    const { stage } = await mountScene({
+      layers: {
+        beneath: Beneath,
+        marquee: Marquee,
+        presence: [PresenceA, PresenceB],
+      },
+    });
+
+    expect(layerNamesOf(stage)).toEqual([
+      'canvas-background',
+      'probe-beneath',
+      'scene',
+      'overlay-marquee',
+      'presence',
+    ]);
+    expect(childNamesOf(stage, 'overlay-marquee')).toEqual(['probe-marquee']);
+    expect(childNamesOf(stage, 'presence')).toEqual([
+      'probe-presence-a',
+      'probe-presence-b',
+    ]);
+    expect(roots).toHaveLength(1);
+    expect(roots[0]).toBeInstanceOf(HTMLDivElement);
+  });
+
+  it('draws the relationship draw it is handed once the draw has a start, given the draw', async () => {
+    const draws: unknown[] = [];
+    const RelationshipDraw: NonNullable<
+      CanvasLayers['relationshipDraw']
+    > = props => {
+      draws.push(props.draw);
+      return () => <k-rect name="probe-draw" />;
+    };
+    const { app, stage } = await mountScene({
+      layers: { relationshipDraw: RelationshipDraw },
+    });
+    seedTable(app, 't1', 100);
+
+    app.store.dispatchSync(
+      drawStartRelationshipAction({
+        relationshipType: RelationshipType.ZeroOne,
+      })
+    );
+    await flush();
+    expect(stage.find('.probe-draw')).toHaveLength(0);
+
+    app.store.dispatchSync(drawStartAddRelationshipAction({ tableId: 't1' }));
+    await flush();
+    expect(stage.find('.probe-draw')).toHaveLength(1);
+    expect(draws).toEqual([app.store.state.editor.drawRelationship]);
+  });
+
+  it('draws no relationship preview for a host that hands in none', async () => {
+    const { app, stage } = await mountScene({ layers: {} });
+    seedTable(app, 't1', 100);
+
+    app.store.dispatchSync(
+      drawStartRelationshipAction({
+        relationshipType: RelationshipType.ZeroOne,
+      }),
+      drawStartAddRelationshipAction({ tableId: 't1' })
+    );
+    await flush();
+
+    expect(app.store.state.editor.drawRelationship?.start).toBeTruthy();
+    expect(stage.find('.draw-relationship')).toHaveLength(0);
+  });
+
+  it('draws the drop target it is handed under what a drag carries over shown groups', async () => {
+    const { app, stage } = await mountScene({
+      layers: { dropTarget: DropTarget },
+    });
+    seedGroup(app, 'g1', 1);
+    seedTable(app, 't1', 100);
+    app.store.dispatchSync(selectAction({ t1: SelectType.table }));
+    beginEntityDrag(app.store.state);
+    await flush();
+
+    try {
+      expect(childNamesOf(stage, 'drag-entity')[0]).toBe('probe-drop-target');
+
+      app.store.dispatchSync(
+        changeShowAction({ show: Show.hideTableGroup, value: true })
+      );
+      await flush();
+      expect(stage.find('.probe-drop-target')).toHaveLength(0);
+    } finally {
+      endEntityDrag(app.store.state);
+    }
+  });
+
+  it('draws no drop target for a host that hands in none', async () => {
+    const { app, stage } = await mountScene({ layers: {} });
+    seedGroup(app, 'g1', 1);
+    seedTable(app, 't1', 100);
+    app.store.dispatchSync(selectAction({ t1: SelectType.table }));
+    beginEntityDrag(app.store.state);
+    await flush();
+
+    try {
+      expect(
+        stage
+          .findOne<Layer>('.drag-entity')!
+          .getChildren()
+          .map(node => node.id())
+      ).toEqual(['table-t1']);
+    } finally {
+      endEntityDrag(app.store.state);
+    }
   });
 });
 
@@ -573,12 +940,20 @@ describe('a scene the context points at a view', () => {
     );
   }
 
+  /**
+   * The Flow's particles with the ERD tab's layers handed in beside them, so
+   * the scene's own gates are what keep presence and a draw's preview out.
+   */
   async function mountNarrowedScene(): Promise<Mounted> {
     const app = createTestAppContext();
     seedDocument(app);
     narrowView(app);
 
-    return mountScene({ app, source: 'flow' });
+    return mountScene({
+      app,
+      source: 'flow',
+      layers: { ...editingLayers, beneath: ParticleLayer },
+    });
   }
 
   const tableOf = (stage: Stage, tableId: string) =>
@@ -604,6 +979,21 @@ describe('a scene the context points at a view', () => {
     // The show mode a narrowed view opens on: the key rows alone, which here
     // is the one column carrying the primary key.
     expect(rowIdsOf(stage, 't1')).toEqual(['column-c1']);
+  });
+
+  it('draws no group and no group color on its cards', async () => {
+    const app = createTestAppContext();
+    seedDocument(app);
+    seedGroup(app, 'g1', 1);
+    app.store.dispatchSync(changeTableGroupAction({ id: 't1', value: 'g1' }));
+    narrowView(app);
+
+    const { stage } = await mountScene({ app, source: 'flow' });
+
+    expect(stage.find('.table-group')).toHaveLength(0);
+    expect(
+      tableOf(stage, 't1').findOne('.table-header-band')?.getAttr('fill')
+    ).not.toBe('#3b82f6');
   });
 
   it('keeps its own spelling at a zoom the document would go high level at', async () => {

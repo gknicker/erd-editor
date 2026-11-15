@@ -16,7 +16,7 @@ describe('createIndexColumn', () => {
       columnId: '',
       orderType: OrderType.ASC,
     });
-    expect(indexColumn.meta.createAt).toBe(indexColumn.meta.updateAt);
+    expect(indexColumn).not.toHaveProperty('meta');
   });
 });
 
@@ -30,13 +30,16 @@ describe('createAndMergeIndexColumnEntities', () => {
     expect(createAndMergeIndexColumnEntities(source as any)).toEqual({});
   });
 
-  it('skips falsy entries and entries without an id', () => {
-    expect(
-      createAndMergeIndexColumnEntities({
-        a: undefined,
-        b: { indexId: 'i1' },
-      })
-    ).toEqual({});
+  it('skips an entry that is not an object, and keys one without an id by its key', () => {
+    const entities = createAndMergeIndexColumnEntities({
+      a: undefined,
+      b: { indexId: 'i1' },
+      c: 1 as any,
+      '': { indexId: 'i1' },
+    });
+
+    expect(Object.keys(entities)).toEqual(['b']);
+    expect(entities.b).toMatchObject({ id: 'b', indexId: 'i1' });
   });
 
   it('merges every field', () => {
@@ -46,7 +49,6 @@ describe('createAndMergeIndexColumnEntities', () => {
         indexId: 'i1',
         columnId: 'c1',
         orderType: OrderType.DESC,
-        meta: { updateAt: 7, createAt: 8 },
       },
     });
 
@@ -55,7 +57,6 @@ describe('createAndMergeIndexColumnEntities', () => {
       indexId: 'i1',
       columnId: 'c1',
       orderType: OrderType.DESC,
-      meta: { updateAt: 7, createAt: 8 },
     });
   });
 

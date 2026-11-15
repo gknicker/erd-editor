@@ -1,0 +1,40 @@
+/**
+ * The command palette's own text. A keywords entry holds the words a row is
+ * also found by, separated by spaces and shown dimmed beside its name.
+ */
+export const palette = {
+  'palette.tab': 'Tab',
+  'palette.noCommandsMatch': 'No commands match',
+  'palette.searchTables': 'Search tables for "{keyword}"',
+  'palette.searchColumns': 'Search columns for "{keyword}"',
+  'palette.searchText': 'Search comments & memos for "{keyword}"',
+  'palette.scope.tables': 'Tables',
+  'palette.scope.columns': 'Columns',
+  'palette.scope.text': 'Comments & memos',
+  'palette.scope.help': 'Help',
+  'palette.scopeDescription.tables': 'Go to a table by its name',
+  'palette.scopeDescription.columns':
+    'Go to a column by its name, or by table.column',
+  'palette.scopeDescription.text':
+    'Search table comments, column comments and memos',
+  'palette.scopeDescription.help': 'List the prefixes that narrow the search',
+  'palette.keywords.graphql': 'graphql sdl gql schema',
+  'palette.keywords.dbml': 'dbml dbdiagram dbdocs schema',
+  'palette.keywords.aml': 'aml azimutt markup language schema',
+  'palette.keywords.image': 'image png svg vector picture clipboard',
+  'palette.keywords.explorer': 'find replace rename tree outline objects',
+  'palette.schemaSqlStatements': 'Schema SQL: Statements',
+  'palette.schemaSqlHeader': 'Schema SQL: Header',
+  'palette.schemaSqlOptionsPanel': 'Schema SQL: Options panel',
+  'palette.codeGeneratorOptionsPanel': 'Code Generator: Options panel',
+  'palette.groupSelectedTables': 'Group Selected Tables',
+  'palette.keywords.deriveColumn': 'column',
+  'palette.keywords.deriveTable': 'table',
+  'palette.keywords.deriveSelection': 'selected tables',
+  'palette.keywords.deriveDocument': 'whole document',
+  'palette.keywords.schemaSqlStatements': 'create if not exists drop replace',
+  'palette.keywords.schemaSqlHeader': 'use database search_path',
+  'palette.keywords.schemaSqlOptionsPanel': 'show hide before after scripts',
+  'palette.keywords.codeGeneratorOptionsPanel':
+    'show hide database case save file',
+} as const;

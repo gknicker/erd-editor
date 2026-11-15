@@ -4,6 +4,7 @@ import {
   RELATIONSHIP_STROKE_WIDTH,
   VIEW_RELATIONSHIP_STROKE_WIDTH,
 } from '@/constants/layout';
+import type { RootState } from '@/engine/state';
 import {
   Point,
   Relationship,
@@ -16,6 +17,7 @@ import type {
   GeometrySource,
   ViewSource,
 } from '@/utils/draw-relationship/geometrySource';
+import { loopReach } from '@/utils/draw-relationship/loop';
 
 export const DirectionName = {
   left: 'left',
@@ -118,26 +120,26 @@ export const isDirection = arrayHas<string>([
   DirectionName.right,
 ]);
 
-export const PATH_HEIGHT = 30;
-export const PATH_END_HEIGHT = PATH_HEIGHT + 20;
+/** The stub of a side's first slot: as short as the decoration lets it be. */
+export const PATH_END_HEIGHT = 24;
 
 /**
- * The cardinality decoration, measured outward from the anchor. The four are one
- * shape and cannot be set independently: the ring shares a centre with the
- * second tick and has to clear both the first tick and the guide line.
+ * The cardinality decoration, measured outward from the anchor, at the size other
+ * ERD tools draw it, clear down to the lowest zoom a table shows its rows. The
+ * ring shares the second tick's centre and clears the first and the guide.
  */
-export const LINE_SIZE = 7;
-export const LINE_HEIGHT = 11;
+export const LINE_SIZE = 6;
+export const LINE_HEIGHT = 9;
 export const CIRCLE_HEIGHT = LINE_SIZE + LINE_HEIGHT;
-export const CIRCLE_RADIUS = 6;
+export const CIRCLE_RADIUS = 5;
 export const PATH_LINE_HEIGHT = LINE_HEIGHT + LINE_HEIGHT + 3;
 
 /**
  * How far apart the corridors of two relationships leaving the same table side
- * sit. Without it every path on a side turns at the same coordinate and their
- * first segments run down one another however far the anchors are spread.
+ * sit, one hit band at full zoom. Without it every path on a side turns at the
+ * same coordinate and their first segments run down one another.
  */
-export const STUB_STEP = 12;
+export const STUB_STEP = 8;
 
 /**
  * Corridors repeat every fourth slot. An unbounded stub walks a busy side's
@@ -148,10 +150,10 @@ export const STUB_CYCLE = 4;
 
 /**
  * The shortest a stub may be clamped to. It has to clear PATH_LINE_HEIGHT or the
- * guide line is drawn backwards, but it is not derived from it: this is where
- * the routing was measured, and following the decorations down cost overlap.
+ * guide line is drawn backwards; just past it, two facing tables about 50px
+ * apart still join in one straight run, where a longer floor sends it around.
  */
-export const MIN_STUB = 36;
+export const MIN_STUB = 24;
 
 /**
  * The widest gap allowed between two anchors on the same table side. Capping the
@@ -164,11 +166,11 @@ export const ANCHOR_MAX_PITCH = 120;
 export const ANCHOR_EDGE_INSET = 12;
 
 /**
- * How far back from a corner a connector turns when the corner is cut to 45
- * degrees. A ceiling rather than a length: each cut is clamped to half the
- * shorter run it touches, so a short run keeps its right angle.
+ * The radius of the quarter circle a connector turns on at a corner. A ceiling
+ * rather than a length: each corner is clamped to half the shorter run it
+ * touches, so a short run keeps its right angle.
  */
-export const ROUTE_CHAMFER = 8;
+export const ROUTE_CORNER_RADIUS = 8;
 
 const EMPTY_SLOTS: readonly [number, number] = [0, 0];
 
@@ -264,6 +266,55 @@ function observeView(relationship: Relationship, source: ViewSource) {
 }
 
 /**
+ * A version per connector's document route, made by the first render that
+ * reads it, so a store that draws nothing never makes one. The entity's proxy
+ * redraws a connector whose anchors moved; this one, a connector whose route alone did.
+ */
+const routeVersions = new WeakMap<Relationship, Version>();
+
+/** The route redraws each store's drag holds back, by the store's state. */
+const heldRedraws = new WeakMap<RootState, Set<Relationship>>();
+
+function observeRoute(relationship: Relationship) {
+  let held = routeVersions.get(relationship);
+  if (!held) {
+    held = observable({ version: 0 });
+    routeVersions.set(relationship, held);
+  }
+  return held.version;
+}
+
+/** Wakes the renders that read this route, which none may have yet. */
+function bumpRoute(relationship: Relationship) {
+  const held = routeVersions.get(relationship);
+  if (held) held.version += 1;
+}
+
+/**
+ * Holds back, until releaseRouteRedraws, the redraw of each document route a
+ * sort of this store changes. A static connector redrawn on each drag frame
+ * repaints the layer every static table sits in, which the drag never touches.
+ */
+export function holdRouteRedraws(state: RootState) {
+  if (!heldRedraws.has(state)) heldRedraws.set(state, new Set());
+}
+
+/** Redraws, once, every route the store's hold kept back, and lets the hold go. */
+export function releaseRouteRedraws(state: RootState) {
+  const held = heldRedraws.get(state);
+  if (!held) return;
+  heldRedraws.delete(state);
+  for (const relationship of held) bumpRoute(relationship);
+}
+
+/** The redraws a sort of this store keeps back while a drag holds them, if one does. */
+export function heldRouteRedraws(
+  state: RootState
+): Set<Relationship> | undefined {
+  return heldRedraws.get(state);
+}
+
+/**
  * Wakes every render that read this connector from that view's channel.
  * Called only for a change, as the entity's own proxy only notifies a changed
  * field, so a sort that moves one table redraws the connectors it moved and no other.
@@ -301,9 +352,19 @@ const sameSlots = (
 const sameAnchor = (a: Anchor, b: Anchor) =>
   a.x === b.x && a.y === b.y && a.direction === b.direction;
 
+/**
+ * Below this two routes are one. A nudge that settles a lane again lands a few
+ * floating point steps away, and that would redraw a connector nothing moved.
+ */
+const ROUTE_EPSILON = 0.01;
+
 const samePoints = (a: Point[], b: Point[]) =>
   a.length === b.length &&
-  a.every((point, index) => point.x === b[index].x && point.y === b[index].y);
+  a.every(
+    (point, index) =>
+      Math.abs(point.x - b[index].x) < ROUTE_EPSILON &&
+      Math.abs(point.y - b[index].y) < ROUTE_EPSILON
+  );
 
 export function setStubSlots(
   relationship: Relationship,
@@ -329,16 +390,25 @@ export function getStubSlots(
   return channels[source].stubSlots.get(relationship) ?? EMPTY_SLOTS;
 }
 
+/**
+ * Writes a connector's route and wakes whoever read it, only when it changed.
+ * The document's wake waits in held while a drag of its store holds it.
+ */
 export function setRoute(
   relationship: Relationship,
   points: Point[],
-  source: GeometrySource = 'document'
+  source: GeometrySource = 'document',
+  held?: Set<Relationship>
 ) {
   const channel = channels[source];
-  if (source !== 'document') {
-    const held = channel.routes.get(relationship);
-    if (!held || !samePoints(held.points, points)) {
+  const was = channel.routes.get(relationship);
+  if (!was || !samePoints(was.points, points)) {
+    if (source !== 'document') {
       bumpView(relationship, source);
+    } else if (held) {
+      held.add(relationship);
+    } else {
+      bumpRoute(relationship);
     }
   }
   channel.routes.set(relationship, { points, epoch: channel.epoch });
@@ -348,7 +418,11 @@ export function getRoute(
   relationship: Relationship,
   source: GeometrySource = 'document'
 ): Point[] | undefined {
-  if (source !== 'document') observeView(relationship, source);
+  if (source === 'document') {
+    observeRoute(relationship);
+  } else {
+    observeView(relationship, source);
+  }
   return channels[source].routes.get(relationship)?.points;
 }
 
@@ -475,6 +549,14 @@ export function getRouteBBox(
   const { start, end } = getAnchors(relationship, source);
   const entry = channel.routes.get(relationship);
   const routed = entry && entry.epoch === channel.epoch ? entry.points : null;
+
+  // A loop never routes, and its curve stays inside its stubs and control reach.
+  if (start.tableId === end.tableId) {
+    return inflate(
+      aabb([start, end]),
+      ROUTE_BBOX_REACH + strokeWidth + loopReach(start, end)
+    );
+  }
 
   const slack = routed ? 0 : MAX_STUB;
 

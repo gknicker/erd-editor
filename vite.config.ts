@@ -121,16 +121,16 @@ export default defineConfig({
               ],
               patterns: [
                 {
-                  regex:
-                    '^effect/(?:[A-Z]|index$|internal/|testing/|unstable/[^/]+/)',
+                  regex: '^effect/(?:[A-Z]|index$|[a-z-]+/)',
                   caseSensitive: true,
                   message:
-                    "Import from effect, effect/testing or an effect/unstable/<group> barrel, the entries effect's package.json names; a module path resolves only through its ./* wildcard.",
+                    "Import from effect or a group barrel such as effect/testing or effect/socket, the entries effect's package.json names; a module path resolves only through its ./* wildcard.",
                 },
                 {
-                  regex: '^effect/unstable/(?:schema|sql)(?:/|$)',
+                  regex: '^effect/(?:schema|sql)(?:/|$)',
+                  caseSensitive: true,
                   message:
-                    'SchemaAOTCompiler and Migrator, each with a dynamic import, live here.',
+                    'SchemaJITCompiler, which builds decoders with Function, and Migrator, which loads migrations with a dynamic import, live here.',
                 },
                 {
                   regex:
@@ -219,11 +219,15 @@ export default defineConfig({
       },
       {
         /**
-         * erd-editor's .tsx is JSX, not React: it compiles to r-html tagged
-         * templates. Scoped rather than global because app is React 19, where
-         * these three rules mean what they say.
+         * The .tsx of erd-editor, r-html-konva and grid is JSX, not React: it
+         * compiles to r-html tagged templates. Scoped rather than global because
+         * app is React 19, where these three rules mean what they say.
          */
-        files: ['packages/erd-editor/src/**/*.tsx'],
+        files: [
+          'packages/erd-editor/src/**/*.tsx',
+          'packages/grid/src/**/*.tsx',
+          'packages/r-html-konva/src/**/*.tsx',
+        ],
         rules: {
           // There is no key prop to add. List identity is the repeat()
           // directive's job, and it takes the key function as its second
@@ -246,6 +250,17 @@ export default defineConfig({
          * emits declarations and does not copy hand-written ones.
          */
         files: ['packages/r-html/src/jsx-runtime.ts'],
+        rules: {
+          'typescript/no-namespace': 'off',
+        },
+      },
+      {
+        /**
+         * The k-* tags reach a consumer by merging into the JSX namespace of
+         * r-html's jsx-runtime, and a declaration merge has to name that
+         * namespace; it is a .ts so vite-plugin-dts emits it to dist.
+         */
+        files: ['packages/r-html-konva/src/jsx.ts'],
         rules: {
           'typescript/no-namespace': 'off',
         },
@@ -286,6 +301,21 @@ export default defineConfig({
       'local/jsdoc-attached': 'error',
       'local/jsdoc-prose-limit': 'error',
       'local/no-comment-markdown': 'error',
+      // The React Compiler rules oxlint 1.85 put in correctness. They misread
+      // erd-editor's hooks, which are r-html's, and app does not run the
+      // compiler; taking them up for app is a change of its own.
+      'react/error-boundaries': 'off',
+      'react/globals': 'off',
+      'react/immutability': 'off',
+      'react/incompatible-library': 'off',
+      'react/preserve-manual-memoization': 'off',
+      'react/purity': 'off',
+      'react/refs': 'off',
+      'react/set-state-in-effect': 'off',
+      'react/set-state-in-render': 'off',
+      'react/static-components': 'off',
+      'react/use-memo': 'off',
+      'react/void-use-memo': 'off',
     },
   },
   fmt: {

@@ -2,6 +2,18 @@ export const START_X = 200;
 export const START_Y = 100;
 export const START_ADD = 50;
 
+/** The corner the grid an import lands in starts at, on both axes. */
+export const TABLE_SORT_START = 50;
+
+/** The room the grid an import lands in keeps right of and below each table. */
+export const TABLE_SORT_MARGIN = 80;
+
+/**
+ * How far below the diagram the block an append brings starts, the gap the
+ * grid an import lands in keeps between its rows.
+ */
+export const APPEND_GAP = TABLE_SORT_MARGIN;
+
 export const DUPLICATE_MIN_MOVE = 4;
 
 /**
@@ -58,6 +70,20 @@ export const TABLE_HEADER_BUTTONS_WIDTH =
 export const COLUMN_DELETE_WIDTH = 12;
 export const COLUMN_KEY_WIDTH = 12;
 
+/** The button a column drag starts from, beside the focused row and outside the table. */
+export const COLUMN_DRAG_HANDLE_WIDTH = 16;
+export const COLUMN_DRAG_HANDLE_HEIGHT = INPUT_HEIGHT;
+export const COLUMN_DRAG_HANDLE_ICON_SIZE = 12;
+
+/** The room between that button and the table's left edge. */
+export const COLUMN_DRAG_HANDLE_GAP = 4;
+
+/**
+ * The strip left of a table the handle answers a press in and a column drop is
+ * judged in, so a drag that runs straight down along the handle still reorders.
+ */
+export const COLUMN_DRAG_HANDLE_LANE = 24;
+
 /** The table icon before the name, at the key badge's size so the two stand in one column. */
 export const TABLE_HEADER_ICON_SIZE = COLUMN_KEY_WIDTH;
 
@@ -72,6 +98,13 @@ export const COLUMN_MIN_WIDTH = 60;
 export const COLUMN_NOT_NULL_WIDTH = 35;
 export const COLUMN_UNIQUE_WIDTH = 22;
 export const COLUMN_AUTO_INCREMENT_WIDTH = 15;
+
+/**
+ * The advance one alternate key mark character takes. The mark is drawn at the
+ * cell size in the code face, whose glyphs all advance about 0.6 of the size,
+ * so a table is sized by the mark's length alone, in a headless peer too.
+ */
+export const COLUMN_ALTERNATE_KEY_CHAR_WIDTH = CELL_FONT_SIZE * 0.61;
 export const COLUMN_PADDING = 2;
 export const COLUMN_HEIGHT = INPUT_HEIGHT + COLUMN_PADDING * 2;
 
@@ -142,12 +175,59 @@ export const MEMO_HEADER_HEIGHT =
 export const MEMO_MIN_WIDTH = 100 + MEMO_HEADER_HEIGHT;
 export const MEMO_MIN_HEIGHT = 100;
 
+/**
+ * The room a table group's box keeps around each member table on every side,
+ * and around the tables a group is made from.
+ */
+export const TABLE_GROUP_PADDING = 24;
+
+/**
+ * The bar a table group's name is drawn on along the top of its box, as tall
+ * as a table's header band, which the box's top padding clears as well.
+ */
+export const TABLE_GROUP_TITLE_HEIGHT = 28;
+
+/**
+ * The least a sash resizes a group to, which its members' padded box raises
+ * further: wide enough for a short name, tall enough for a body under the bar.
+ */
+export const TABLE_GROUP_MIN_WIDTH = 160;
+export const TABLE_GROUP_MIN_HEIGHT = TABLE_GROUP_TITLE_HEIGHT + 72;
+
+/** The group a click of the draw mode makes, without a drag: room for two tables side by side. */
+export const TABLE_GROUP_DEFAULT_WIDTH = 480;
+export const TABLE_GROUP_DEFAULT_HEIGHT = 320;
+
 export const MINIMAP_SIZE = 150;
 export const MINIMAP_MARGIN = 20;
 
 export const TOOLBAR_HEIGHT = 30;
 
-export const DIFF_TREE_WIDTH = 200;
+/** The width of the toolbar's database name, which every language's placeholder fits. */
+export const TOOLBAR_DATABASE_NAME_WIDTH = 150;
+
+/**
+ * The padding around the Table Properties body. A band stuck to an edge of the
+ * body reaches back over it, so no row scrolls into sight behind the band.
+ */
+export const TABLE_PROPERTIES_BODY_PADDING = 12;
+
+/** How many rows the Table Properties index order shows before it scrolls the rest. */
+export const INDEX_ORDER_MAX_ROWS = 3;
+
+/** The Explorer's width as it first opens, and the width a double press on its edge gives back. */
+export const EXPLORER_WIDTH = 260;
+/** The narrowest and the widest a drag on the Explorer's edge sets it; narrower than the least, it hides. */
+export const EXPLORER_MIN_WIDTH = 200;
+export const EXPLORER_MAX_WIDTH = 480;
+/** The least of the canvas the Explorer leaves beside it, whatever its width asks. */
+export const EXPLORER_CANVAS_MIN_WIDTH = 320;
+
+/** The width of the options panel beside the code, on the Schema SQL and Code Generator tabs. */
+export const SCHEMA_SQL_PANEL_WIDTH = 300;
+
+/** An editor narrower than this opens the Schema SQL and Code Generator tabs with their panels folded away. */
+export const SCHEMA_SQL_PANEL_COLLAPSE_BELOW = 640;
 
 /**
  * How thick a relationship connector is drawn. A whole number rather than a

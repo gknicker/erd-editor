@@ -7,6 +7,7 @@ import {
   vi,
 } from 'vite-plus/test';
 
+import { createTestI18n, pseudoMessages } from '@/__test-utils__/i18n';
 import type { Theme } from '@/themes/tokens';
 
 const state = {
@@ -14,6 +15,7 @@ const state = {
   close: vi.fn(),
   probe: vi.fn(),
   render: vi.fn(),
+  renderSvg: vi.fn(),
   onerror: null as null | (() => void),
 };
 
@@ -32,6 +34,7 @@ vi.mock('comlink', () => ({
   wrap: () => ({
     probeFontWidths: (...args: unknown[]) => state.probe(...args),
     render: (...args: unknown[]) => state.render(...args),
+    renderSvg: (...args: unknown[]) => state.renderSvg(...args),
   }),
 }));
 
@@ -39,9 +42,15 @@ vi.mock('./renderPng', () => ({
   renderDocumentPng: vi.fn(),
 }));
 
+vi.mock('./renderSvg', () => ({
+  renderDocumentSvg: vi.fn(),
+}));
+
 const { renderDocumentPng } = await import('./renderPng');
+const { renderDocumentSvg } = await import('./renderSvg');
 
 const mainRender = vi.mocked(renderDocumentPng);
+const mainRenderSvg = vi.mocked(renderDocumentSvg);
 
 const theme = {} as Theme;
 
@@ -51,6 +60,8 @@ const result = (width: number, height: number) => ({
   blob: new Blob(['png']),
   width,
   height,
+  documentWidth: width * 2,
+  documentHeight: height * 2,
   reduction: null,
 });
 
@@ -68,7 +79,9 @@ beforeEach(() => {
   state.onerror = null;
   state.probe.mockReset().mockResolvedValue([1, 2, 3]);
   state.render.mockReset().mockResolvedValue(result(10, 20));
+  state.renderSvg.mockReset().mockResolvedValue('<svg>worker</svg>');
   mainRender.mockReset().mockResolvedValue(result(30, 40));
+  mainRenderSvg.mockReset().mockResolvedValue('<svg>main</svg>');
   vi.spyOn(console, 'warn').mockImplementation(() => {});
 });
 
@@ -214,8 +227,8 @@ describe('what the realm that drew reports back', () => {
 
   it('carries a reduction the worker made back to the caller', async () => {
     const reduction = {
-      documentWidth: 20_000,
-      documentHeight: 20_000,
+      askedWidth: 20_000,
+      askedHeight: 20_000,
       width: 16_384,
       height: 16_384,
     };
@@ -241,5 +254,187 @@ describe('what the realm that drew reports back', () => {
     });
 
     expect(reductions).toEqual([]);
+  });
+});
+
+describe('the preview the export dialog shows', () => {
+  it('asks the worker for the export capped at a side, one pixel per unit and no zoom', async () => {
+    const { createDocumentPreview } = await load();
+
+    await createDocumentPreview({ ...options(), maxSide: 960 });
+
+    const [request] = state.render.mock.calls[0];
+    expect(request).toMatchObject({
+      doc: '{}',
+      pixelRatio: 1,
+      maxSide: 960,
+    });
+    expect(Reflect.has(request, 'zoomLevel')).toBe(false);
+    expect(request.fontProbe).toEqual([21, 10, 10]);
+    expect(mainRender).not.toHaveBeenCalled();
+  });
+
+  it('hands back the picture and the box the export itself will be measured by', async () => {
+    const { createDocumentPreview } = await load();
+
+    const preview = await createDocumentPreview({ ...options(), maxSide: 960 });
+
+    expect(preview).toEqual({
+      blob: expect.any(Blob),
+      width: 10,
+      height: 20,
+      documentWidth: 20,
+      documentHeight: 40,
+    });
+  });
+
+  it('draws the preview on the main thread when the worker hands it back', async () => {
+    state.render.mockRejectedValue(new Error('no'));
+    const { createDocumentPreview } = await load();
+
+    const preview = await createDocumentPreview({ ...options(), maxSide: 960 });
+
+    expect(mainRender).toHaveBeenCalledTimes(1);
+    expect(mainRender.mock.calls[0][0]).toMatchObject({ maxSide: 960 });
+    expect(preview.width).toBe(30);
+  });
+});
+
+describe('the svg the export dialog writes', () => {
+  it('asks the worker with no zoom, no scale and the probe widths', async () => {
+    const { createDocumentSvg } = await load();
+
+    const svg = await createDocumentSvg(options());
+
+    expect(svg).toBe('<svg>worker</svg>');
+    const [request] = state.renderSvg.mock.calls[0];
+    expect(request).toEqual({
+      doc: '{}',
+      theme,
+      fontProbe: [21, 10, 10],
+    });
+    expect(Reflect.has(request, 'zoomLevel')).toBe(false);
+    expect(request.theme).not.toBe(theme);
+    expect(state.render).not.toHaveBeenCalled();
+    expect(mainRenderSvg).not.toHaveBeenCalled();
+  });
+
+  it('writes it on the main thread when the worker hands it back', async () => {
+    state.renderSvg.mockRejectedValue(new Error('measures differently'));
+    const { createDocumentSvg } = await load();
+
+    const svg = await createDocumentSvg(options());
+
+    expect(svg).toBe('<svg>main</svg>');
+    const [request] = mainRenderSvg.mock.calls[0];
+    expect(request).toMatchObject({ doc: '{}', toWidth });
+    expect(Reflect.has(request, 'pixelRatio')).toBe(false);
+  });
+
+  it('writes it on the main thread when the host builds no shared worker', async () => {
+    Reflect.deleteProperty(globalThis, 'SharedWorker');
+    const { createDocumentSvg } = await load();
+
+    await createDocumentSvg(options());
+
+    expect(state.construct).not.toHaveBeenCalled();
+    expect(mainRenderSvg).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('the language every drawing is asked in', () => {
+  /** The language as the editor hands it out: observable, which no clone takes. */
+  const live = () => createTestI18n('ko-KR', pseudoMessages('ko'));
+
+  /** What a worker would be handed of it, cloned as a port clones it. */
+  const sent = (request: { i18n?: unknown }) => structuredClone(request.i18n);
+
+  it('goes with the png as a plain copy a worker can be sent', async () => {
+    const i18n = live();
+    const { createDocumentPng } = await load();
+
+    await createDocumentPng({ ...options(), i18n });
+
+    const [request] = state.render.mock.calls[0];
+    expect(request.i18n).not.toBe(i18n);
+    expect(sent(request)).toEqual({
+      locale: 'ko-KR',
+      messages: i18n.messages,
+    });
+  });
+
+  it('goes with the preview, and with the png drawn on the main thread', async () => {
+    state.render.mockRejectedValue(new Error('no'));
+    const i18n = live();
+    const { createDocumentPreview } = await load();
+
+    await createDocumentPreview({ ...options(), maxSide: 960, i18n });
+
+    const [inWorker] = state.render.mock.calls[0];
+    const [onMain] = mainRender.mock.calls[0];
+    expect(sent(inWorker)).toEqual({
+      locale: 'ko-KR',
+      messages: i18n.messages,
+    });
+    expect(onMain.i18n).toEqual(inWorker.i18n);
+  });
+
+  it('goes with the svg, in the worker and on the main thread', async () => {
+    state.renderSvg.mockRejectedValue(new Error('no'));
+    const i18n = live();
+    const { createDocumentSvg } = await load();
+
+    await createDocumentSvg({ ...options(), i18n });
+
+    const [inWorker] = state.renderSvg.mock.calls[0];
+    const [onMain] = mainRenderSvg.mock.calls[0];
+    expect(sent(inWorker)).toEqual({
+      locale: 'ko-KR',
+      messages: i18n.messages,
+    });
+    expect(onMain.i18n).toEqual(inWorker.i18n);
+  });
+
+  it('is left out of a drawing asked in no language, which draws English', async () => {
+    const { createDocumentPng, createDocumentSvg } = await load();
+
+    await createDocumentPng(options());
+    await createDocumentSvg(options());
+
+    expect(state.render.mock.calls[0][0].i18n).toBeUndefined();
+    expect(state.renderSvg.mock.calls[0][0].i18n).toBeUndefined();
+  });
+});
+
+describe('the name view every drawing is asked in', () => {
+  it('goes with the png, the preview and the svg, in the worker and on the main thread', async () => {
+    state.render.mockRejectedValue(new Error('no'));
+    state.renderSvg.mockRejectedValue(new Error('no'));
+    const { createDocumentPng, createDocumentPreview, createDocumentSvg } =
+      await load();
+    const nameViewMode = 'logical' as const;
+
+    await createDocumentPng({ ...options(), nameViewMode });
+    await createDocumentPreview({ ...options(), maxSide: 960, nameViewMode });
+    await createDocumentSvg({ ...options(), nameViewMode });
+
+    expect(
+      [
+        ...state.render.mock.calls,
+        ...state.renderSvg.mock.calls,
+        ...mainRender.mock.calls,
+        ...mainRenderSvg.mock.calls,
+      ].map(([request]) => request.nameViewMode)
+    ).toEqual(Array(6).fill(nameViewMode));
+  });
+
+  it('is left out of a drawing asked in none, which draws the view the document holds', async () => {
+    const { createDocumentPng, createDocumentSvg } = await load();
+
+    await createDocumentPng(options());
+    await createDocumentSvg(options());
+
+    expect(state.render.mock.calls[0][0].nameViewMode).toBeUndefined();
+    expect(state.renderSvg.mock.calls[0][0].nameViewMode).toBeUndefined();
   });
 });

@@ -4,6 +4,7 @@
 // DOM sash laid out, and the resize gesture each of them starts.
 
 import { query } from '@dineug/erd-editor-schema';
+import { whenDrawn } from '@dineug/r-html-konva';
 import { Layer } from 'konva/lib/Layer';
 import type { Node as KonvaNode } from 'konva/lib/Node';
 import { Rect } from 'konva/lib/shapes/Rect';
@@ -28,13 +29,16 @@ import {
   setSceneCursor,
 } from '@/components/erd/canvas/sceneTokens';
 import { MEMO_MIN_HEIGHT, MEMO_MIN_WIDTH } from '@/constants/layout';
+import { Show } from '@/constants/schema';
 import {
   addMemoAction,
   resizeMemoAction,
 } from '@/engine/modules/memo/atom.actions';
-import { changeZoomLevelAction } from '@/engine/modules/settings/atom.actions';
+import {
+  changeShowAction,
+  changeZoomLevelAction,
+} from '@/engine/modules/settings/atom.actions';
 import type { Memo } from '@/internal-types';
-import { whenDrawn } from '@/konva/batchDraw';
 import { renderScene } from '@/konva/scene/renderScene';
 
 /** The border box of a memo whose body is 200 by 150, and the box a sash spans. */
@@ -302,15 +306,43 @@ describe('the pointer a sash asks the stage for', () => {
     fireScenePointer(sashAt(stage, 'right'), 'mousedown');
     fireScenePointer(sashAt(stage, 'right'), 'mouseleave');
     fireScenePointer(sashAt(stage, 'bottom'), 'mouseenter');
-    fireScenePointer(sashAt(stage, 'bottom'), 'mousedown', { button: 2 });
+    fireScenePointer(sashAt(stage, 'bottom'), 'mousedown');
     expect(container.style.cursor).toBe('ns-resize');
 
     releasePointer();
     expect(container.style.cursor).toBe('ns-resize');
   });
+
+  it('holds nothing for a right press, which resizes nothing', async () => {
+    const { stage } = await mountSash();
+    const container = stage.container();
+
+    fireScenePointer(sashAt(stage, 'left'), 'mousedown', { button: 2 });
+
+    expect(container.style.cursor).toBe('');
+  });
 });
 
 describe('the resize a sash drag commits', () => {
+  // Only the main button carries a memo, and an edge is part of it: a right
+  // press opens the context menu and leaves the box where it stands.
+  it.each(['left', 'lt', 'rb'] as const)(
+    'resizes and moves nothing on a right drag from the %s sash',
+    async position => {
+      const { memo, stage } = await mountSash();
+
+      fireScenePointer(sashAt(stage, position), 'mousedown', {
+        button: 2,
+        clientX: 100,
+        clientY: 100,
+      });
+      movePointer(40, 30);
+      await flush();
+
+      expect(memo.ui).toMatchObject({ x: 30, y: 40, width: 200, height: 150 });
+    }
+  );
+
   it('grows the width from the right edge without moving the memo', async () => {
     const { memo, stage } = await mountSash();
 
@@ -319,6 +351,27 @@ describe('the resize a sash drag commits', () => {
     expect(memo.ui.width).toBe(250);
     expect(memo.ui.x).toBe(30);
     expect(memo.ui.height).toBe(150);
+  });
+
+  it('stops resizing once the memos are hidden mid drag, writing nothing more', async () => {
+    const { app, memo, stage } = await mountSash();
+
+    await drag(stage, 'right', [0, 0], [20, 0]);
+    expect(memo.ui.width).toBe(220);
+
+    app.store.dispatchSync(
+      changeShowAction({ show: Show.hideMemo, value: true })
+    );
+    movePointer(50, 0);
+    await flush();
+    expect(memo.ui.width).toBe(220);
+
+    app.store.dispatchSync(
+      changeShowAction({ show: Show.hideMemo, value: false })
+    );
+    movePointer(80, 0);
+    await flush();
+    expect(memo.ui.width).toBe(220);
   });
 
   it('grows the width from the left edge and shifts the memo left', async () => {

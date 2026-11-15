@@ -13,8 +13,9 @@ export function isFocus(
   if (!focusTable || tableId !== focusTable.tableId) return false;
 
   switch (focusType) {
-    case 'tableName':
-    case 'tableComment':
+    case FocusType.tableName:
+    case FocusType.tableLogicalName:
+    case FocusType.tableComment:
       return focusType === focusTable.focusType;
   }
 
@@ -29,6 +30,13 @@ export const isSelectColumn = (
   focusTable?.tableId === tableId &&
   focusTable.selectColumnIds.includes(columnId);
 
+/** Whether the focus stands on any cell of this column. */
+export const isFocusColumn = (
+  focusTable: Pick<FocusTable, 'tableId' | 'columnId'> | null,
+  tableId: string,
+  columnId: string
+) => focusTable?.tableId === tableId && focusTable.columnId === columnId;
+
 export function isEdit(
   focusTable: FocusTable | null,
   focusType: FocusType,
@@ -39,6 +47,7 @@ export function isEdit(
 
   switch (focusType) {
     case FocusType.tableName:
+    case FocusType.tableLogicalName:
     case FocusType.tableComment:
       return focusType === focusTable.focusType && focusTable.edit;
   }

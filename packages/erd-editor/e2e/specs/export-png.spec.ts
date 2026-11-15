@@ -76,15 +76,29 @@ function pngSize(path: string) {
   return { width: header.readUInt32BE(16), height: header.readUInt32BE(20) };
 }
 
-async function exportPng(erd: ErdEditorPage) {
+/**
+ * The export image dialog at one image pixel per scene unit, the scale every
+ * size below is stated in; the 2x default has a spec of its own.
+ */
+async function openExportDialog(erd: ErdEditorPage) {
   // Named rather than swept for: the menu opens downward from the click, and
   // an empty point low on a tall canvas puts Export below the viewport.
   await erd.openContextMenuAt(MENU_ORIGIN.x, MENU_ORIGIN.y);
 
   await erd.contextMenu.getByText('Export', { exact: true }).hover();
-  const png = erd.contextMenu.getByText('png', { exact: true });
-  await expect(png).toBeVisible();
-  await png.click();
+  const image = erd.contextMenu.getByText('Image', { exact: true });
+  await expect(image).toBeVisible();
+  await image.click();
+
+  const dialog = erd.host.getByRole('dialog', { name: 'Export image' });
+  await expect(dialog).toBeVisible();
+  await dialog.getByRole('button', { name: '1x', exact: true }).click();
+  return dialog;
+}
+
+async function exportPng(erd: ErdEditorPage) {
+  const dialog = await openExportDialog(erd);
+  await dialog.getByRole('button', { name: 'PNG', exact: true }).click();
 }
 
 /**
@@ -112,7 +126,7 @@ const toastTimeline = (erd: ErdEditorPage) =>
   erd.page.evaluate(() => Reflect.get(window, '__toastTimeline') as string[][]);
 
 const generating = (erd: ErdEditorPage) =>
-  erd.host.locator('.toast-container', { hasText: 'Exporting PNG…' });
+  erd.host.locator('.toast-container', { hasText: 'Exporting PNG' });
 
 const reduced = (erd: ErdEditorPage) =>
   erd.host.locator('.toast-container', {
@@ -135,7 +149,7 @@ test.describe('exporting the document as a png', () => {
     expect(pngSize(await file.path())).toEqual({ width: 2160, height: 2160 });
   });
 
-  test('draws the png at the zoom the editor is showing it at', async ({
+  test('draws the png at 100% whatever zoom the editor is showing it at', async ({
     erd,
   }) => {
     await erd.seed(document(spanFor(2160)));
@@ -150,9 +164,9 @@ test.describe('exporting the document as a png', () => {
     await exportPng(erd);
     const file = await download;
 
-    // The image holds the whole document either way. What the zoom decides is
-    // how many image pixels one scene unit was drawn with.
-    expect(pngSize(await file.path())).toEqual({ width: 864, height: 864 });
+    // The size the default zoom gives the image above: one image pixel per
+    // scene unit at 1x, which the zoom on screen has no say in.
+    expect(pngSize(await file.path())).toEqual({ width: 2160, height: 2160 });
   });
 
   test('draws every png in the shared worker, export after export', async ({
@@ -168,12 +182,14 @@ test.describe('exporting the document as a png', () => {
       }
     });
     await erd.seed(document(spanFor(1080)));
+    // The dialog stays open after a button, so every export is a press of it.
+    const dialog = await openExportDialog(erd);
 
     for (let run = 0; run < 3; run++) {
       const download = erd.page.waitForEvent('download', {
         timeout: EXPORT_TIMEOUT,
       });
-      await exportPng(erd);
+      await dialog.getByRole('button', { name: 'PNG', exact: true }).click();
       const file = await download;
 
       expect(pngSize(await file.path())).toEqual({ width: 1080, height: 1080 });
@@ -210,7 +226,7 @@ test.describe('exporting the document as a png', () => {
 
     await expect(reduced(erd)).toBeVisible();
     await expect(reduced(erd)).toContainText(
-      `The document is ${OVER_LIMIT}x${OVER_LIMIT}, past what a browser canvas can hold, so the PNG is ${CLAMPED}x${CLAMPED}`
+      `Reduced from ${OVER_LIMIT} × ${OVER_LIMIT} px to ${CLAMPED} × ${CLAMPED} px, past what a browser canvas can hold`
     );
     await expect(generating(erd)).toHaveCount(0);
 
@@ -218,11 +234,11 @@ test.describe('exporting the document as a png', () => {
     // holding both messages at once.
     const shown = (await toastTimeline(erd)).filter(toasts => toasts.length);
     expect(shown).toHaveLength(2);
-    expect(shown[0]).toEqual(['Exporting PNG…']);
+    expect(shown[0]).toEqual(['Exporting PNG']);
     expect(shown[1]).toHaveLength(1);
     expect(shown[1][0]).toContain('Exported at a reduced resolution');
     expect(shown[1][0]).toContain(
-      `The document is ${OVER_LIMIT}x${OVER_LIMIT}, past what a browser canvas can hold, so the PNG is ${CLAMPED}x${CLAMPED}`
+      `Reduced from ${OVER_LIMIT} × ${OVER_LIMIT} px to ${CLAMPED} × ${CLAMPED} px, past what a browser canvas can hold`
     );
 
     expect(pngSize(await file.path())).toEqual({

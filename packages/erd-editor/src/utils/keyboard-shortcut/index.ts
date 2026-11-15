@@ -1,7 +1,14 @@
 import { ValuesType } from '@/internal-types';
 import { hasAppleDevice } from '@/utils/device-detect';
 
-import { KeyBindingPress, parseKeybinding } from './utils';
+import {
+  KeyBindingPress,
+  matchesPress,
+  ModifierKey,
+  parseKeybinding,
+} from './utils';
+
+export { bindKeys, type KeyBindingHandlers } from './bindKeys';
 
 export type ShortcutOption = {
   shortcut: string;
@@ -13,13 +20,17 @@ export const KeyBindingName = {
   edit: 'edit',
   stop: 'stop',
   search: 'search',
+  findReplace: 'findReplace',
   undo: 'undo',
   redo: 'redo',
   addTable: 'addTable',
   addColumn: 'addColumn',
   addMemo: 'addMemo',
+  addTableGroup: 'addTableGroup',
+  groupSelectedTables: 'groupSelectedTables',
   removeTable: 'removeTable',
   removeColumn: 'removeColumn',
+  removeSelection: 'removeSelection',
   primaryKey: 'primaryKey',
   selectAllTable: 'selectAllTable',
   selectAllColumn: 'selectAllColumn',
@@ -38,13 +49,64 @@ export const KeyBindingName = {
 export type KeyBindingName = ValuesType<typeof KeyBindingName>;
 export const KeyBindingNameList = Object.values(KeyBindingName);
 
+/**
+ * The chords a press inside a floating panel still carries to the editor:
+ * Find and Replace's own, search, the document's undo and redo, and the zoom.
+ */
+export const PANEL_PASSING_BINDINGS: ReadonlyArray<KeyBindingName> = [
+  KeyBindingName.findReplace,
+  KeyBindingName.search,
+  KeyBindingName.undo,
+  KeyBindingName.redo,
+  KeyBindingName.zoomIn,
+  KeyBindingName.zoomOut,
+  KeyBindingName.zoomReset,
+];
+
 export type KeyBindingMap = Record<KeyBindingName, ShortcutOption[]>;
+
+/** The keys a panel moves or presses with, which the canvas would read as a move or an edit. */
+const PANEL_KEYS = new Set([
+  'ArrowUp',
+  'ArrowDown',
+  'ArrowLeft',
+  'ArrowRight',
+  'Tab',
+  'Enter',
+  ' ',
+  'Home',
+  'End',
+]);
+
+/**
+ * Whether a press inside a panel stops there: a press an IME still holds, a
+ * chord of the map outside the passing list, or a key the panel moves or
+ * presses with. A host that leaves Escape to the editor passes stop through.
+ */
+export function stopsAtPanel(
+  event: KeyboardEvent,
+  keyBindingMap: KeyBindingMap,
+  passing: ReadonlyArray<KeyBindingName> = PANEL_PASSING_BINDINGS
+): boolean {
+  if (isComposing(event)) return true;
+
+  const matches = (name: KeyBindingName) =>
+    matchesShortcut(event, keyBindingMap[name]);
+  if (passing.some(matches)) return false;
+  return PANEL_KEYS.has(event.key) || KeyBindingNameList.some(matches);
+}
 
 export const createKeyBindingMap = (): KeyBindingMap => ({
   [KeyBindingName.edit]: [{ shortcut: 'Enter' }],
   [KeyBindingName.stop]: [{ shortcut: 'Escape' }],
   [KeyBindingName.search]: [
     { shortcut: '$mod+KeyK', preventDefault: true, stopPropagation: true },
+  ],
+  // Every host's find, taken while the editor holds the keyboard: prevented, it
+  // opens no browser find bar, and stopped, it never reaches the window of a
+  // VS Code webview, which would hand it to the workbench.
+  [KeyBindingName.findReplace]: [
+    { shortcut: '$mod+KeyF', preventDefault: true, stopPropagation: true },
   ],
   [KeyBindingName.undo]: [
     { shortcut: '$mod+KeyZ', preventDefault: true, stopPropagation: true },
@@ -59,6 +121,15 @@ export const createKeyBindingMap = (): KeyBindingMap => ({
   [KeyBindingName.addTable]: [{ shortcut: 'Alt+KeyN', preventDefault: true }],
   [KeyBindingName.addColumn]: [{ shortcut: 'Alt+Enter', preventDefault: true }],
   [KeyBindingName.addMemo]: [{ shortcut: 'Alt+KeyM', preventDefault: true }],
+  // Stopped, as Alt+F and Alt+Z are, so a VS Code webview never hands the
+  // press to the workbench, whose Go menu Alt+G opens.
+  [KeyBindingName.addTableGroup]: [
+    { shortcut: 'Alt+KeyG', preventDefault: true, stopPropagation: true },
+  ],
+  // T, then G: two bare letters, which a caret keeps as text (useKeyBindingMap).
+  [KeyBindingName.groupSelectedTables]: [
+    { shortcut: 'KeyT KeyG', preventDefault: true },
+  ],
   [KeyBindingName.removeTable]: [
     { shortcut: '$mod+Backspace', preventDefault: true },
     { shortcut: '$mod+Delete', preventDefault: true },
@@ -66,6 +137,10 @@ export const createKeyBindingMap = (): KeyBindingMap => ({
   [KeyBindingName.removeColumn]: [
     { shortcut: 'Alt+Backspace', preventDefault: true },
     { shortcut: 'Alt+Delete', preventDefault: true },
+  ],
+  [KeyBindingName.removeSelection]: [
+    { shortcut: 'Delete', preventDefault: true },
+    { shortcut: 'Backspace', preventDefault: true },
   ],
   [KeyBindingName.primaryKey]: [{ shortcut: 'Alt+KeyK', preventDefault: true }],
   [KeyBindingName.selectAllTable]: [
@@ -108,13 +183,36 @@ export const createKeyBindingMap = (): KeyBindingMap => ({
   ],
 });
 
-const ModifierKey = {
-  Shift: 'Shift',
-  Meta: 'Meta',
-  Alt: 'Alt',
-  Control: 'Control',
-} as const;
-type ModifierKey = ValuesType<typeof ModifierKey>;
+/**
+ * Keeps the chords of the bindings named and empties every other binding, in
+ * place, so useKeyBindingMap binds those alone and a reader of any name still
+ * finds a list. In place, since the app context hands every reader this one object.
+ */
+export function pickKeyBindingMap(
+  keyBindingMap: KeyBindingMap,
+  names: ReadonlyArray<KeyBindingName>
+): void {
+  for (const name of KeyBindingNameList) {
+    if (!names.includes(name) && keyBindingMap[name].length) {
+      keyBindingMap[name] = [];
+    }
+  }
+}
+
+/**
+ * Whether the press is one of the chords given, matched as bindKeys matches a
+ * press, so a panel reads a binding as the editor root does. Of a sequence it
+ * is the last press, the one that would complete it at the root.
+ */
+export function matchesShortcut(
+  event: KeyboardEvent,
+  options: ReadonlyArray<ShortcutOption>
+): boolean {
+  return options.some(({ shortcut }) => {
+    const presses = parseKeybinding(shortcut);
+    return matchesPress(event, presses[presses.length - 1]);
+  });
+}
 
 const MacModifierKeyMap: Record<ModifierKey, string> = {
   [ModifierKey.Shift]: '⇧', // Shift

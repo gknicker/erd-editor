@@ -6,7 +6,7 @@ import {
 } from '@dineug/erd-editor/peer.js';
 import { afterEach, describe, expect, it } from 'vite-plus/test';
 
-import { TOOL_SCENARIOS } from '@/__test-utils__/scenarios';
+import { APPEND_SCENARIOS, TOOL_SCENARIOS } from '@/__test-utils__/scenarios';
 import { createSeedValue } from '@/__test-utils__/seed';
 import {
   EXCLUSION_REASONS,
@@ -29,9 +29,9 @@ const declared = () => sorted(actionTools.flatMap(tool => tool.actionTypes));
 
 describe('every change type is reachable or excluded with a reason', () => {
   it('counts the change types the engine lists', () => {
-    expect(ChangeActionTypes).toHaveLength(56);
-    expect(new Set(ChangeActionTypes).size).toBe(56);
-    expect(NOT_EMITTED).toHaveLength(7);
+    expect(ChangeActionTypes).toHaveLength(76);
+    expect(new Set(ChangeActionTypes).size).toBe(76);
+    expect(NOT_EMITTED).toHaveLength(19);
     expect(NO_DEDICATED_TOOL).toEqual(['editor.clear']);
   });
 
@@ -41,13 +41,13 @@ describe('every change type is reachable or excluded with a reason', () => {
     ).toEqual([]);
   });
 
-  it('covers every change type less the unemitted ones with a tool', () => {
+  it('covers every change type less the unemitted and pending ones with a tool', () => {
     const reachable = ChangeActionTypes.filter(
-      type => !NOT_EMITTED.includes(type)
+      type => !NOT_EMITTED.includes(type) && !PENDING_COVERAGE.includes(type)
     );
 
-    expect(reachable).toHaveLength(49);
-    expect(PENDING_COVERAGE).toEqual([]);
+    expect(reachable).toHaveLength(57);
+    expect(PENDING_COVERAGE).toHaveLength(0);
     expect(declared()).toEqual(sorted(reachable));
   });
 
@@ -126,5 +126,24 @@ describe('what a tool declares is what it emits', () => {
     }
 
     expect(sorted(emitted)).toEqual(declared());
+  });
+
+  it('emits only declared types in an import with mode append', () => {
+    for (const [name, args] of Object.entries(APPEND_SCENARIOS)) {
+      const tool = toolByName.get(name)!;
+      const peer = createPeerStore({ nickname: 'agent', presence: false });
+      peers.push(peer);
+      peer.setInitialValue(createSeedValue());
+
+      const types = runTool(peer, name, args).actions.map(({ type }) => type);
+
+      expect(types).toContain('table.add');
+      expect({
+        tool: name,
+        undeclared: types.filter(
+          type => !tool.actionTypes.includes(type as never)
+        ),
+      }).toEqual({ tool: name, undeclared: [] });
+    }
   });
 });

@@ -1,8 +1,7 @@
-import { toJson } from '@dineug/erd-editor-schema';
 import {
   cache,
+  createCustomElement,
   createRef,
-  defineCustomElement,
   FC,
   nextTick,
   observable,
@@ -14,9 +13,19 @@ import {
 import { fromEvent, throttleTime } from 'rxjs';
 
 import { appContext, createAppContext } from '@/components/appContext';
+import type { CustomElementClass } from '@/components/customElementClass';
+import Dictionary from '@/components/dictionary/Dictionary';
 import Erd from '@/components/erd/Erd';
+import { dropRelationshipHighlight } from '@/components/erd/relationshipHighlight';
+import Explorer from '@/components/explorer/Explorer';
+import ExplorerController from '@/components/explorer/explorer-controller/ExplorerController';
+import ExportImage from '@/components/export-image/ExportImage';
 import GeneratorCode from '@/components/generator-code/GeneratorCode';
 import GlobalStyles from '@/components/global-styles/GlobalStyles';
+import LocalePicker from '@/components/locale-picker/LocalePicker';
+import { localeContext } from '@/components/localeContext';
+import MapColumnsDialog from '@/components/map-columns/MapColumnsDialog';
+import { createScopeActions } from '@/components/quick-search/actions';
 import QuickSearch from '@/components/quick-search/QuickSearch';
 import SchemaSQL from '@/components/schema-sql/SchemaSQL';
 import Settings from '@/components/settings/Settings';
@@ -26,31 +35,31 @@ import { themeContext } from '@/components/themeContext';
 import ToastContainer from '@/components/toast-container/ToastContainer';
 import Toolbar from '@/components/toolbar/Toolbar';
 import Visualization from '@/components/visualization/Visualization';
-import { TOOLBAR_HEIGHT } from '@/constants/layout';
 import { Open } from '@/constants/open';
 import { CanvasType } from '@/constants/schema';
 import { DatabaseVendor } from '@/constants/sql/database';
 import {
   changeOpenMapAction,
   changeViewportAction,
-  validationIdsAction,
 } from '@/engine/modules/editor/atom.actions';
 import { SharedStore, SharedStoreConfig } from '@/engine/shared-store';
-import { RootState } from '@/engine/state';
 import { useKeyBindingMap } from '@/hooks/useKeyBindingMap';
 import { useUnmounted } from '@/hooks/useUnmounted';
+import type { LocaleOption } from '@/i18n/locales';
 import { observeThemeOverrides, resolveHostTheme } from '@/konva/theme';
-import { getSchemaGCService } from '@/services/schema-gc';
-import { procGC } from '@/services/schema-gc/procGC';
-import { ThemeOptions } from '@/themes/radix-ui-theme';
+import { Appearance, ThemeOptions } from '@/themes/radix-ui-theme';
 import { Theme as ThemeType } from '@/themes/tokens';
+import { isMiddleButtonPress } from '@/utils/domEvent';
 import { copyAction, pasteAction } from '@/utils/emitter';
+import { middlePanPress$ } from '@/utils/globalEventObservable';
 import { focusEvent, forceFocusEvent } from '@/utils/internalEvents';
 import { KeyBindingMap, KeyBindingName } from '@/utils/keyboard-shortcut';
+import { SchemaSQLOptions } from '@/utils/schema-sql';
 import { createText } from '@/utils/text';
 
 import * as styles from './ErdEditor.styles';
 import { useErdEditorAttachElement } from './useErdEditorAttachElement';
+import { hasToolbar, measureRoot, observeViewport } from './viewportLayout';
 
 declare global {
   interface HTMLElementTagNameMap {
@@ -62,24 +71,77 @@ export type ErdEditorProps = {
   readonly: boolean;
   systemDarkMode: boolean;
   enableThemeBuilder: boolean;
+  enableLocalePicker: boolean;
+  enableWelcomeScreen: boolean;
+};
+
+export type SchemaImportOptions = {
+  /**
+   * Where the imported tables land: 'auto' lays them out by their
+   * relationships before the document is replaced, as an import from the
+   * menu does, and 'grid', the default, replaces it at once with them in rows.
+   */
+  placement?: 'auto' | 'grid';
+  /**
+   * Whether the import takes the document's place, 'replace', the default, or
+   * joins it below the diagram as new tables, 'append', as Import and Add does.
+   */
+  mode?: 'replace' | 'append';
+};
+
+export type SchemaJSONImportOptions = {
+  /**
+   * Whether the document takes this one's place, 'replace', the default, or
+   * joins it below the diagram as new tables and memos, 'append'.
+   */
+  mode?: 'replace' | 'append';
+};
+
+/**
+ * Replaces the document with an import, or adds the import to it for an
+ * append, returning a Promise when it places first.
+ */
+export type SetSchema = {
+  (
+    value: string,
+    options: SchemaImportOptions & { placement: 'auto' }
+  ): Promise<void>;
+  (value: string, options?: SchemaImportOptions & { placement?: 'grid' }): void;
+  (value: string, options?: SchemaImportOptions): Promise<void> | void;
 };
 
 export interface ErdEditorElement extends ErdEditorProps, HTMLElement {
+  /** The document in the form a file saves; setting it replaces the document. */
   value: string;
+  /**
+   * The document as this editor holds it, removed entities and their order
+   * included, which a collaborator's setInitialValue takes so undo can bring
+   * them back. Never written to a file.
+   */
+  readonly runtimeValue: string;
   focus: () => void;
   blur: () => void;
   clear: () => void;
   destroy: () => void;
   setInitialValue: (value: string) => void;
   setPresetTheme: (themeOptions: Partial<ThemeOptions>) => void;
+  /** What the system appearance shows, for a host with its own light and dark; null follows the OS. */
+  setSystemAppearance: (appearance: Appearance | null) => void;
   setTheme: (theme: Partial<ThemeType>) => void;
+  /**
+   * 'system' follows the host's or the browser's language; a code fixes one.
+   * Emits nothing. Before any call the editor shows English, or follows system
+   * while enableLocalePicker is on.
+   */
+  setLocale: (locale: LocaleOption) => void;
+  /** What system means: the host UI language as a BCP 47 tag; null reads navigator.languages. */
+  setSystemLocale: (locale: string | null) => void;
   setKeyBindingMap: (
     keyBindingMap: Partial<
       Omit<
         KeyBindingMap,
         | typeof KeyBindingName.edit
         | typeof KeyBindingName.stop
-        | typeof KeyBindingName.search
         | typeof KeyBindingName.undo
         | typeof KeyBindingName.redo
         | typeof KeyBindingName.zoomIn
@@ -88,11 +150,20 @@ export interface ErdEditorElement extends ErdEditorProps, HTMLElement {
       >
     >
   ) => void;
-  setSchemaSQL: (value: string) => void;
-  setSchemaGraphQL: (value: string) => void;
-  setSchemaDBML: (value: string) => void;
-  setSchemaAML: (value: string) => void;
-  getSchemaSQL: (databaseVendor?: DatabaseVendor) => string;
+  setSchemaSQL: SetSchema;
+  setSchemaGraphQL: SetSchema;
+  setSchemaDBML: SetSchema;
+  setSchemaAML: SetSchema;
+  setSchemaJSON: (value: string, options?: SchemaJSONImportOptions) => void;
+  /**
+   * The DDL in the vendor given, else the database this editor shows, in the
+   * bracket it shows, as the options ask, a choice the vendor lacks falling
+   * back as the Schema SQL tab does; the before and after scripts are in it.
+   */
+  getSchemaSQL: (
+    databaseVendor?: DatabaseVendor,
+    options?: SchemaSQLOptions
+  ) => string;
   getSharedStore: (
     config?: SharedStoreConfig & {
       mouseTracker?: boolean;
@@ -102,20 +173,12 @@ export interface ErdEditorElement extends ErdEditorProps, HTMLElement {
   setDiffValue: (value: string) => void;
 }
 
-/**
- * Whether the toolbar is drawn. Zen mode takes it away over the canvas it was
- * entered from alone, or the tab that turned the mode on would be the only one
- * it could be turned off from.
- */
-const hasToolbar = ({ editor, settings }: RootState): boolean =>
-  !editor.zenMode || settings.canvasType !== CanvasType.ERD;
-
 const ErdEditor: FC<ErdEditorProps, ErdEditorElement> = (props, ctx) => {
   const text = createText();
   const getReadonly = () => props.readonly;
   const appContextValue = createAppContext(
     { toWidth: text.toWidth },
-    { getReadonly }
+    { getReadonly, readonlyEditState: true }
   );
   // The host hands the document over before the ResizeObserver below has
   // measured anything, and a load pulled against the store's default size
@@ -128,18 +191,26 @@ const ErdEditor: FC<ErdEditorProps, ErdEditorElement> = (props, ctx) => {
   const root = createRef<HTMLDivElement>();
   useKeyBindingMap(ctx, root);
 
-  const { theme, themeState, destroySet, hasDarkMode } =
-    useErdEditorAttachElement({
-      props,
-      ctx,
-      app: appContextValue,
-      root,
-    });
+  const {
+    theme,
+    themeState,
+    i18n,
+    resolveLocaleOption,
+    resolveSystemLocale,
+    destroySet,
+    hasDarkMode,
+  } = useErdEditorAttachElement({
+    props,
+    ctx,
+    app: appContextValue,
+    root,
+  });
   // Konva resolves no custom property, so the scene reads the palette as values
   // off this provider. What it carries is the cascade's answer rather than the
   // preset, which is how an --erd-editor-* override reaches a painted node.
   const sceneTheme = observable<ThemeType>({ ...theme }, { shallow: true });
   const themeProvider = useProvider(ctx, themeContext, sceneTheme);
+  const localeProvider = useProvider(ctx, localeContext, i18n);
   const { store, keydown$, emitter } = appContextValue;
   const { addUnsubscribe } = useUnmounted();
 
@@ -162,7 +233,10 @@ const ErdEditor: FC<ErdEditorProps, ErdEditorElement> = (props, ctx) => {
   });
 
   destroySet.add(provider.destroy);
+  destroySet.add(observeViewport(store));
+  destroySet.add(() => dropRelationshipHighlight(store.state.editor.id));
   destroySet.add(themeProvider.destroy);
+  destroySet.add(localeProvider.destroy);
   destroySet.add(watch(theme).subscribe(scheduleSceneTheme));
   destroySet.add(
     emitter.on({
@@ -217,48 +291,6 @@ const ErdEditor: FC<ErdEditorProps, ErdEditorElement> = (props, ctx) => {
     emitter.emit(pasteAction({ event }));
   };
 
-  const handleSchemaGC = () => {
-    getSchemaGCService()
-      ?.run(toJson(store.state))
-      .then(gcIds => {
-        const isChange =
-          gcIds.tableIds.length ||
-          gcIds.tableColumnIds.length ||
-          gcIds.relationshipIds.length ||
-          gcIds.indexIds.length ||
-          gcIds.indexColumnIds.length ||
-          gcIds.memoIds.length;
-
-        if (isChange) {
-          procGC(store.state, gcIds);
-          store.dispatchSync(validationIdsAction());
-        }
-      });
-  };
-
-  destroySet.add(emitter.on({ schemaGC: handleSchemaGC }));
-
-  /** The root as the observer last measured it, which the toolbar shares. */
-  let observed = { width: 0, height: 0 };
-
-  /**
-   * The canvas is the root less whatever the toolbar takes, and zen mode takes
-   * the toolbar away without the root changing size, so the viewport is applied
-   * from the mode as well as from the observer.
-   */
-  const applyViewport = () => {
-    const toolbar = hasToolbar(store.state) ? TOOLBAR_HEIGHT : 0;
-
-    store.dispatch(
-      changeViewportAction({
-        width: observed.width,
-        // A hidden host reports no height at all, which must not read as a
-        // viewport with a negative one.
-        height: Math.max(0, observed.height - toolbar),
-      })
-    );
-  };
-
   onMounted(() => {
     ctx.focus();
     resolveSceneTheme();
@@ -268,8 +300,7 @@ const ErdEditor: FC<ErdEditorProps, ErdEditorElement> = (props, ctx) => {
     const resizeObserver = new ResizeObserver(entries => {
       for (const entry of entries) {
         const { width, height } = entry.contentRect;
-        observed = { width, height };
-        applyViewport();
+        measureRoot(store, { width, height });
       }
     });
 
@@ -280,33 +311,38 @@ const ErdEditor: FC<ErdEditorProps, ErdEditorElement> = (props, ctx) => {
         resizeObserver.unobserve($root);
         resizeObserver.disconnect();
       },
-      watch(store.state.editor).subscribe(name => {
-        name === 'zenMode' && applyViewport();
-      }),
-      watch(store.state.settings).subscribe(name => {
-        name === 'canvasType' && applyViewport();
-      }),
       // The trailing edge is the load-bearing one: the last event of a burst is
       // the one describing the focus the element is left holding, and dropping
       // it parks the keyboard outside with the focus ring still painted.
       fromEvent(ctx, focusEvent.type)
         .pipe(throttleTime(50, undefined, { leading: true, trailing: true }))
         .subscribe(checkAndFocus),
-      fromEvent(ctx, forceFocusEvent.type).subscribe(ctx.focus)
+      fromEvent(ctx, forceFocusEvent.type).subscribe(ctx.focus),
+      // A middle press on the scene reaches this root as a main press does,
+      // though the pan stops it below and hands it on only as the forward.
+      middlePanPress$($root).subscribe(handlePress)
     );
   });
 
-  const handleOutsideClick = (event: MouseEvent) => {
+  /**
+   * A press outside the theme builder or the locale picker closes that panel,
+   * and a middle press takes the keyboard in, since every pan prevents that
+   * press, and with it the default that focuses this root on any other press.
+   */
+  const handlePress = (event: MouseEvent) => {
+    if (isMiddleButtonPress(event)) checkAndFocus();
+
     const el = event.target as HTMLElement | null;
     if (!el) return;
+    if (el.closest('.toolbar')) return;
 
     const { store } = appContextValue;
-    if (
-      store.state.editor.openMap[Open.themeBuilder] &&
-      !el.closest('.toolbar') &&
-      !el.closest('.theme-builder')
-    ) {
+    const { openMap } = store.state.editor;
+    if (openMap[Open.themeBuilder] && !el.closest('.theme-builder')) {
       store.dispatch(changeOpenMapAction({ [Open.themeBuilder]: false }));
+    }
+    if (openMap[Open.localePicker] && !el.closest('.locale-picker')) {
+      store.dispatch(changeOpenMapAction({ [Open.localePicker]: false }));
     }
   };
 
@@ -327,6 +363,8 @@ const ErdEditor: FC<ErdEditorProps, ErdEditorElement> = (props, ctx) => {
             styles.root,
             { dark: isDarkMode, 'none-focus': !state.isFocus },
           ]}
+          prop:lang={i18n.locale}
+          prop:dir={i18n.dir}
           tabindex="-1"
           on:keydown={handleKeydown}
           on:focus={handleFocus}
@@ -334,21 +372,31 @@ const ErdEditor: FC<ErdEditorProps, ErdEditorElement> = (props, ctx) => {
           on:focusout={handleFocusout}
           on:copy={handleCopy}
           on:paste={handlePaste}
-          on:mousedown={handleOutsideClick}
+          on:mousedown={handlePress}
         >
           {hasToolbar(store.state) ? (
             <Toolbar
               enableThemeBuilder={props.enableThemeBuilder}
+              enableLocalePicker={props.enableLocalePicker}
               readonly={props.readonly}
             />
           ) : null}
           {cache(
             settings.canvasType === CanvasType.ERD ? (
-              <div class={styles.scope}>
-                <Erd
-                  isDarkMode={isDarkMode}
-                  mouseTracking={state.mouseTracking}
-                />
+              // The Explorer stands left of the canvas in every language, as
+              // the canvas never mirrors; each takes the reader's direction inside.
+              <div class={styles.erdRow} prop:dir="ltr">
+                <Explorer readonly={props.readonly} />
+                <div class={styles.erdScope} prop:dir={i18n.dir}>
+                  <Erd
+                    isDarkMode={isDarkMode}
+                    mouseTracking={state.mouseTracking}
+                    readonly={props.readonly}
+                    enableWelcomeScreen={props.enableWelcomeScreen}
+                    enableThemeBuilder={props.enableThemeBuilder}
+                    enableLocalePicker={props.enableLocalePicker}
+                  />
+                </div>
               </div>
             ) : null
           )}
@@ -358,11 +406,18 @@ const ErdEditor: FC<ErdEditorProps, ErdEditorElement> = (props, ctx) => {
             </div>
           ) : settings.canvasType === CanvasType.schemaSQL ? (
             <div class={styles.scope}>
-              <SchemaSQL isDarkMode={isDarkMode} />
+              <SchemaSQL isDarkMode={isDarkMode} readonly={props.readonly} />
             </div>
           ) : settings.canvasType === CanvasType.generatorCode ? (
             <div class={styles.scope}>
-              <GeneratorCode isDarkMode={isDarkMode} />
+              <GeneratorCode
+                isDarkMode={isDarkMode}
+                readonly={props.readonly}
+              />
+            </div>
+          ) : settings.canvasType === CanvasType.dictionary ? (
+            <div class={styles.scope}>
+              <Dictionary readonly={props.readonly} />
             </div>
           ) : settings.canvasType === CanvasType.settings ? (
             <div class={styles.scope}>
@@ -373,7 +428,30 @@ const ErdEditor: FC<ErdEditorProps, ErdEditorElement> = (props, ctx) => {
           {props.enableThemeBuilder ? (
             <ThemeBuilder theme={themeState.options} />
           ) : null}
-          <QuickSearch />
+          {props.enableLocalePicker ? (
+            <LocalePicker
+              option={resolveLocaleOption()}
+              systemLocale={resolveSystemLocale()}
+            />
+          ) : null}
+          <ExportImage
+            themeOptions={themeState.options}
+            isDarkMode={isDarkMode}
+          />
+          <MapColumnsDialog readonly={props.readonly} isDarkMode={isDarkMode} />
+          <ExplorerController />
+          <QuickSearch
+            topLevel={createScopeActions}
+            readonly={props.readonly}
+            appearance={
+              props.enableThemeBuilder
+                ? themeState.options.appearance
+                : undefined
+            }
+            locale={
+              props.enableLocalePicker ? resolveLocaleOption() : undefined
+            }
+          />
           {text.span}
         </div>
       </>
@@ -381,12 +459,41 @@ const ErdEditor: FC<ErdEditorProps, ErdEditorElement> = (props, ctx) => {
   };
 };
 
-defineCustomElement('erd-editor', {
-  shadow: 'closed',
-  observedProps: {
-    readonly: Boolean,
-    systemDarkMode: Boolean,
-    enableThemeBuilder: Boolean,
-  },
-  render: ErdEditor,
-});
+const TAG_NAME = 'erd-editor';
+
+/**
+ * The element class, which nothing registers until defineErdEditor() runs or
+ * a caller defines it under a tag of its own.
+ */
+export const ErdEditorElement: CustomElementClass<ErdEditorElement> =
+  /* @__PURE__ */ createCustomElement<ErdEditorProps, ErdEditorElement>({
+    shadow: 'closed',
+    observedProps: {
+      readonly: Boolean,
+      systemDarkMode: Boolean,
+      enableThemeBuilder: Boolean,
+      enableLocalePicker: Boolean,
+      enableWelcomeScreen: Boolean,
+    },
+    render: ErdEditor,
+  });
+
+/**
+ * Defines erd-editor as ErdEditorElement. A second call leaves the definition
+ * as it is, and a tag another class already holds throws, naming the tag.
+ */
+export function defineErdEditor(): void {
+  const defined = customElements.get(TAG_NAME);
+
+  if (defined === ErdEditorElement) {
+    return;
+  }
+
+  if (defined) {
+    throw new Error(
+      `Another element class already defines the custom element name ${TAG_NAME}`
+    );
+  }
+
+  customElements.define(TAG_NAME, ErdEditorElement);
+}

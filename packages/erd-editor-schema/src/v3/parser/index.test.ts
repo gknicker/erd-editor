@@ -1,8 +1,17 @@
 import { describe, expect, it } from 'vite-plus/test';
 
-import { parser } from '@/v3/parser';
+import { createSchema, parser } from '@/v3/parser';
 import { OrderType } from '@/v3/schema/indexColumn.entity';
-import { Database } from '@/v3/schema/settings';
+import {
+  BracketType,
+  CanvasType,
+  Database,
+  InvertedLockSettings,
+  Language,
+  LockSettingTypeList,
+  NameCase,
+  NameViewMode,
+} from '@/v3/schema/settings';
 
 const SCHEMA_URL =
   'https://raw.githubusercontent.com/dineug/erd-editor/main/json-schema/schema.json';
@@ -18,12 +27,16 @@ describe('parser', () => {
   it('produces a fully defaulted document for an empty source', () => {
     const result = parser({});
 
-    expect(result.settings.width).toBe(2000);
+    expect(result.settings.zoomLevel).toBe(1);
     expect(result.doc).toEqual({
       tableIds: [],
       relationshipIds: [],
       indexIds: [],
       memoIds: [],
+      tableGroupIds: [],
+      wordIds: [],
+      termIds: [],
+      domainIds: [],
     });
     expect(result.collections).toEqual({
       tableEntities: {},
@@ -32,6 +45,10 @@ describe('parser', () => {
       indexEntities: {},
       indexColumnEntities: {},
       memoEntities: {},
+      tableGroupEntities: {},
+      wordEntities: {},
+      termEntities: {},
+      domainEntities: {},
     });
   });
 
@@ -50,18 +67,19 @@ describe('parser', () => {
   it('parses a full document', () => {
     const result = parser({
       settings: {
-        width: 3000,
         database: Database.PostgreSQL,
         zoomLevel: 0.7,
+        lockSettings: 63,
       },
       doc: {
         tableIds: ['t1'],
         relationshipIds: ['r1'],
         indexIds: ['i1'],
         memoIds: ['m1'],
+        tableGroupIds: ['g1'],
       },
       collections: {
-        tableEntities: { t1: { id: 't1', name: 'users' } },
+        tableEntities: { t1: { id: 't1', name: 'users', groupId: 'g1' } },
         tableColumnEntities: { c1: { id: 'c1', tableId: 't1', name: 'id' } },
         relationshipEntities: { r1: { id: 'r1', identification: true } },
         indexEntities: { i1: { id: 'i1', tableId: 't1', unique: true } },
@@ -69,10 +87,10 @@ describe('parser', () => {
           ic1: { id: 'ic1', indexId: 'i1', orderType: OrderType.DESC },
         },
         memoEntities: { m1: { id: 'm1', value: 'hello' } },
+        tableGroupEntities: { g1: { id: 'g1', name: 'billing' } },
       },
     });
 
-    expect(result.settings.width).toBe(3000);
     expect(result.settings.database).toBe(Database.PostgreSQL);
     expect(result.settings.zoomLevel).toBe(0.7);
     expect(result.doc.tableIds).toEqual(['t1']);
@@ -86,6 +104,215 @@ describe('parser', () => {
       OrderType.DESC
     );
     expect(result.collections.memoEntities.m1.value).toBe('hello');
+    expect(result.doc.tableGroupIds).toEqual(['g1']);
+    expect(result.collections.tableGroupEntities.g1.name).toBe('billing');
+    expect(result.collections.tableEntities.t1.groupId).toBe('g1');
+  });
+
+  it('reads a document saved before table groups as one with none', () => {
+    const result = parser({
+      doc: { tableIds: ['t1'] },
+      collections: { tableEntities: { t1: { id: 't1', name: 'users' } } },
+    });
+
+    expect(result.doc.tableGroupIds).toEqual([]);
+    expect(result.collections.tableGroupEntities).toEqual({});
+    expect(result.collections.tableEntities.t1.groupId).toBe('');
+  });
+
+  it('drops the meta every entity of an older file carries', () => {
+    const meta = { updateAt: 1, createAt: 1 };
+    const result = parser({
+      collections: {
+        tableEntities: { t1: { id: 't1', meta } },
+        tableColumnEntities: { c1: { id: 'c1', meta } },
+        relationshipEntities: { r1: { id: 'r1', meta } },
+        indexEntities: { i1: { id: 'i1', meta } },
+        indexColumnEntities: { ic1: { id: 'ic1', meta } },
+        memoEntities: { m1: { id: 'm1', meta } },
+        tableGroupEntities: { g1: { id: 'g1', meta } },
+        wordEntities: { fields: ['id', 'meta'], rows: [['w1', meta]] },
+        termEntities: { fields: ['id', 'meta'], rows: [['tm1', meta]] },
+        domainEntities: { fields: ['id', 'meta'], rows: [['d1', meta]] },
+      } as any,
+    });
+
+    for (const entities of Object.values(result.collections)) {
+      for (const entity of Object.values(entities)) {
+        expect(entity).not.toHaveProperty('meta');
+      }
+    }
+    expect(
+      Object.values(result.collections).map(e => Object.keys(e).length)
+    ).toEqual([1, 1, 1, 1, 1, 1, 1, 1, 1, 1]);
+  });
+
+  it('stacks entities saved without a z-index in their doc order', () => {
+    const result = parser({
+      doc: {
+        tableIds: ['t2', 't1', 't3'],
+        memoIds: ['m2', 'm1'],
+        tableGroupIds: ['g2', 'g1'],
+      },
+      collections: {
+        tableEntities: {
+          t1: { id: 't1' },
+          t2: { id: 't2' },
+          t3: { id: 't3', ui: { x: 10 } },
+        },
+        memoEntities: { m1: { id: 'm1' }, m2: { id: 'm2' } },
+        tableGroupEntities: { g1: { id: 'g1' }, g2: { id: 'g2' } },
+      },
+    });
+    const { tableEntities, memoEntities, tableGroupEntities } =
+      result.collections;
+
+    expect(tableEntities.t2.ui.zIndex).toBe(2);
+    expect(tableEntities.t1.ui.zIndex).toBe(3);
+    expect(tableEntities.t3.ui.zIndex).toBe(4);
+    expect(tableEntities.t3.ui.x).toBe(10);
+    expect(memoEntities.m2.ui.zIndex).toBe(5);
+    expect(memoEntities.m1.ui.zIndex).toBe(6);
+    expect(tableGroupEntities.g2.ui.zIndex).toBe(1);
+    expect(tableGroupEntities.g1.ui.zIndex).toBe(2);
+  });
+
+  it('stacks memos saved without a z-index over every table, past the highest one a table carries', () => {
+    const result = parser({
+      doc: { tableIds: ['t1', 't2'], memoIds: ['m1'] },
+      collections: {
+        tableEntities: {
+          t1: { id: 't1', ui: { zIndex: 40 } },
+          t2: { id: 't2' },
+        },
+        memoEntities: { m1: { id: 'm1' } },
+      },
+    });
+
+    expect(result.collections.memoEntities.m1.ui.zIndex).toBe(41);
+
+    const memosOnly = parser({
+      doc: { memoIds: ['m1'] },
+      collections: { memoEntities: { m1: { id: 'm1' } } },
+    });
+    expect(memosOnly.collections.memoEntities.m1.ui.zIndex).toBe(2);
+  });
+
+  it('keeps the z-index an entity carries and the default of one not listed', () => {
+    const result = parser({
+      doc: { tableIds: ['t1', 't2'], memoIds: ['m1'] },
+      collections: {
+        tableEntities: {
+          t1: { id: 't1', ui: { zIndex: 9 } },
+          t2: { id: 't2', ui: { zIndex: 'top' } },
+          t3: { id: 't3' },
+        },
+        memoEntities: { m1: { id: 'm1', ui: { zIndex: 0 } } },
+        tableGroupEntities: { g1: { id: 'g1', ui: { zIndex: 5 } } },
+      },
+    });
+    const { tableEntities, memoEntities, tableGroupEntities } =
+      result.collections;
+
+    expect(tableEntities.t1.ui.zIndex).toBe(9);
+    expect(tableEntities.t2.ui.zIndex).toBe(3);
+    expect(tableEntities.t3.ui.zIndex).toBe(2);
+    expect(memoEntities.m1.ui.zIndex).toBe(0);
+    expect(tableGroupEntities.g1.ui.zIndex).toBe(5);
+  });
+
+  it('stacks a doubly listed entity at its first place', () => {
+    const result = parser({
+      doc: { tableIds: ['t1', 't2', 't1'] },
+      collections: {
+        tableEntities: { t1: { id: 't1' }, t2: { id: 't2' } },
+      },
+    });
+
+    expect(result.collections.tableEntities.t1.ui.zIndex).toBe(2);
+    expect(result.collections.tableEntities.t2.ui.zIndex).toBe(3);
+  });
+
+  it('lets the last raw entry with an id decide whether it carries a z-index', () => {
+    const result = parser({
+      doc: { tableIds: ['x', 't1'] },
+      collections: {
+        tableEntities: {
+          a: { id: 't1', ui: { zIndex: 7 } },
+          b: { id: 't1' },
+          c: 'not an entity',
+          d: { name: 'no id', ui: { zIndex: 4 } },
+        },
+      },
+    });
+
+    expect(result.collections.tableEntities.t1.ui.zIndex).toBe(3);
+  });
+
+  it('stacks nothing from a collection that is not an object', () => {
+    const result = parser({
+      doc: { tableIds: ['t1'] },
+      collections: { tableEntities: [] },
+    });
+
+    expect(result.collections.tableEntities).toEqual({});
+  });
+
+  it('lists the entries a collection holds, in the order held, for a doc list the source leaves out', () => {
+    const result = parser({
+      doc: { tableIds: ['t1'] },
+      collections: {
+        tableEntities: { t1: { id: 't1' }, t2: { id: 't2' } },
+        relationshipEntities: {
+          r2: {},
+          a: { id: 'r1' },
+          r1: {},
+          x: 'not an entity',
+        },
+        indexEntities: { i1: { id: 'i1' } },
+        memoEntities: { m2: {}, m1: {} },
+        tableGroupEntities: { g1: { id: 'g1' } },
+      } as any,
+    });
+    const { doc, collections } = result;
+
+    expect(doc).toMatchObject({
+      tableIds: ['t1'],
+      relationshipIds: ['r2', 'r1'],
+      indexIds: ['i1'],
+      memoIds: ['m2', 'm1'],
+      tableGroupIds: ['g1'],
+    });
+    expect(collections.memoEntities.m2.ui.zIndex).toBe(3);
+    expect(collections.memoEntities.m1.ui.zIndex).toBe(4);
+    expect(collections.tableGroupEntities.g1.ui.zIndex).toBe(1);
+  });
+
+  it('keeps an empty doc list the source holds, past every entry it does not name', () => {
+    const result = parser({
+      doc: { tableIds: [], memoIds: [] },
+      collections: {
+        tableEntities: { t1: { id: 't1' } },
+        memoEntities: { m1: { id: 'm1' } },
+      },
+    });
+
+    expect(result.doc.tableIds).toEqual([]);
+    expect(result.doc.memoIds).toEqual([]);
+    expect(Object.keys(result.collections.tableEntities)).toEqual(['t1']);
+  });
+
+  it('stacks an entry without an id by its key', () => {
+    const result = parser({
+      doc: { tableIds: ['t1', 't2'] },
+      collections: {
+        tableEntities: { t1: { ui: { zIndex: 9 } }, t2: {} },
+      },
+    });
+    const { t1, t2 } = result.collections.tableEntities;
+
+    expect(t1.ui.zIndex).toBe(9);
+    expect(t2.ui.zIndex).toBe(3);
   });
 
   it('drops unknown top level keys', () => {
@@ -102,12 +329,213 @@ describe('parser', () => {
 
   it('is idempotent when re-parsing its own output', () => {
     const first = parser({
-      settings: { width: 4000 },
+      settings: { databaseName: 'shop' },
       doc: { tableIds: ['t1'] },
       collections: { tableEntities: { t1: { id: 't1', name: 'users' } } },
     });
     const second = parser(first);
 
     expect(second).toEqual(first);
+  });
+});
+
+describe('the dictionaries a parse reads', () => {
+  const WORD_FIELDS = ['id', 'name', 'abbreviation'];
+
+  it('reads each row by the names of the header, an unknown one ignored', () => {
+    const result = parser({
+      collections: {
+        wordEntities: {
+          fields: ['abbreviation', 'unit', 'id', 'name'],
+          rows: [['MBR', 'person', 'w1', '회원']],
+        },
+      },
+    });
+
+    expect(result.collections.wordEntities).toEqual({
+      w1: {
+        id: 'w1',
+        name: '회원',
+        abbreviation: 'MBR',
+        englishName: '',
+        description: '',
+        synonyms: '',
+        forbiddenWords: '',
+        order: 'a0',
+      },
+    });
+  });
+
+  it("keys a file's rows in their order, and keeps the keys a runtime value holds", () => {
+    const file = parser({
+      collections: {
+        wordEntities: {
+          fields: WORD_FIELDS,
+          rows: [
+            ['w2', 'B'],
+            ['w1', 'A'],
+          ],
+        },
+      },
+    });
+    expect(file.collections.wordEntities.w2.order).toBe('a0');
+    expect(file.collections.wordEntities.w1.order).toBe('a1');
+
+    const runtime = parser({
+      doc: { wordIds: ['w1', 'w2', 'w3'] },
+      collections: {
+        wordEntities: {
+          fields: ['id', 'name', 'order'],
+          rows: [
+            ['w1', 'A', 'a0V'],
+            ['w2', 'B', 'a00'],
+            ['w3', 'C', 'Zz'],
+          ],
+        },
+      },
+    });
+    const { w1, w2, w3 } = runtime.collections.wordEntities;
+    expect([w1.order, w3.order]).toEqual(['a0V', 'Zz']);
+    // A key nothing can be placed by is keyed after the greatest held.
+    expect(w2.order).toBe('a1');
+  });
+
+  it('takes the order of the rows where the doc names none, each id once', () => {
+    const result = parser({
+      collections: {
+        wordEntities: {
+          fields: WORD_FIELDS,
+          rows: [
+            ['w2', 'b'],
+            ['w1', 'a'],
+            ['w2', 'b again'],
+            ['', 'no id'],
+            [7, 'numeric id'],
+          ],
+        },
+        termEntities: { fields: ['id'], rows: [['10'], ['9']] },
+      },
+    });
+
+    expect(result.doc.wordIds).toEqual(['w2', 'w1']);
+    expect(result.doc.termIds).toEqual(['10', '9']);
+    expect(result.doc.domainIds).toEqual([]);
+    expect(result.collections.wordEntities.w2.name).toBe('b again');
+  });
+
+  it('takes the order the doc names, leaving a removed row out of it', () => {
+    const result = parser({
+      doc: { wordIds: ['w1'] },
+      collections: {
+        wordEntities: {
+          fields: WORD_FIELDS,
+          rows: [
+            ['w2', 'removed'],
+            ['w1', 'kept'],
+          ],
+        },
+      },
+    });
+
+    expect(result.doc.wordIds).toEqual(['w1']);
+    expect(Object.keys(result.collections.wordEntities)).toEqual(['w2', 'w1']);
+  });
+
+  it('clears a domain link naming no domain, on a column and on a term', () => {
+    const result = parser({
+      doc: { domainIds: ['d1'] },
+      collections: {
+        tableColumnEntities: {
+          c1: { id: 'c1', domainId: 'd1' },
+          c2: { id: 'c2', domainId: 'missing', dataType: 'INT' },
+          c3: { id: 'c3', domainId: 'd2' },
+        },
+        termEntities: {
+          fields: ['id', 'name', 'physicalName', 'domainId'],
+          rows: [
+            ['tm1', 'a', '', 'missing'],
+            ['tm2', 'b', '', 'd1'],
+          ],
+        },
+        domainEntities: {
+          fields: ['id', 'name'],
+          rows: [
+            ['d1', 'kept'],
+            ['d2', 'removed'],
+          ],
+        },
+      },
+    });
+    const { tableColumnEntities, termEntities } = result.collections;
+
+    expect(tableColumnEntities.c1.domainId).toBe('d1');
+    expect(tableColumnEntities.c2.domainId).toBe('');
+    expect(tableColumnEntities.c2.dataType).toBe('INT');
+    expect(tableColumnEntities.c3.domainId).toBe('d2');
+    expect(termEntities.tm1.domainId).toBe('');
+    expect(termEntities.tm2.domainId).toBe('d1');
+  });
+
+  it('reads the dictionaries of a document an editor holds, keyed by id', () => {
+    const held = parser({
+      collections: {
+        wordEntities: { fields: WORD_FIELDS, rows: [['w1', 'a', 'A']] },
+        domainEntities: { fields: ['id', 'name'], rows: [['d1', 'amount']] },
+      },
+    });
+
+    expect(parser(held)).toEqual(held);
+  });
+
+  it('reads a header without rows, or a collection of another shape, as empty', () => {
+    const result = parser({
+      collections: {
+        wordEntities: { fields: WORD_FIELDS },
+        termEntities: [['tm1']],
+        domainEntities: 'd1',
+      },
+    } as any);
+
+    expect(result.collections.wordEntities).toEqual({});
+    expect(result.collections.termEntities).toEqual({});
+    expect(result.collections.domainEntities).toEqual({});
+  });
+});
+
+describe('createSchema', () => {
+  it('locks every lockable setting of a document created from nothing', () => {
+    const { lockSettings, lockedValues } = createSchema().settings;
+
+    expect(lockSettings).toBe(
+      LockSettingTypeList.reduce((acc, bit) => acc | bit, 0) &
+        ~InvertedLockSettings
+    );
+    expect(lockedValues).toEqual({
+      originX: 0,
+      originY: 0,
+      zoomLevel: 1,
+      canvasType: CanvasType.ERD,
+      language: Language.GraphQL,
+      tableNameCase: NameCase.pascalCase,
+      columnNameCase: NameCase.camelCase,
+      bracketType: BracketType.none,
+      nameViewMode: NameViewMode.physical,
+    });
+  });
+
+  it('is the empty source the parser defaults', () => {
+    expect(createSchema()).toEqual(parser({}));
+    expect(parser({ settings: {} }).settings).toEqual(createSchema().settings);
+  });
+
+  it('hands out a new document each time', () => {
+    const first = createSchema();
+    first.settings.lockSettings = 0;
+    first.settings.lockedValues.originX = 40;
+    first.doc.tableIds.push('t1');
+
+    expect(createSchema().settings.lockSettings).toBe(63);
+    expect(createSchema().settings.lockedValues.originX).toBe(0);
+    expect(createSchema().doc.tableIds).toEqual([]);
   });
 });

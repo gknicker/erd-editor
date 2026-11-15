@@ -8,6 +8,9 @@ export const ActionType = {
   addRelationship: 'relationship.add',
   removeRelationship: 'relationship.remove',
   changeRelationshipType: 'relationship.changeType',
+  changeRelationshipOnDelete: 'relationship.changeOnDelete',
+  changeRelationshipOnUpdate: 'relationship.changeOnUpdate',
+  changeRelationshipColumns: 'relationship.changeColumns',
 } as const;
 export type ActionType = ValuesType<typeof ActionType>;
 
@@ -15,6 +18,9 @@ export type ActionMap = {
   [ActionType.addRelationship]: {
     id: string;
     relationshipType: number;
+    /** Absent from an editor that predates the referential actions. */
+    onDelete?: number;
+    onUpdate?: number;
     start: RelationshipPoint;
     end: RelationshipPoint;
   };
@@ -24,6 +30,19 @@ export type ActionMap = {
   [ActionType.changeRelationshipType]: {
     id: string;
     value: number;
+  };
+  [ActionType.changeRelationshipOnDelete]: {
+    id: string;
+    value: number;
+  };
+  [ActionType.changeRelationshipOnUpdate]: {
+    id: string;
+    value: number;
+  };
+  [ActionType.changeRelationshipColumns]: {
+    id: string;
+    start: RelationshipPoint;
+    end: RelationshipPoint;
   };
 };
 

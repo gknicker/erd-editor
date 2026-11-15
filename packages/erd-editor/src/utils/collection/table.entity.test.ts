@@ -1,33 +1,29 @@
-import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
+import { describe, expect, it } from 'vite-plus/test';
 
 import { COLUMN_MIN_WIDTH } from '@/constants/layout';
 import { createTable } from '@/utils/collection/table.entity';
 
 describe('createTable', () => {
-  afterEach(() => {
-    vi.useRealTimers();
-  });
-
   it('creates a table filled with defaults when no value is given', () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date('2024-01-02T03:04:05.000Z'));
-    const now = Date.now();
-
     const table = createTable();
 
     expect(table.name).toBe('');
+    expect(table.logicalName).toBe('');
     expect(table.comment).toBe('');
     expect(table.columnIds).toEqual([]);
     expect(table.seqColumnIds).toEqual([]);
+    expect(table.groupId).toBe('');
+    expect(table.nameDerived).toBe(false);
     expect(table.ui).toEqual({
       x: 200,
       y: 100,
       zIndex: 2,
       widthName: COLUMN_MIN_WIDTH,
+      widthLogicalName: COLUMN_MIN_WIDTH,
       widthComment: COLUMN_MIN_WIDTH,
       color: '',
     });
-    expect(table.meta).toEqual({ updateAt: now, createAt: now });
+    expect(table).not.toHaveProperty('meta');
     expect(typeof table.id).toBe('string');
     expect(table.id.length).toBeGreaterThan(0);
   });
@@ -58,6 +54,7 @@ describe('createTable', () => {
       y: 100,
       zIndex: 2,
       widthName: 120,
+      widthLogicalName: COLUMN_MIN_WIDTH,
       widthComment: COLUMN_MIN_WIDTH,
       color: '#ff0000',
     });
@@ -72,14 +69,26 @@ describe('createTable', () => {
     expect(table.columnIds).toEqual(['column-1']);
   });
 
-  it('merges a partial meta object', () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date('2024-05-06T07:08:09.000Z'));
-    const now = Date.now();
+  it('drops a __proto__ key parsed from a peer or tool payload', () => {
+    const table = createTable(
+      JSON.parse(
+        '{"__proto__": {"admin": true}, "name": "users", "ui": {"__proto__": {"admin": true}, "x": 5}}'
+      )
+    );
 
-    const table = createTable({ meta: { createAt: 7 } });
-
-    expect(table.meta).toEqual({ createAt: 7, updateAt: now });
+    expect(table.name).toBe('users');
+    expect(Object.getPrototypeOf(table)).toBe(Object.prototype);
+    expect(Object.getPrototypeOf(table.ui)).toBe(Object.prototype);
+    expect(table.ui).toEqual({
+      x: 5,
+      y: 100,
+      zIndex: 2,
+      widthName: COLUMN_MIN_WIDTH,
+      widthLogicalName: COLUMN_MIN_WIDTH,
+      widthComment: COLUMN_MIN_WIDTH,
+      color: '',
+    });
+    expect(({} as Record<string, unknown>).admin).toBeUndefined();
   });
 
   it('treats an explicitly undefined value as no value', () => {

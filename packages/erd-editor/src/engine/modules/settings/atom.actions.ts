@@ -1,31 +1,73 @@
-import { replaceOperator } from '@dineug/erd-editor-schema';
+import {
+  isSettingLocked,
+  replaceOperator,
+  setSettingLock,
+} from '@dineug/erd-editor-schema';
 import { createAction } from '@dineug/r-html';
-import { clamp, isNil } from 'es-toolkit';
+import { clamp, isNil, isNumber, isString, pick } from 'es-toolkit';
 import { round } from 'es-toolkit/compat';
 
+import {
+  CanvasType,
+  DDLScriptPositionList,
+  LockSettingFields,
+  LockSettingType,
+  LockSettingTypeList,
+  NameViewMode,
+  Show,
+} from '@/constants/schema';
+import type { EngineContext } from '@/engine/context';
+import {
+  isOwnStep,
+  VIEWPORT_REGISTER,
+  ViewportRegister,
+} from '@/engine/geometryRegisters';
 import { Viewport } from '@/engine/modules/editor/state';
+import { keepFocusShown } from '@/engine/modules/editor/utils/nameView';
+import {
+  releaseMemos,
+  releaseTableGroups,
+} from '@/engine/modules/editor/utils/releaseHidden';
 import {
   viewScrollToAction,
   viewStreamScrollToAction,
 } from '@/engine/modules/editor/view.actions';
 import { RootState } from '@/engine/state';
 import { Tag } from '@/engine/tag';
-import { Point } from '@/internal-types';
+import { Point, ValuesType } from '@/internal-types';
 import { getFrozenOrigin, getViewContentRect } from '@/konva/scene/viewFreeze';
 import { getSceneTransform } from '@/konva/scene/viewport';
 import { bHas } from '@/utils/bit';
 import type { GeometrySource } from '@/utils/draw-relationship/geometrySource';
 import {
   hasBracketType,
+  hasCanvasType,
   hasColumnType,
   hasDatabase,
   hasLanguage,
   hasNameCase,
+  hasNameViewMode,
   maxWidthCommentInRange,
+  zoomInRange,
   zoomLevelInRange,
 } from '@/utils/validation';
 
-import { ActionMap, ActionType, ReducerType } from './actions';
+import {
+  ActionMap,
+  ActionType,
+  CodeSetting,
+  CodeSettingLocks,
+  CodeSettingPayload,
+  ReducerType,
+} from './actions';
+import {
+  endScreenBaseline,
+  isScreenWrite,
+  keepScreenBaseline,
+  landScreenBaseline,
+  settingWriteTarget,
+  viewportWriteTarget,
+} from './screenBaseline';
 import {
   contentScrollRange,
   openingOrigin,
@@ -56,34 +98,103 @@ const changeDatabaseName: ReducerType<typeof ActionType.changeDatabaseName> = (
   );
 };
 
+/**
+ * Writes the origin or the zoom through its register, so the latest absolute
+ * write of each wins on every replica in any order. A screen turn writes the
+ * screen alone, outside the register.
+ */
+function replaceViewport(
+  state: RootState,
+  version: number,
+  path: ValuesType<typeof ViewportRegister>,
+  tags: number | undefined,
+  write: () => void
+): void {
+  if (isScreenWrite(tags)) return write();
+
+  replaceOperator(
+    state.lww,
+    version,
+    VIEWPORT_REGISTER,
+    'settings',
+    path,
+    write
+  );
+}
+
+/**
+ * A step of a pan or a zoom: the store's own adds through the register, and
+ * every other, each step a replica takes among them, outside it (isOwnStep).
+ */
+function stepViewport(
+  state: RootState,
+  context: EngineContext,
+  version: number | undefined,
+  path: ValuesType<typeof ViewportRegister>,
+  tags: number | undefined,
+  write: () => void
+): void {
+  if (!isOwnStep(context, tags)) return write();
+
+  replaceViewport(
+    state,
+    version ?? context.clock.getVersion(),
+    path,
+    tags,
+    write
+  );
+}
+
 export const changeZoomLevelAction = createAction<
   ActionMap[typeof ActionType.changeZoomLevel]
 >(ActionType.changeZoomLevel);
 
 const changeZoomLevel: ReducerType<typeof ActionType.changeZoomLevel> = (
-  { settings },
-  { payload: { value }, tags }
+  state,
+  { payload: { value }, version, tags },
+  { clock }
 ) => {
   if (!isNil(tags) && bHas(tags, Tag.following)) {
     return;
   }
 
-  settings.zoomLevel = zoomLevelInRange(value);
+  const target = viewportWriteTarget(state, tags);
+  replaceViewport(
+    state,
+    version ?? clock.getVersion(),
+    ViewportRegister.zoomLevel,
+    tags,
+    () => {
+      target.zoomLevel = zoomLevelInRange(value);
+    }
+  );
 };
 
 export const streamZoomLevelAction = createAction<
   ActionMap[typeof ActionType.streamZoomLevel]
 >(ActionType.streamZoomLevel);
 
+/** A step of a zoom, added to the zoom it finds, as streamScrollTo adds to the origin. */
 const streamZoomLevel: ReducerType<typeof ActionType.streamZoomLevel> = (
-  { settings },
-  { payload: { value }, tags }
+  state,
+  { payload: { value }, version, tags },
+  context
 ) => {
   if (!isNil(tags) && bHas(tags, Tag.following)) {
     return;
   }
 
-  settings.zoomLevel = zoomLevelInRange(settings.zoomLevel + value);
+  const target = viewportWriteTarget(state, tags);
+  stepViewport(
+    state,
+    context,
+    version,
+    ViewportRegister.zoomLevel,
+    tags,
+    () => {
+      target.zoomLevel = zoomLevelInRange(target.zoomLevel + value);
+    }
+  );
 };
 
 export type ScrollRanges = {
@@ -224,15 +335,32 @@ export const scrollToAction = createAction<
  * they mean, and the range widens to hold it rather than the request bending.
  */
 const scrollTo: ReducerType<typeof ActionType.scrollTo> = (
-  { settings },
-  { payload: { originX, originY }, tags }
+  state,
+  { payload: { originX, originY }, version, tags },
+  { clock }
 ) => {
   if (!isNil(tags) && bHas(tags, Tag.following)) {
     return;
   }
+  // A screen turn names where the screen stands, so a load's pull still waiting
+  // for the first measure gives way to it and the origin counts as shown, as a
+  // rejoin keeping the screen needs.
+  if (isScreenWrite(tags)) {
+    state.editor.scrollPullPending = false;
+    state.editor.originShown = true;
+  }
 
-  settings.originX = round(originX, 4);
-  settings.originY = round(originY, 4);
+  const target = viewportWriteTarget(state, tags);
+  replaceViewport(
+    state,
+    version ?? clock.getVersion(),
+    ViewportRegister.origin,
+    tags,
+    () => {
+      target.originX = round(originX, 4);
+      target.originY = round(originY, 4);
+    }
+  );
 };
 
 export const streamScrollToAction = createAction<
@@ -245,15 +373,19 @@ export const streamScrollToAction = createAction<
  * drawn from follows the origin out rather than holding it back.
  */
 const streamScrollTo: ReducerType<typeof ActionType.streamScrollTo> = (
-  { settings },
-  { payload: { movementX, movementY }, tags }
+  state,
+  { payload: { movementX, movementY }, version, tags },
+  context
 ) => {
   if (!isNil(tags) && bHas(tags, Tag.following)) {
     return;
   }
 
-  settings.originX = round(settings.originX + movementX, 4);
-  settings.originY = round(settings.originY + movementY, 4);
+  const target = viewportWriteTarget(state, tags);
+  stepViewport(state, context, version, ViewportRegister.origin, tags, () => {
+    target.originX = round(target.originX + movementX, 4);
+    target.originY = round(target.originY + movementY, 4);
+  });
 };
 
 /**
@@ -281,11 +413,24 @@ export const changeShowAction = createAction<
   ActionMap[typeof ActionType.changeShow]
 >(ActionType.changeShow);
 
+/**
+ * Sets or clears the show bits named. A peer's change under a held screen
+ * lands in the baseline alone, so it releases and refocuses nothing shown.
+ */
 const changeShow: ReducerType<typeof ActionType.changeShow> = (
-  { settings },
-  { payload: { show, value } }
+  state,
+  { payload: { show, value }, tags }
 ) => {
-  settings.show = value ? settings.show | show : settings.show & ~show;
+  const target = settingWriteTarget(state, tags, 'show');
+  const bits = target.show ?? 0;
+  target.show = value ? bits | show : bits & ~show;
+  if (target !== state.settings) return;
+
+  if (value && bHas(show, Show.hideTableGroup)) releaseTableGroups(state);
+  if (value && bHas(show, Show.hideMemo)) releaseMemos(state);
+  // The domain's own cell decides whether the logical view's type cell stands
+  // for the domain, so a focus there moves onto the cell that now draws it.
+  if (bHas(show, Show.columnDomain)) keepFocusShown(state);
 };
 
 export const changeDatabaseAction = createAction<
@@ -293,39 +438,113 @@ export const changeDatabaseAction = createAction<
 >(ActionType.changeDatabase);
 
 const changeDatabase: ReducerType<typeof ActionType.changeDatabase> = (
-  { settings },
-  { payload: { value } }
+  state,
+  { payload: { value }, tags }
 ) => {
   if (hasDatabase(value)) {
-    settings.database = value;
+    settingWriteTarget(state, tags, 'database').database = value;
   }
 };
+
+/** The tab the reader stands on, which a canvas type lock taken on Settings holds. */
+export function rememberCanvasType({ settings, editor }: RootState): void {
+  if (settings.canvasType !== CanvasType.settings) {
+    editor.lastCanvasType = settings.canvasType;
+  }
+}
 
 export const changeCanvasTypeAction = createAction<
   ActionMap[typeof ActionType.changeCanvasType]
 >(ActionType.changeCanvasType);
 
 const changeCanvasType: ReducerType<typeof ActionType.changeCanvasType> = (
-  { settings },
+  state,
   { payload: { value }, tags }
 ) => {
   if (!isNil(tags) && bHas(tags, Tag.following)) {
     return;
   }
 
-  settings.canvasType = value;
+  const target = settingWriteTarget(state, tags, 'canvasType');
+  if (target !== state.settings) {
+    target.canvasType = value;
+    return;
+  }
+
+  rememberCanvasType(state);
+  state.settings.canvasType = value;
+  // Only the ERD tab draws a table group, so a draw armed there ends with it.
+  if (value !== CanvasType.ERD) state.editor.drawTableGroup = false;
 };
+
+/**
+ * Writes a code setting through its register, so the latest setter or unlock
+ * of it wins on every peer, whatever order they arrive in. A screen turn
+ * writes the screen alone, outside the register.
+ */
+function replaceCodeSetting(
+  state: RootState,
+  version: number,
+  field: CodeSetting,
+  value: number,
+  tags: number | undefined
+): void {
+  const target = settingWriteTarget(state, tags, field);
+  const write = () => {
+    target[field] = value;
+  };
+  if (isScreenWrite(tags)) return write();
+
+  replaceOperator(
+    state.lww,
+    version,
+    'settings.code',
+    'settings',
+    field,
+    write
+  );
+}
+
+/**
+ * A code setter: through its register when shared or while its lock is off,
+ * and a readonly reader's screen turn as ever. Any other under the lock shows
+ * on the store that made it alone, outside the register; the rest drop it.
+ */
+function setCodeSetting(
+  state: RootState,
+  context: EngineContext,
+  field: CodeSetting,
+  { value, shared }: CodeSettingPayload,
+  version: number | undefined,
+  tags: number | undefined
+): void {
+  if (
+    shared === true ||
+    isScreenWrite(tags) ||
+    !isSettingLocked(state.settings.lockSettings, CodeSettingLocks[field])
+  ) {
+    const safeVersion = version ?? context.clock.getVersion();
+    replaceCodeSetting(state, safeVersion, field, value, tags);
+    return;
+  }
+  // A peer's, as an editor built before this rule still sends, and each one a
+  // replica takes, since it strips the tags and has no screen of its own.
+  if (!isOwnStep(context, tags)) return;
+
+  settingWriteTarget(state, tags, field)[field] = value;
+}
 
 export const changeLanguageAction = createAction<
   ActionMap[typeof ActionType.changeLanguage]
 >(ActionType.changeLanguage);
 
 const changeLanguage: ReducerType<typeof ActionType.changeLanguage> = (
-  { settings },
-  { payload: { value } }
+  state,
+  { payload, version, tags },
+  context
 ) => {
-  if (hasLanguage(value)) {
-    settings.language = value;
+  if (hasLanguage(payload.value)) {
+    setCodeSetting(state, context, 'language', payload, version, tags);
   }
 };
 
@@ -335,9 +554,9 @@ export const changeTableNameCaseAction = createAction<
 
 const changeTableNameCase: ReducerType<
   typeof ActionType.changeTableNameCase
-> = ({ settings }, { payload: { value } }) => {
-  if (hasNameCase(value)) {
-    settings.tableNameCase = value;
+> = (state, { payload, version, tags }, context) => {
+  if (hasNameCase(payload.value)) {
+    setCodeSetting(state, context, 'tableNameCase', payload, version, tags);
   }
 };
 
@@ -347,9 +566,9 @@ export const changeColumnNameCaseAction = createAction<
 
 const changeColumnNameCase: ReducerType<
   typeof ActionType.changeColumnNameCase
-> = ({ settings }, { payload: { value } }) => {
-  if (hasNameCase(value)) {
-    settings.columnNameCase = value;
+> = (state, { payload, version, tags }, context) => {
+  if (hasNameCase(payload.value)) {
+    setCodeSetting(state, context, 'columnNameCase', payload, version, tags);
   }
 };
 
@@ -358,11 +577,12 @@ export const changeBracketTypeAction = createAction<
 >(ActionType.changeBracketType);
 
 const changeBracketType: ReducerType<typeof ActionType.changeBracketType> = (
-  { settings },
-  { payload: { value } }
+  state,
+  { payload, version, tags },
+  context
 ) => {
-  if (hasBracketType(value)) {
-    settings.bracketType = value;
+  if (hasBracketType(payload.value)) {
+    setCodeSetting(state, context, 'bracketType', payload, version, tags);
   }
 };
 
@@ -374,16 +594,6 @@ const changeRelationshipDataTypeSync: ReducerType<
   typeof ActionType.changeRelationshipDataTypeSync
 > = ({ settings }, { payload: { value } }) => {
   settings.relationshipDataTypeSync = value;
-};
-
-export const changeRelationshipOptimizationAction = createAction<
-  ActionMap[typeof ActionType.changeRelationshipOptimization]
->(ActionType.changeRelationshipOptimization);
-
-const changeRelationshipOptimization: ReducerType<
-  typeof ActionType.changeRelationshipOptimization
-> = ({ settings }, { payload: { value } }) => {
-  settings.relationshipOptimization = value;
 };
 
 export const changeColumnOrderAction = createAction<
@@ -419,17 +629,274 @@ const changeMaxWidthComment: ReducerType<
     value === -1 ? value : maxWidthCommentInRange(value);
 };
 
+export const changeLockSettingsAction = createAction<
+  ActionMap[typeof ActionType.changeLockSettings]
+>(ActionType.changeLockSettings);
+
+type LockedValues = RootState['settings']['lockedValues'];
+
+/** What each locked field may hold, as the setter of its setting would take it. */
+const isLockedValue: Record<keyof LockedValues, (value: any) => boolean> = {
+  originX: Number.isFinite,
+  originY: Number.isFinite,
+  zoomLevel: value => isNumber(value) && zoomInRange(value) === value,
+  canvasType: value => hasCanvasType(value) && value !== CanvasType.settings,
+  language: hasLanguage,
+  tableNameCase: hasNameCase,
+  columnNameCase: hasNameCase,
+  bracketType: hasBracketType,
+  nameViewMode: hasNameViewMode,
+};
+
+/**
+ * The code settings' locks: while one holds, each store shows its own value of
+ * the setting, so an unlock of one carries the unlocker's onto every peer.
+ */
+export const CodeLockSettings = Object.values(CodeSettingLocks).reduce(
+  (acc, bit) => acc | bit,
+  0
+);
+
+/**
+ * The locks whose unlock carries the unlocker's value onto every peer: the
+ * code settings, and the name view each reader held as its own while locked.
+ */
+export const UnlockCarriedSettings =
+  CodeLockSettings | LockSettingType.unlockNameViewMode;
+
+/**
+ * Locks each setting named at the values the payload carries, the last lock
+ * or unlock of it winning on every peer, and leaves one sent wrong as it was.
+ * An unlock sets each valid value it carries as a shared setter would, won or not.
+ */
+const changeLockSettings: ReducerType<typeof ActionType.changeLockSettings> = (
+  state,
+  { payload: { lockSettingType, value, values }, version, tags },
+  { clock }
+) => {
+  const { settings, lww } = state;
+  const safeVersion = version ?? clock.getVersion();
+
+  LockSettingTypeList.forEach(bit => {
+    if (!bHas(lockSettingType, bit)) return;
+
+    const fields = LockSettingFields[bit];
+    const carried = pick(values, fields);
+    const valid = fields.filter(field => isLockedValue[field](carried[field]));
+    if (value && valid.length < fields.length) return;
+
+    replaceOperator(
+      lww,
+      safeVersion,
+      'settings.lockSettings',
+      'settings',
+      String(bit),
+      () => {
+        if (value) Object.assign(settings.lockedValues, carried);
+        settings.lockSettings = setSettingLock(
+          settings.lockSettings,
+          bit,
+          value
+        );
+      }
+    );
+
+    // Outside the lock's register, so an unlock that crosses a newer relock
+    // shows the same value on every peer whichever of the two comes first.
+    if (value || !bHas(UnlockCarriedSettings, bit)) return;
+    valid.forEach(field =>
+      field === 'nameViewMode'
+        ? replaceNameViewMode(
+            state,
+            safeVersion,
+            carried.nameViewMode as NameViewModeValue
+          )
+        : replaceCodeSetting(
+            state,
+            safeVersion,
+            field as CodeSetting,
+            carried[field] as number,
+            tags
+          )
+    );
+  });
+};
+
 export const changeIgnoreSaveSettingsAction = createAction<
   ActionMap[typeof ActionType.changeIgnoreSaveSettings]
 >(ActionType.changeIgnoreSaveSettings);
 
+/**
+ * Changes nothing, the locks having replaced the switch. Only a replica takes
+ * it (ReplicaChangeActionTypes), so a batch an agent written before the locks
+ * sends still gets the save its hub waits on, and the element reports none.
+ */
 const changeIgnoreSaveSettings: ReducerType<
   typeof ActionType.changeIgnoreSaveSettings
-> = ({ settings }, { payload: { saveSettingType, value } }) => {
-  settings.ignoreSaveSettings = value
-    ? settings.ignoreSaveSettings | saveSettingType
-    : settings.ignoreSaveSettings & ~saveSettingType;
+> = () => {};
+
+export const changeDDLScriptAction = createAction<
+  ActionMap[typeof ActionType.changeDDLScript]
+>(ActionType.changeDDLScript);
+
+/**
+ * Sets one Schema SQL script through its own register, so a peer's edit of
+ * the other script never overwrites it; a position or value no editor sends
+ * changes nothing.
+ */
+const changeDDLScript: ReducerType<typeof ActionType.changeDDLScript> = (
+  { settings, lww },
+  { payload: { position, value }, version },
+  { clock }
+) => {
+  if (!DDLScriptPositionList.includes(position) || !isString(value)) return;
+
+  const safeVersion = version ?? clock.getVersion();
+  replaceOperator(
+    lww,
+    safeVersion,
+    'settings.ddlScripts',
+    'settings',
+    position,
+    () => {
+      settings.ddlScripts = { ...settings.ddlScripts, [position]: value };
+    }
+  );
 };
+
+type NameViewModeValue = ValuesType<typeof NameViewMode>;
+
+/**
+ * Shows another name view on this store's screen, the focus going onto the
+ * cell that now draws what it stood on.
+ */
+function showNameViewMode(state: RootState, value: NameViewModeValue): void {
+  state.settings.nameViewMode = value;
+  keepFocusShown(state);
+}
+
+/**
+ * Writes the name view through its register, which the shared setter and an
+ * unlock both write through, so the latest of them wins on every peer. What
+ * it lands is the document's view, so a screen held over it ends.
+ */
+function replaceNameViewMode(
+  state: RootState,
+  version: number,
+  value: NameViewModeValue
+): void {
+  replaceOperator(
+    state.lww,
+    version,
+    'settings.nameViewMode',
+    'settings',
+    'nameViewMode',
+    () => {
+      endScreenBaseline(state.editor, 'nameViewMode');
+      showNameViewMode(state, value);
+    }
+  );
+}
+
+export const changeNameViewModeAction = createAction<
+  ActionMap[typeof ActionType.changeNameViewMode]
+>(ActionType.changeNameViewMode);
+
+/**
+ * A shared switch writes the register every peer and replica share. Any other
+ * shows on the store whose editor sent it alone, outside the register, and the
+ * rest drop it whatever its tags say, since a replica strips them.
+ */
+const changeNameViewMode: ReducerType<typeof ActionType.changeNameViewMode> = (
+  state,
+  { payload: { value, shared, editorId }, version, tags },
+  { clock }
+) => {
+  if (!hasNameViewMode(value)) return;
+
+  const screen = isScreenWrite(tags);
+  if (shared === true && !screen) {
+    replaceNameViewMode(state, version ?? clock.getVersion(), value);
+    return;
+  }
+  if (editorId !== state.editor.id) return;
+
+  if (screen) {
+    keepScreenBaseline(state, 'nameViewMode');
+  } else {
+    endScreenBaseline(state.editor, 'nameViewMode');
+  }
+  showNameViewMode(state, value);
+};
+
+/**
+ * The switch a reader makes: shared while the lock is off and the store may
+ * edit, its own screen otherwise. The caller passes the store's readonly flag,
+ * which no state holds.
+ */
+export const toNameViewModeAction = (
+  state: RootState,
+  value: NameViewModeValue,
+  readonly: boolean
+) =>
+  changeNameViewModeAction({
+    value,
+    shared:
+      !readonly &&
+      !isSettingLocked(
+        state.settings.lockSettings,
+        LockSettingType.unlockNameViewMode
+      ),
+    editorId: state.editor.id,
+  });
+
+/** Every lock this release knows, the rest of lockSettings a later one's. */
+const LOCK_KNOWN = LockSettingTypeList.reduce((acc, bit) => acc | bit, 0);
+
+/**
+ * Lands the settings of a load that replaces the document: each lock through
+ * its register, a bit no lock owns taken from the load as show is, and each
+ * setting locked once it lands but the view keeping the screen.
+ */
+export function landLoadedSettings(
+  state: RootState,
+  loaded: RootState['settings'],
+  version: number,
+  tags?: number
+): void {
+  const { settings, lww } = state;
+  const { lockSettings, lockedValues, ...screen } = settings;
+  Object.assign(settings, loaded, {
+    lockSettings:
+      (lockSettings & LOCK_KNOWN) | (loaded.lockSettings & ~LOCK_KNOWN),
+    lockedValues: { ...lockedValues },
+  });
+
+  LockSettingTypeList.forEach(bit => {
+    const fields = LockSettingFields[bit];
+
+    replaceOperator(
+      lww,
+      version,
+      'settings.lockSettings',
+      'settings',
+      String(bit),
+      () => {
+        settings.lockSettings = bHas(loaded.lockSettings, bit)
+          ? settings.lockSettings | bit
+          : settings.lockSettings & ~bit;
+        Object.assign(settings.lockedValues, pick(loaded.lockedValues, fields));
+      }
+    );
+    if (
+      bit !== LockSettingType.viewport &&
+      isSettingLocked(settings.lockSettings, bit)
+    ) {
+      Object.assign(settings, pick(screen, fields));
+    }
+  });
+  landScreenBaseline(state, screen, tags);
+}
 
 export const settingsReducers = {
   [ActionType.changeDatabaseName]: changeDatabaseName,
@@ -445,10 +912,12 @@ export const settingsReducers = {
   [ActionType.changeColumnNameCase]: changeColumnNameCase,
   [ActionType.changeBracketType]: changeBracketType,
   [ActionType.changeRelationshipDataTypeSync]: changeRelationshipDataTypeSync,
-  [ActionType.changeRelationshipOptimization]: changeRelationshipOptimization,
   [ActionType.changeColumnOrder]: changeColumnOrder,
   [ActionType.changeMaxWidthComment]: changeMaxWidthComment,
+  [ActionType.changeLockSettings]: changeLockSettings,
   [ActionType.changeIgnoreSaveSettings]: changeIgnoreSaveSettings,
+  [ActionType.changeDDLScript]: changeDDLScript,
+  [ActionType.changeNameViewMode]: changeNameViewMode,
 };
 
 export const actions = {
@@ -465,8 +934,10 @@ export const actions = {
   changeColumnNameCaseAction,
   changeBracketTypeAction,
   changeRelationshipDataTypeSyncAction,
-  changeRelationshipOptimizationAction,
   changeColumnOrderAction,
   changeMaxWidthCommentAction,
+  changeLockSettingsAction,
   changeIgnoreSaveSettingsAction,
+  changeDDLScriptAction,
+  changeNameViewModeAction,
 };

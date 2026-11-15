@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vite-plus/test';
 
 import * as styles from '@/components/theme-builder/ThemeBuilder.styles';
 import { floatingShadow } from '@/styles/elevation.styles';
-import { fontSize5, typography } from '@/styles/typography.styles';
+import { typography } from '@/styles/typography.styles';
 
 describe('ThemeBuilder.styles', () => {
   it('compiles every export to a distinct non empty class identifier', () => {
@@ -12,8 +12,8 @@ describe('ThemeBuilder.styles', () => {
       String(styles.subTitle),
       String(styles.palette),
       String(styles.color),
-      String(styles.lightDarkButtonGroup),
-      String(styles.lightDarkButton),
+      String(styles.appearanceButtonGroup),
+      String(styles.appearanceButton),
       String(styles.vertical),
     ];
 
@@ -33,11 +33,13 @@ describe('ThemeBuilder.styles', () => {
 
     expect(source).toContain('position: absolute');
     expect(source).toContain('top: 46px');
-    expect(source).toContain('left: 16px');
+    // On the side a line starts from, so a right-to-left editor hangs it at the right.
+    expect(source).toContain('inset-inline-start: 16px');
+    expect(source).not.toMatch(/\b(left|right):/);
     // A raised descendant of the tab wrapper would otherwise paint over this
     // panel, which that wrapper holds in no stacking context of its own.
     expect(source).toContain('z-index: 1');
-    expect(source).toContain('padding: 24px');
+    expect(source).toContain('padding: 12px');
     expect(source).toContain('width: 360px');
     expect(source).toContain('border-radius: 6px');
     expect(source).toContain(
@@ -47,20 +49,19 @@ describe('ThemeBuilder.styles', () => {
     expect(styles.root.values).toEqual([floatingShadow]);
   });
 
-  it('renders the heading with the active color and the level 5 font size', () => {
+  it('renders the heading in the active color at the size the locale picker heads with', () => {
     const source = styles.title.strings.join('');
 
     expect(source).toContain('color: var(--active)');
-    expect(source).toContain('margin-bottom: 24px');
-    expect(styles.title.values).toEqual([fontSize5]);
+    expect(styles.title.values).toEqual([typography.normal]);
   });
 
-  it('renders section subtitles with normal typography and top spacing', () => {
+  it('renders section subtitles in paragraph typography, spaced off the section above', () => {
     const source = styles.subTitle.strings.join('');
 
-    expect(source).toContain('margin-top: 24px');
-    expect(source).toContain('color: var(--active)');
-    expect(styles.subTitle.values).toEqual([typography.normal]);
+    expect(source).toContain('margin-top: 12px');
+    expect(source).toContain('color: var(--foreground)');
+    expect(styles.subTitle.values).toEqual([typography.paragraph]);
   });
 
   it('lays the swatch palette out as a ten column grid', () => {
@@ -71,7 +72,7 @@ describe('ThemeBuilder.styles', () => {
       'grid-template-columns: repeat(10, minmax(0, 1fr))'
     );
     expect(source).toContain('gap: 8px');
-    expect(source).toContain('margin-top: 12px');
+    expect(source).toContain('margin-top: 8px');
     expect(styles.palette.values).toEqual([]);
   });
 
@@ -88,19 +89,22 @@ describe('ThemeBuilder.styles', () => {
     expect(styles.color.values).toEqual([]);
   });
 
-  it('lays the appearance buttons out as a two column grid', () => {
-    const source = styles.lightDarkButtonGroup.strings.join('');
+  it('lays the three appearance buttons out as a three column grid that never wraps a label', () => {
+    const source = styles.appearanceButtonGroup.strings.join('');
 
     expect(source).toContain('display: grid');
     expect(source).toContain(
-      'grid-template-columns: repeat(2, minmax(0, 1fr))'
+      'grid-template-columns: repeat(3, minmax(max-content, 1fr))'
+    );
+    expect(styles.appearanceButton.strings.join('')).toContain(
+      'padding-inline: 8px'
     );
     expect(source).toContain('gap: 8px');
-    expect(styles.lightDarkButtonGroup.values).toEqual([]);
+    expect(styles.appearanceButtonGroup.values).toEqual([]);
   });
 
   it('styles an appearance button with hover fill and a selected border', () => {
-    const source = styles.lightDarkButton.strings.join('');
+    const source = styles.appearanceButton.strings.join('');
 
     expect(source).toContain('display: flex');
     expect(source).toContain('align-items: center');
@@ -112,7 +116,7 @@ describe('ThemeBuilder.styles', () => {
     expect(source).toContain('background-color: var(--column-hover)');
     expect(source).toContain('&.selected');
     expect(source).toContain('border-color: var(--gray-color-12)');
-    expect(styles.lightDarkButton.values).toEqual([typography.paragraph]);
+    expect(styles.appearanceButton.values).toEqual([typography.paragraph]);
   });
 
   it('renders the icon-to-label spacer as a fixed width full height gap', () => {

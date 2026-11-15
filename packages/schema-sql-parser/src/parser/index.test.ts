@@ -50,6 +50,7 @@ describe('schemaSQLParser', () => {
           },
         ],
         indexes: [],
+        keys: [],
         foreignKeys: [],
       },
     ]);
@@ -106,6 +107,8 @@ describe('schemaSQLParser', () => {
       {
         type: 'alter.table.add.primaryKey',
         name: 'users',
+        constraintName: '',
+        usingIndexName: '',
         columnNames: ['id', 'email'],
       },
     ]);
@@ -120,6 +123,8 @@ describe('schemaSQLParser', () => {
       {
         type: 'alter.table.add.primaryKey',
         name: 'users',
+        constraintName: 'users_pkey',
+        usingIndexName: '',
         columnNames: ['id'],
       },
     ]);
@@ -137,6 +142,8 @@ describe('schemaSQLParser', () => {
         columnNames: ['user_id'],
         refTableName: 'users',
         refColumnNames: ['id'],
+        onDelete: '',
+        onUpdate: '',
       },
     ]);
   });
@@ -148,8 +155,218 @@ describe('schemaSQLParser', () => {
       {
         type: 'alter.table.add.unique',
         name: 'users',
-        columnNames: ['email'],
+        constraintName: '',
+        usingIndexName: '',
+        columns: [{ name: 'email', sort: 'ASC' }],
       },
+    ]);
+  });
+
+  it('parses the ALTER TABLE ADD DEFAULT FOR an SSMS script writes', () => {
+    const ast = schemaSQLParser(
+      'ALTER TABLE [dbo].[Orders] ADD  CONSTRAINT [DF_Orders_Qty]  DEFAULT ((0)) FOR [Qty]\n' +
+        'GO\n' +
+        'ALTER TABLE [dbo].[Orders] ADD  DEFAULT (getdate()) FOR [Created]\n' +
+        'GO\n'
+    );
+
+    expect(ast).toEqual([
+      {
+        type: 'alter.table.add.default',
+        name: 'Orders',
+        columnName: 'Qty',
+        default: '0',
+      },
+      {
+        type: 'alter.table.add.default',
+        name: 'Orders',
+        columnName: 'Created',
+        default: 'getdate()',
+      },
+    ]);
+  });
+
+  it('keeps the statement after an ADD DEFAULT that names no column', () => {
+    const ast = schemaSQLParser(
+      'ALTER TABLE t ADD DEFAULT 0\nGO\nCREATE TABLE x (a INT)\nGO',
+      { database: 'MSSQL' }
+    );
+
+    expect(ast).toContainEqual(
+      expect.objectContaining({ type: 'create.table', name: 'x' })
+    );
+  });
+
+  it('still reads a unique key the ALTER adds after its DEFAULT clause', () => {
+    const ast = schemaSQLParser(
+      "ALTER TABLE t ADD CONSTRAINT df DEFAULT ('UNIQUE') FOR a, CONSTRAINT uq UNIQUE (b);" +
+        "COMMENT ON TABLE t IS 'x';"
+    );
+
+    expect(ast).toEqual([
+      {
+        type: 'alter.table.add.default',
+        name: 't',
+        columnName: 'a',
+        default: "'UNIQUE'",
+      },
+      {
+        type: 'alter.table.add.unique',
+        name: 't',
+        constraintName: 'uq',
+        usingIndexName: '',
+        columns: [{ name: 'b', sort: 'ASC' }],
+      },
+      { type: 'comment.on.table', name: 't', comment: 'x' },
+    ]);
+  });
+
+  it('reads the serial and identity columns pg_dump sets apart from their table', () => {
+    const ast = schemaSQLParser(`
+      CREATE TABLE public.users (
+          id integer NOT NULL,
+          code integer NOT NULL,
+          name text
+      );
+      ALTER TABLE public.users OWNER TO postgres;
+      CREATE SEQUENCE public.users_id_seq
+          AS integer
+          START WITH 1
+          INCREMENT BY 1
+          NO MINVALUE
+          NO MAXVALUE
+          CACHE 1;
+      ALTER SEQUENCE public.users_id_seq OWNED BY public.users.id;
+      ALTER TABLE public.users ALTER COLUMN code ADD GENERATED ALWAYS AS IDENTITY (
+          SEQUENCE NAME public.users_code_seq
+          START WITH 1
+          INCREMENT BY 1
+          NO MINVALUE
+          NO MAXVALUE
+          CACHE 1
+      );
+      ALTER TABLE ONLY public.users ALTER COLUMN id SET DEFAULT nextval('public.users_id_seq'::regclass);
+      ALTER TABLE ONLY public.users
+          ADD CONSTRAINT users_pkey PRIMARY KEY (id);
+    `);
+
+    expect(ast.map(statement => statement.type)).toEqual([
+      'create.table',
+      'alter.table.alter.column.autoIncrement',
+      'alter.table.alter.column.autoIncrement',
+      'alter.table.add.primaryKey',
+    ]);
+    expect(ast.slice(1, 3)).toEqual([
+      {
+        type: 'alter.table.alter.column.autoIncrement',
+        name: 'users',
+        columnName: 'code',
+      },
+      {
+        type: 'alter.table.alter.column.autoIncrement',
+        name: 'users',
+        columnName: 'id',
+      },
+    ]);
+  });
+
+  it('reads on past an ALTER TABLE the source cut off before its action', () => {
+    const ast = schemaSQLParser(
+      'ALTER TABLE t ALTER COLUMN c\n' +
+        'CREATE TABLE x (a INT);\n' +
+        'ALTER TABLE t\n' +
+        'ALTER TABLE u ADD PRIMARY KEY (id);\n' +
+        'ALTER TABLE v ALTER COLUMN a DROP NOT NULL,\n' +
+        'ALTER TABLE w ALTER COLUMN b ADD GENERATED ALWAYS AS IDENTITY;\n' +
+        'ALTER TABLE t ALTER COLUMN\n' +
+        'CREATE TABLE y (b INT);\n' +
+        'ALTER TABLE t ALTER\n' +
+        'ALTER TABLE y ADD PRIMARY KEY (b);\n' +
+        'ALTER TABLE t ALTER COLUMN\n' +
+        'CREATE INDEX i ON y (b);\n' +
+        'ALTER TABLE t ALTER\n' +
+        "COMMENT ON TABLE y IS 'note';"
+    );
+
+    expect(ast.map(statement => statement.type)).toEqual([
+      'create.table',
+      'alter.table.add.primaryKey',
+      'alter.table.alter.column.autoIncrement',
+      'create.table',
+      'alter.table.add.primaryKey',
+      'create.index',
+      'comment.on.table',
+    ]);
+    expect(ast[1]).toMatchObject({ name: 'u', columnNames: ['id'] });
+    expect(ast[2]).toMatchObject({ name: 'w', columnName: 'b' });
+    expect(ast[3]).toMatchObject({ name: 'y' });
+    expect(ast[4]).toMatchObject({ name: 'y', columnNames: ['b'] });
+    expect(ast[5]).toMatchObject({ name: 'i', tableName: 'y' });
+    expect(ast[6]).toMatchObject({ name: 'y', comment: 'note' });
+  });
+
+  it('reads the MS_Description extended properties as table and column comments', () => {
+    const ast = schemaSQLParser(
+      "EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'Order header' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'Orders'\n" +
+        'GO\n' +
+        "EXEC sys.sp_addextendedproperty @name=N'Caption', @value=N'x' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'Orders'\n" +
+        'GO\n' +
+        "EXECUTE sys.sp_addextendedproperty 'MS_Description',\n" +
+        "  'How many', 'user', dbo, 'table', 'Orders', 'column', 'Qty'\n" +
+        'GO\n'
+    );
+
+    expect(ast).toEqual([
+      { type: 'comment.on.table', name: 'Orders', comment: 'Order header' },
+      {
+        type: 'comment.on.column',
+        tableName: 'Orders',
+        columnName: 'Qty',
+        comment: 'How many',
+      },
+    ]);
+  });
+
+  // The editor's MSSQL export writes each unique key as an ALTER right before
+  // the comments, and the ALTER read on until the next statement it knew.
+  it('ends an ALTER TABLE, a CREATE TABLE or a COMMENT ON at the call', () => {
+    const comment =
+      "EXECUTE sys.sp_addextendedproperty 'MS_Description', 'c', 'schema', 'dbo', 'table', 'a'\nGO\n";
+    const ast = schemaSQLParser(
+      'CREATE TABLE a (id INT)\nGO\n' +
+        comment +
+        'ALTER TABLE a ADD CONSTRAINT UQ_a_id UNIQUE (id)\nGO\n' +
+        comment +
+        'ALTER TABLE a ADD DEFAULT 0 FOR id\nGO\n' +
+        comment +
+        "COMMENT ON TABLE a IS 'x'\n" +
+        comment
+    );
+
+    expect(ast.map(statement => statement.type)).toEqual([
+      'create.table',
+      'comment.on.table',
+      'alter.table.add.unique',
+      'comment.on.table',
+      'alter.table.add.default',
+      'comment.on.table',
+      'comment.on.table',
+      'comment.on.table',
+    ]);
+  });
+
+  it('keeps the statement after a call its arguments leave open', () => {
+    const ast = schemaSQLParser(
+      'EXEC sp_addextendedproperty\n' +
+        'CREATE TABLE a (id INT)\n' +
+        "EXEC sp_addextendedproperty N'MS_Description', N'c', N'SCHEMA', N'dbo', N'TABLE', N'a',\n" +
+        'CREATE TABLE b (id INT)\n'
+    );
+
+    expect(ast.map(statement => statement.type)).toEqual([
+      'create.table',
+      'comment.on.table',
+      'create.table',
     ]);
   });
 
@@ -253,6 +470,53 @@ describe('schemaSQLParser', () => {
     expect(ast.map(statement => statement.type)).toEqual(['create.table']);
   });
 
+  // Read as an escape, the quote in front of the + left the literal open
+  // until the next quote and swallowed the CREATE TABLE between them.
+  it('keeps the table behind a T-SQL literal that ends in a backslash', () => {
+    const ast = schemaSQLParser(
+      [
+        "CREATE VIEW dbo.v AS SELECT 'C:\\'+name AS p FROM t;",
+        'GO',
+        "CREATE TABLE [dbo].[orders] ([id] [int] NOT NULL, [note] [varchar](10) DEFAULT 'n');",
+        'GO',
+        'CREATE TABLE [dbo].[items] ([id] [int] NOT NULL);',
+        'GO',
+      ].join('\n')
+    );
+
+    expect(ast.map(statement => (statement as { name: string }).name)).toEqual([
+      'orders',
+      'items',
+    ]);
+  });
+
+  // SQL Server stores a default with no spaces around its operators, and the
+  // quote after +N once opened a literal that ran to the end of the source.
+  it('keeps the statements behind a literal glued to an operator', () => {
+    const ast = schemaSQLParser(
+      [
+        "CREATE TABLE [dbo].[U]([Label] [nvarchar](40) NULL DEFAULT (N'a'+N' (b)'), [Id] [int] NOT NULL) ON [PRIMARY]",
+        'GO',
+        'CREATE TABLE [dbo].[V]([UId] [int] NULL) ON [PRIMARY]',
+        'GO',
+        'ALTER TABLE [dbo].[V]  WITH CHECK ADD  CONSTRAINT [FK_V_U] FOREIGN KEY([UId]) REFERENCES [dbo].[U] ([Id])',
+        'GO',
+      ].join('\n')
+    );
+
+    expect(ast.map(statement => statement.type)).toEqual([
+      'create.table',
+      'create.table',
+      'alter.table.add.foreignKey',
+    ]);
+    expect(ast[0]).toMatchObject({
+      columns: [
+        { name: 'Label', default: "N'a' + N' (b)'" },
+        { name: 'Id', default: '' },
+      ],
+    });
+  });
+
   it('keeps parsing after a statement that consumes no closing semicolon', () => {
     const ast = schemaSQLParser(
       'CREATE TABLE a (id INT) CREATE TABLE b (id INT)'
@@ -287,6 +551,7 @@ describe('schemaSQLParser', () => {
           },
         ],
         indexes: [],
+        keys: [],
         foreignKeys: [],
       },
     ]);

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vite-plus/test';
 
 import { v2ToV3 } from '@/convert/v2ToV3';
+import { toDocumentJson } from '@/storageForm';
 import { type ERDEditorSchemaV2, schemaV2Parser } from '@/v2';
 import { SchemaV3Constants } from '@/v3';
 import { migrateScrollToOrigin } from '@/v3/parser/migrateScroll';
@@ -15,6 +16,7 @@ const {
   Language,
   NameCase,
   OrderType,
+  ReferentialAction,
   RelationshipType,
   Show,
   StartRelationshipType,
@@ -261,12 +263,16 @@ describe('v2ToV3', () => {
       'https://raw.githubusercontent.com/dineug/erd-editor/main/json-schema/schema.json'
     );
     expect(Object.keys(result.collections).sort()).toEqual([
+      'domainEntities',
       'indexColumnEntities',
       'indexEntities',
       'memoEntities',
       'relationshipEntities',
       'tableColumnEntities',
       'tableEntities',
+      'tableGroupEntities',
+      'termEntities',
+      'wordEntities',
     ]);
   });
 
@@ -274,15 +280,30 @@ describe('v2ToV3', () => {
     it('copies scalar canvas values and forces the ERD canvas type', () => {
       const { settings } = v2ToV3(createSchemaV2());
 
-      expect(settings.width).toBe(3000);
-      expect(settings.height).toBe(4000);
-      expect(settings.scrollTop).toBe(-100);
-      expect(settings.scrollLeft).toBe(-200);
       expect(settings.zoomLevel).toBe(0.7);
       expect(settings.databaseName).toBe('sample-db');
       expect(settings.canvasType).toBe(SchemaV3Constants.CanvasType.ERD);
       expect(settings.relationshipDataTypeSync).toBe(false);
-      expect(settings.relationshipOptimization).toBe(true);
+    });
+
+    it('keeps none of the canvas fields v3 no longer holds', () => {
+      const { settings } = v2ToV3(createSchemaV2());
+
+      for (const field of [
+        'width',
+        'height',
+        'scrollTop',
+        'scrollLeft',
+        'relationshipOptimization',
+      ]) {
+        expect(settings).not.toHaveProperty(field);
+      }
+    });
+
+    it('starts both Schema SQL scripts empty, since v2 has no slot for them', () => {
+      const { settings } = v2ToV3(createSchemaV2());
+
+      expect(settings.ddlScripts).toEqual({ before: '', after: '' });
     });
 
     it('migrates the v2 legacy scroll onto the origin pair', () => {
@@ -357,6 +378,12 @@ describe('v2ToV3', () => {
       expect(v2ToV3(schemaV2).settings.show).toBe(0);
     });
 
+    it('leaves table groups shown, since v2 has no hide bit for them', () => {
+      const { settings } = v2ToV3(createSchemaV2());
+
+      expect(settings.show & Show.hideTableGroup).toBe(0);
+    });
+
     it('maps enum-ish string values onto v3 bit values', () => {
       const { settings } = v2ToV3(createSchemaV2());
 
@@ -377,7 +404,7 @@ describe('v2ToV3', () => {
     it('falls back to defaults for unknown enum strings', () => {
       const schemaV2 = createSchemaV2();
       schemaV2.canvas.database = 'Unknown' as any;
-      schemaV2.canvas.language = 'Rust' as any;
+      schemaV2.canvas.language = 'Haskell' as any;
       schemaV2.canvas.tableCase = 'kebabCase' as any;
       schemaV2.canvas.columnCase = 'kebabCase' as any;
       schemaV2.canvas.bracketType = 'curly' as any;
@@ -391,10 +418,26 @@ describe('v2ToV3', () => {
       expect(settings.bracketType).toBe(BracketType.none);
     });
 
-    it('translates a complete columnOrder', () => {
+    it('translates a complete columnOrder, the logical name before the name and the domain after the data type', () => {
       const { settings } = v2ToV3(createSchemaV2());
 
       expect(settings.columnOrder).toEqual([
+        ColumnType.columnComment,
+        ColumnType.columnDefault,
+        ColumnType.columnAutoIncrement,
+        ColumnType.columnUnique,
+        ColumnType.columnNotNull,
+        ColumnType.columnDataType,
+        ColumnType.columnDomain,
+        ColumnType.columnLogicalName,
+        ColumnType.columnName,
+      ]);
+    });
+
+    it('saves the order of a v2 document in the seven entries it held', () => {
+      const schema = v2ToV3(createSchemaV2());
+
+      expect(JSON.parse(toDocumentJson(schema)).settings.columnOrder).toEqual([
         ColumnType.columnComment,
         ColumnType.columnDefault,
         ColumnType.columnAutoIncrement,
@@ -405,13 +448,15 @@ describe('v2ToV3', () => {
       ]);
     });
 
-    it('keeps the default columnOrder when the v2 order is incomplete', () => {
+    it('fills an incomplete v2 order around the column types it names', () => {
       const schemaV2 = createSchemaV2();
       schemaV2.canvas.setting.columnOrder = ['columnName'] as any;
 
       expect(v2ToV3(schemaV2).settings.columnOrder).toEqual([
+        ColumnType.columnLogicalName,
         ColumnType.columnName,
         ColumnType.columnDataType,
+        ColumnType.columnDomain,
         ColumnType.columnNotNull,
         ColumnType.columnUnique,
         ColumnType.columnAutoIncrement,
@@ -448,6 +493,16 @@ describe('v2ToV3', () => {
         widthComment: 110,
         color: '#ff0000',
       });
+    });
+
+    it('puts every table in no group, since v2 has no groups', () => {
+      const { doc, collections } = v2ToV3(createSchemaV2());
+
+      expect(doc.tableGroupIds).toEqual([]);
+      expect(collections.tableGroupEntities).toEqual({});
+      expect(
+        Object.values(collections.tableEntities).map(({ groupId }) => groupId)
+      ).toEqual(['', '']);
     });
 
     it('defaults a missing table color to an empty string', () => {
@@ -613,6 +668,19 @@ describe('v2ToV3', () => {
       expect(rel2.end.direction).toBe(Direction.bottom);
     });
 
+    it('leaves the referential actions unset, since v2 has no slot for them', () => {
+      const { collections } = v2ToV3(createSchemaV2());
+
+      for (const id of ['rel1', 'rel2']) {
+        expect(collections.relationshipEntities[id].onDelete).toBe(
+          ReferentialAction.none
+        );
+        expect(collections.relationshipEntities[id].onUpdate).toBe(
+          ReferentialAction.none
+        );
+      }
+    });
+
     it('treats any non-Ring start relationship type as dash', () => {
       const schemaV2 = createSchemaV2();
       schemaV2.relationship.relationships[0].startRelationshipType =
@@ -648,13 +716,21 @@ describe('v2ToV3', () => {
       relationshipIds: [],
       indexIds: [],
       memoIds: [],
+      tableGroupIds: [],
+      wordIds: [],
+      termIds: [],
+      domainIds: [],
     });
     expect(result.collections.tableEntities).toEqual({});
     expect(result.collections.tableColumnEntities).toEqual({});
     expect(result.collections.indexEntities).toEqual({});
     expect(result.collections.indexColumnEntities).toEqual({});
     expect(result.collections.memoEntities).toEqual({});
+    expect(result.collections.tableGroupEntities).toEqual({});
     expect(result.collections.relationshipEntities).toEqual({});
+    expect(result.collections.wordEntities).toEqual({});
+    expect(result.collections.termEntities).toEqual({});
+    expect(result.collections.domainEntities).toEqual({});
     expect(result.settings.show).toBe(
       Show.tableComment |
         Show.columnComment |

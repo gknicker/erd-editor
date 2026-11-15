@@ -1,19 +1,33 @@
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
 import { schemaV3Parser } from '@dineug/erd-editor-schema';
 import { describe, expect, it } from 'vite-plus/test';
 
-import { BracketType, ColumnOption, OrderType } from '@/constants/schema';
+import {
+  BracketType,
+  ColumnOption,
+  Database,
+  OrderType,
+  ReferentialAction,
+} from '@/constants/schema';
 import { RootState } from '@/engine/state';
 import { createIndex } from '@/utils/collection/index.entity';
 import { createIndexColumn } from '@/utils/collection/indexColumn.entity';
 import { createRelationship } from '@/utils/collection/relationship.entity';
 import { createTable } from '@/utils/collection/table.entity';
 import { createColumn } from '@/utils/collection/tableColumn.entity';
+import { createSchemaSQL } from '@/utils/schema-sql';
 import {
   createSchema,
+  formatDropBlock,
+  formatHeader,
   formatIndex,
   formatTable,
+  isIntegerFamily,
 } from '@/utils/schema-sql/SQLite';
-import { Name } from '@/utils/schema-sql/utils';
+import { createWrittenObjects, Name } from '@/utils/schema-sql/utils';
 
 function createState(): RootState {
   return {
@@ -196,6 +210,116 @@ function seedParentChild(
   return { parent, child, parentId, pkColumns, fkColumn };
 }
 
+interface SampleVariant {
+  memberIdType?: string;
+  postIdType?: string;
+  postMemberIdType?: string;
+  onDelete?: number;
+}
+
+// The two-table sample every options fixture was written from; a variant
+// changes the key types or the delete action.
+function createSampleState({
+  memberIdType = 'INT',
+  postIdType = 'INT',
+  postMemberIdType = 'INT',
+  onDelete = ReferentialAction.cascade,
+}: SampleVariant = {}): RootState {
+  const state = {
+    ...schemaV3Parser({}),
+    editor: {},
+    lww: {},
+  } as unknown as RootState;
+  const key =
+    ColumnOption.primaryKey | ColumnOption.notNull | ColumnOption.autoIncrement;
+  const columns = [
+    createColumn({
+      id: 'm1',
+      tableId: 'tm',
+      name: 'id',
+      dataType: memberIdType,
+      options: key,
+    }),
+    createColumn({
+      id: 'm2',
+      tableId: 'tm',
+      name: 'email',
+      dataType: 'VARCHAR(255)',
+      options: ColumnOption.notNull | ColumnOption.unique,
+    }),
+    createColumn({
+      id: 'p1',
+      tableId: 'tp',
+      name: 'id',
+      dataType: postIdType,
+      options: key,
+    }),
+    createColumn({
+      id: 'p2',
+      tableId: 'tp',
+      name: 'member_id',
+      dataType: postMemberIdType,
+      options: ColumnOption.notNull,
+    }),
+    createColumn({
+      id: 'p3',
+      tableId: 'tp',
+      name: 'title',
+      dataType: 'VARCHAR(200)',
+      options: ColumnOption.notNull,
+    }),
+  ];
+
+  state.settings.databaseName = 'shop';
+  state.collections.tableEntities = {
+    tm: createTable({
+      id: 'tm',
+      name: 'member',
+      comment: 'Members',
+      columnIds: ['m1', 'm2'],
+    }),
+    tp: createTable({ id: 'tp', name: 'post', columnIds: ['p1', 'p2', 'p3'] }),
+  };
+  state.collections.tableColumnEntities = Object.fromEntries(
+    columns.map(column => [column.id, column])
+  );
+  state.collections.relationshipEntities = {
+    rp: createRelationship({
+      id: 'rp',
+      onDelete,
+      start: { tableId: 'tm', columnIds: ['m1'] },
+      end: { tableId: 'tp', columnIds: ['p2'] },
+    }),
+  };
+  state.collections.indexEntities = {
+    ix: createIndex({
+      id: 'ix',
+      name: 'idx_post_title',
+      tableId: 'tp',
+      indexColumnIds: ['ic'],
+    }),
+  };
+  state.collections.indexColumnEntities = {
+    ic: createIndexColumn({
+      id: 'ic',
+      indexId: 'ix',
+      columnId: 'p3',
+      orderType: OrderType.ASC,
+    }),
+  };
+  state.doc.tableIds = ['tm', 'tp'];
+  state.doc.relationshipIds = ['rp'];
+  state.doc.indexIds = ['ix'];
+
+  return state;
+}
+
+const FIXTURES = join(dirname(fileURLToPath(import.meta.url)), '__fixtures__');
+
+function readFixture(path: string): string {
+  return readFileSync(join(FIXTURES, 'options', path), 'utf8');
+}
+
 describe('SQLite createSchema', () => {
   it('emits table comments, inline foreign keys, AUTOINCREMENT and indexes', () => {
     const { state } = createFixture();
@@ -215,7 +339,7 @@ describe('SQLite createSchema', () => {
         'CREATE TABLE users',
         '(',
         '  -- user id',
-        '  id    INT          NOT NULL,',
+        '  id    INTEGER      NOT NULL,',
         '  -- email address',
         "  email VARCHAR(255) NOT NULL UNIQUE DEFAULT 'a@b.c',",
         "  name  VARCHAR(50)  NULL     DEFAULT 'guest',",
@@ -235,10 +359,9 @@ describe('SQLite createSchema', () => {
   it('wraps identifiers with the configured bracket type', () => {
     const { state } = createFixture();
     state.settings.bracketType = BracketType.singleQuote;
-    state.doc.tableIds = ['t-posts'];
     state.doc.indexIds = [];
 
-    expect(createSchema(state)).toBe(
+    expect(createSchema(state)).toContain(
       [
         '',
         "CREATE TABLE 'posts'",
@@ -258,6 +381,127 @@ describe('SQLite createSchema', () => {
   });
 });
 
+describe('SQLite dotted table names', () => {
+  it('references the parent without its schema and puts the schema on the index name', () => {
+    const { state, users, posts } = createFixture();
+    users.name = 'sales.users';
+    posts.name = 'sales.posts';
+
+    expect(createSchema(state)).toBe(
+      [
+        '',
+        'CREATE TABLE sales.posts',
+        '(',
+        '  id      INT NULL    ,',
+        '  user_id INT NOT NULL,',
+        '  PRIMARY KEY (id),',
+        '  FOREIGN KEY (user_id) REFERENCES users (id)',
+        ');',
+        '',
+        '-- user table',
+        'CREATE TABLE sales.users',
+        '(',
+        '  -- user id',
+        '  id    INTEGER      NOT NULL,',
+        '  -- email address',
+        "  email VARCHAR(255) NOT NULL UNIQUE DEFAULT 'a@b.c',",
+        "  name  VARCHAR(50)  NULL     DEFAULT 'guest',",
+        '  PRIMARY KEY (id AUTOINCREMENT)',
+        ');',
+        '',
+        'CREATE INDEX sales.IDX_posts',
+        '  ON posts (user_id ASC);',
+        '',
+        'CREATE UNIQUE INDEX sales.IDX_EMAIL',
+        '  ON users (email DESC);',
+        '',
+      ].join('\n')
+    );
+  });
+
+  // The index name takes the table part without its quotes; the schema and the
+  // table it qualifies or references keep theirs.
+  it('names the index after the table part of "sales"."users" and references the table as written', () => {
+    const { state, users, posts, usersIndex } = createFixture();
+    users.name = '"sales"."users"';
+    posts.name = '"sales"."posts"';
+    usersIndex.name = '';
+
+    const sql = createSchema(state);
+
+    expect(sql).toContain('  FOREIGN KEY (user_id) REFERENCES "users" (id)\n');
+    expect(sql).toContain('CREATE INDEX "sales".IDX_posts\n  ON "posts"');
+    expect(sql).toContain(
+      'CREATE UNIQUE INDEX "sales".IDX_users\n  ON "users" (email DESC);'
+    );
+  });
+
+  it('leaves an index name the user already qualified as written', () => {
+    const { state, users, usersIndex } = createFixture();
+    users.name = 'sales.users';
+    usersIndex.name = 'sales.idx_email';
+
+    expect(createSchema(state)).toContain(
+      'CREATE UNIQUE INDEX sales.idx_email\n  ON users (email DESC);'
+    );
+  });
+
+  it('numbers an index name that repeats an earlier one but for case', () => {
+    const { state, users, posts } = createFixture();
+    users.name = 'sales.users';
+    posts.name = 'sales.posts';
+    // The hr table borrows the sales key and email columns, which the DDL reads
+    // by id alone, and its index the sales email index column.
+    const hrUsers = createTable({
+      id: 't-hr-users',
+      name: 'hr.Users',
+      columnIds: ['c-user-id', 'c-user-email'],
+    });
+    const hrRelationship = createRelationship({
+      id: 'r-hr',
+      start: { tableId: hrUsers.id, columnIds: ['c-user-id'] },
+      end: { tableId: posts.id, columnIds: ['c-post-user-id'] },
+    });
+    const hrIndex = createIndex({
+      id: 'i-hr',
+      name: '',
+      tableId: hrUsers.id,
+      indexColumnIds: ['ic-2'],
+    });
+    state.collections.tableEntities[hrUsers.id] = hrUsers;
+    state.collections.relationshipEntities[hrRelationship.id] = hrRelationship;
+    state.collections.indexEntities[hrIndex.id] = hrIndex;
+    state.collections.indexEntities['i-2'].name = '';
+    state.doc.tableIds.push(hrUsers.id);
+    state.doc.relationshipIds.push(hrRelationship.id);
+    state.doc.indexIds = ['i-2', hrIndex.id];
+
+    const sql = createSchema(state);
+
+    expect(sql).toContain('  FOREIGN KEY (user_id) REFERENCES users (id),\n');
+    expect(sql).toContain('  FOREIGN KEY (user_id) REFERENCES Users (id)\n');
+    expect(sql).toContain('CREATE UNIQUE INDEX sales.IDX_users\n  ON users');
+    expect(sql).toContain('CREATE INDEX hr.IDX_Users1\n  ON Users');
+  });
+
+  it('keeps a quoted dotted name whole', () => {
+    const { state, users, posts } = createFixture();
+    users.name = 'sales.users';
+    posts.name = 'sales.posts';
+    state.settings.bracketType = BracketType.doubleQuote;
+
+    const sql = createSchema(state);
+
+    expect(sql).toContain(
+      '  FOREIGN KEY ("user_id") REFERENCES "sales.users" ("id")'
+    );
+    expect(sql).toContain('CREATE INDEX "IDX_sales.posts"\n  ON "sales.posts"');
+    expect(sql).toContain(
+      'CREATE UNIQUE INDEX "IDX_EMAIL"\n  ON "sales.users"'
+    );
+  });
+});
+
 describe('SQLite formatTable', () => {
   it('adds AUTOINCREMENT and a trailing comma when a relationship follows the single primary key', () => {
     const state = createState();
@@ -272,8 +516,8 @@ describe('SQLite formatTable', () => {
     expect(buffer).toEqual([
       'CREATE TABLE child',
       '(',
-      '  id     INT NULL    ,',
-      '  fk_col INT NULL    ,',
+      '  id     INTEGER NULL    ,',
+      '  fk_col INT     NULL    ,',
       '  PRIMARY KEY (id AUTOINCREMENT),',
       '  FOREIGN KEY (fk_col) REFERENCES parent (id)',
       ');',
@@ -355,7 +599,7 @@ describe('SQLite formatTable', () => {
     ]);
   });
 
-  it('skips relationships whose start table is missing', () => {
+  it('skips relationships whose start table is missing, leaving the primary key without a comma', () => {
     const state = createState();
     const { child } = seedParentChild(state, { pkNames: ['id'] });
     Reflect.deleteProperty(state.collections.tableEntities, 't-parent');
@@ -368,12 +612,12 @@ describe('SQLite formatTable', () => {
       '(',
       '  id     INT NULL    ,',
       '  fk_col INT NULL    ,',
-      '  PRIMARY KEY (id),',
+      '  PRIMARY KEY (id)',
       ');',
     ]);
   });
 
-  it('drops relationship columns that no longer exist', () => {
+  it('skips a relationship none of whose columns exist', () => {
     const state = createState();
     const { child } = seedParentChild(state, { pkNames: ['id'] });
     state.collections.relationshipEntities['r-0'].start.columnIds = [
@@ -386,9 +630,59 @@ describe('SQLite formatTable', () => {
     const buffer: string[] = [];
     formatTable(state, { table: child, buffer });
 
-    expect(buffer[buffer.length - 2]).toBe(
-      '  FOREIGN KEY () REFERENCES parent ()'
-    );
+    expect(buffer.slice(-2)).toEqual(['  PRIMARY KEY (id)', ');']);
+  });
+
+  it('counts only the foreign keys it writes when placing commas', () => {
+    const state = createState();
+    const { child } = seedParentChild(state, {
+      pkNames: ['id'],
+      relationshipCount: 2,
+    });
+    state.collections.relationshipEntities['r-1'].end.columnIds = [
+      'missing-end',
+    ];
+
+    const buffer: string[] = [];
+    formatTable(state, { table: child, buffer });
+
+    expect(buffer.slice(4)).toEqual([
+      '  PRIMARY KEY (id),',
+      '  FOREIGN KEY (fk_col) REFERENCES parent (id)',
+      ');',
+    ]);
+  });
+
+  it('separates the last column from the foreign key of a table without a primary key', () => {
+    const state = createState();
+    const { child } = seedParentChild(state, { pkNames: [] });
+
+    const buffer: string[] = [];
+    formatTable(state, { table: child, buffer });
+
+    expect(buffer).toEqual([
+      'CREATE TABLE child',
+      '(',
+      '  fk_col INT NULL    ,',
+      '  FOREIGN KEY (fk_col) REFERENCES parent (id)',
+      ');',
+    ]);
+  });
+
+  it('ends the last column of a table without a primary key bare when its foreign keys are all skipped', () => {
+    const state = createState();
+    const { child } = seedParentChild(state, { pkNames: [] });
+    state.doc.tableIds = [child.id];
+
+    const buffer: string[] = [];
+    formatTable(state, { table: child, buffer });
+
+    expect(buffer).toEqual([
+      'CREATE TABLE child',
+      '(',
+      '  fk_col INT NULL    ',
+      ');',
+    ]);
   });
 
   it('emits no primary key clause when no column is a primary key', () => {
@@ -418,6 +712,38 @@ describe('SQLite formatTable', () => {
       '  msg TEXT NULL    ,',
       '  lvl INT  NOT NULL',
       ');',
+    ]);
+  });
+
+  it('wraps a DEFAULT expression in the parentheses SQLite needs', () => {
+    const state = createState();
+    const created = createColumn({
+      id: 'c-created',
+      name: 'created',
+      dataType: 'TEXT',
+      default: "datetime('now')",
+    });
+    const flag = createColumn({
+      id: 'c-flag',
+      name: 'flag',
+      dataType: 'INT',
+      default: '-1',
+    });
+    const table = createTable({
+      id: 't-log',
+      name: 'log',
+      columnIds: [created.id, flag.id],
+    });
+    state.collections.tableColumnEntities[created.id] = created;
+    state.collections.tableColumnEntities[flag.id] = flag;
+    state.collections.tableEntities[table.id] = table;
+
+    const buffer: string[] = [];
+    formatTable(state, { table, buffer });
+
+    expect(buffer.slice(2, 4)).toEqual([
+      "  created TEXT NULL     DEFAULT (datetime('now')),",
+      '  flag    INT  NULL     DEFAULT -1',
     ]);
   });
 
@@ -526,5 +852,182 @@ describe('SQLite formatIndex', () => {
     formatIndex(state, { index: postsIndex, buffer, indexNames: [] });
 
     expect(buffer[1]).toBe('  ON posts (user_id );');
+  });
+});
+
+describe('SQLite isIntegerFamily', () => {
+  it.each([
+    'INT',
+    'int',
+    'INTEGER',
+    'INTEGER(11)',
+    'BIGINT',
+    'SMALLINT',
+    'TINYINT',
+    'MEDIUMINT',
+    'INT2',
+    'INT4',
+    'INT8',
+    'UNSIGNED BIG INT',
+    ' int ',
+    'int ( 11 )',
+  ])('takes %j as an integer type', dataType => {
+    expect(isIntegerFamily(dataType)).toBe(true);
+  });
+
+  it.each([
+    'VARCHAR(36)',
+    'UUID',
+    'NUMERIC(10)',
+    'POINT',
+    'SERIAL',
+    'INT16',
+    '',
+  ])('refuses %j', dataType => {
+    expect(isIntegerFamily(dataType)).toBe(false);
+  });
+});
+
+describe('SQLite AUTOINCREMENT keys', () => {
+  it('writes an integer AUTOINCREMENT key as INTEGER', () => {
+    expect(createSchemaSQL(createSampleState(), Database.SQLite)).toBe(
+      readFixture('SQLite/integer-autoincrement-create-none.sql')
+    );
+  });
+
+  it('writes any other AUTOINCREMENT key without the keyword and says why', () => {
+    expect(
+      createSchemaSQL(
+        createSampleState({
+          memberIdType: 'VARCHAR(36)',
+          postMemberIdType: 'VARCHAR(36)',
+        }),
+        Database.SQLite
+      )
+    ).toBe(readFixture('SQLite/non-integer-autoincrement-create-none.sql'));
+  });
+
+  it('writes an integer type with a width as INTEGER', () => {
+    const sql = createSchemaSQL(
+      createSampleState({ memberIdType: 'int(11)' }),
+      Database.SQLite
+    );
+
+    expect(sql).toContain('  id    INTEGER      NOT NULL,\n');
+    expect(sql).not.toContain('int(11)');
+  });
+
+  it('quotes the table and column the comment names as the table is quoted', () => {
+    const state = createSampleState({ memberIdType: 'UUID' });
+    state.settings.bracketType = BracketType.backtick;
+
+    const sql = createSchemaSQL(state, Database.SQLite);
+
+    expect(sql).toContain('  PRIMARY KEY (`id`)\n);\n\n');
+    expect(sql).toContain(
+      '\n-- SQLite takes AUTOINCREMENT only on an INTEGER column, so `member`.`id` is written without it.\n'
+    );
+  });
+
+  it('keeps the type of an AUTOINCREMENT column outside a single primary key', () => {
+    const state = createSampleState();
+    state.collections.tableColumnEntities.m2.options |= ColumnOption.primaryKey;
+
+    const sql = createSchemaSQL(state, Database.SQLite);
+
+    expect(sql).toContain('  id    INT          NOT NULL,\n');
+    expect(sql).toContain('  PRIMARY KEY (id, email)\n');
+    expect(sql).not.toContain('-- SQLite takes AUTOINCREMENT');
+  });
+});
+
+describe('SQLite options', () => {
+  it('writes IF NOT EXISTS on the table, under its comment, and on a unique index', () => {
+    const state = createSampleState();
+    state.collections.tableEntities.tp.comment = 'Posts';
+    state.collections.indexEntities.ix.unique = true;
+
+    const sql = createSchemaSQL(state, Database.SQLite, undefined, {
+      statements: 'ifNotExists',
+    });
+
+    expect(sql).toContain('\n-- Posts\nCREATE TABLE IF NOT EXISTS post\n');
+    expect(sql).toContain(
+      '\nCREATE UNIQUE INDEX IF NOT EXISTS idx_post_title\n  ON post (title ASC);\n'
+    );
+  });
+
+  it('writes no header', () => {
+    expect(formatHeader()).toBe('');
+  });
+
+  it('turns foreign keys off and drops each table written, quoted as its CREATE is', () => {
+    const state = createSampleState();
+    state.settings.bracketType = BracketType.doubleQuote;
+    const written = createWrittenObjects();
+
+    expect(formatDropBlock(state, written)).toBe('');
+    createSchema(state, undefined, { statements: 'recreate', written });
+    expect(formatDropBlock(state, written)).toBe(
+      [
+        'PRAGMA foreign_keys=OFF;',
+        '',
+        'DROP TABLE IF EXISTS "member";',
+        'DROP TABLE IF EXISTS "post";',
+      ].join('\n')
+    );
+  });
+});
+
+describe('SQLite logical names as comments', () => {
+  it('writes a logical name where the comment is empty as a comment line, a comment kept, and none without the option', () => {
+    const { state } = createFixture();
+    const { tableEntities, tableColumnEntities } = state.collections;
+    tableEntities['t-users'].logicalName = 'User';
+    tableEntities['t-posts'].logicalName = 'Post';
+    tableColumnEntities['c-user-id'].logicalName = 'User ID';
+    tableColumnEntities['c-post-user-id'].logicalName = "Post's writer";
+
+    const written = createSchema(state, undefined, {
+      statements: 'ifNotExists',
+      logicalNameAsComment: true,
+    });
+
+    expect(written).toContain('\n-- Post\nCREATE TABLE IF NOT EXISTS posts\n');
+    expect(written).toContain(
+      "\n  -- Post's writer\n  user_id INT NOT NULL,\n"
+    );
+    expect(written).toContain(
+      '\n-- user table\nCREATE TABLE IF NOT EXISTS users\n'
+    );
+    expect(written).toContain('\n  -- user id\n  id ');
+    expect(written).not.toContain('User');
+    expect(createSchema(state)).not.toContain('Post');
+  });
+
+  it('writes the line breaks of a comment or a logical name as a space, so no line of it runs as SQL', () => {
+    const { state } = createFixture();
+    const { tableEntities, tableColumnEntities } = state.collections;
+    tableEntities['t-users'].comment = 'user\ntable';
+    tableEntities['t-posts'].logicalName = 'Blog\r\n\r\npost';
+    tableColumnEntities['c-user-id'].comment = 'user\rid';
+    tableColumnEntities['c-post-user-id'].logicalName =
+      'first line\nsecond line';
+
+    const written = createSchema(state, undefined, {
+      logicalNameAsComment: true,
+    });
+
+    expect(written).toContain('\n-- user table\nCREATE TABLE users\n');
+    expect(written).toContain('\n-- Blog post\nCREATE TABLE posts\n');
+    expect(written).toContain('\n  -- user id\n  id ');
+    expect(written).toContain(
+      '\n  -- first line second line\n  user_id INT NOT NULL,\n'
+    );
+    expect(written).not.toContain('\r');
+    const lines = written.split('\n').map(line => line.trim());
+    for (const leaked of ['table', 'post', 'id', 'second line']) {
+      expect(lines).not.toContain(leaked);
+    }
   });
 });

@@ -27,6 +27,8 @@ export type AppContext = EngineContext & {
   shortcut$: Subject<{ type: KeyBindingName; event: KeyboardEvent }>;
   keydown$: Subject<KeyboardEvent>;
   emitter: Emitter;
+  /** Set once appDestroy has run, so a render it sets off knows nothing is left to read. */
+  lifecycle: { destroyed: boolean };
 };
 
 export type InjectAppContext = InjectEngineContext;
@@ -65,6 +67,7 @@ export function createAppContext(
     shortcut$,
     keydown$,
     emitter,
+    lifecycle: { destroyed: false },
   });
 }
 
@@ -77,6 +80,7 @@ export const useAppContext = (ctx: Ctx, fallback?: AppContext) =>
   });
 
 export function appDestroy(app: AppContext) {
+  app.lifecycle.destroyed = true;
   app.store.dispatchSync(initialClearAction());
   app.store.destroy();
   app.keydown$.complete();

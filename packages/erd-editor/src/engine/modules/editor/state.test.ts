@@ -16,6 +16,7 @@ import {
   SelectType,
   VisualizationMode,
 } from '@/engine/modules/editor/state';
+import { addTableAction } from '@/engine/modules/table/atom.actions';
 import { createStore } from '@/engine/store';
 
 const focusTable = (edit: boolean) => ({
@@ -101,6 +102,7 @@ describe('editor/state', () => {
         height: DEFAULT_HEIGHT,
       });
       expect(editor.scrollPullPending).toBe(false);
+      expect(editor.originShown).toBe(false);
       expect(editor.focusTable).toBeNull();
       expect(editor.editMemoId).toBeNull();
       expect(editor.memoScrollTopMap).toEqual({});
@@ -117,6 +119,7 @@ describe('editor/state', () => {
       expect(editor.dragSelect).toBeNull();
       expect(editor.views).toEqual({ flow: null });
       expect(editor.visualizationMode).toBe(VisualizationMode.graph);
+      expect(editor.screenBaseline).toBeNull();
     });
 
     it('gives each editor its own id and its own mutable containers', () => {
@@ -186,7 +189,10 @@ describe('editor/state', () => {
       expect(store.state.editor.selectedMap).toEqual({});
 
       store.dispatchSync(changeViewportAction({ width: 800, height: 600 }));
-      store.dispatchSync(selectAction({ t1: SelectType.table }));
+      store.dispatchSync(
+        addTableAction({ id: 't1', ui: { x: 0, y: 0, zIndex: 2 } }),
+        selectAction({ t1: SelectType.table })
+      );
 
       expect(store.state.editor.viewport).toEqual({ width: 800, height: 600 });
       expect(store.state.editor.selectedMap).toEqual({ t1: SelectType.table });
@@ -197,16 +203,23 @@ describe('editor/state', () => {
 
   describe('constants', () => {
     it('SelectType values mirror their keys', () => {
-      expect(SelectType).toEqual({ table: 'table', memo: 'memo' });
+      expect(SelectType).toEqual({
+        table: 'table',
+        memo: 'memo',
+        tableGroup: 'tableGroup',
+      });
     });
 
     it('FocusType values mirror their keys', () => {
       for (const [key, value] of Object.entries(FocusType)) {
         expect(value).toBe(key);
       }
-      expect(Object.keys(FocusType)).toHaveLength(9);
+      expect(Object.keys(FocusType)).toHaveLength(12);
       expect(FocusType.tableName).toBe('tableName');
       expect(FocusType.columnAutoIncrement).toBe('columnAutoIncrement');
+      expect(FocusType.tableLogicalName).toBe('tableLogicalName');
+      expect(FocusType.columnLogicalName).toBe('columnLogicalName');
+      expect(FocusType.columnDomain).toBe('columnDomain');
     });
 
     it('MoveKey values mirror their keys', () => {

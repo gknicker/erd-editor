@@ -1,19 +1,19 @@
 import { css } from '@dineug/r-html';
 
 import { floatingShadow } from '@/styles/elevation.styles';
-import { fontSize5, typography } from '@/styles/typography.styles';
+import { typography } from '@/styles/typography.styles';
 
 /**
  * A panel placed over whichever tab is up. The tab wrapper raises no stacking
- * context of its own, so a raised descendant inside it would paint over an
- * unraised sibling; the same step, later in the root, keeps this panel on top.
+ * context, so a raised descendant would paint over an unraised sibling; the
+ * same step later in the root keeps this on top.
  */
 export const root = css`
   position: absolute;
   top: 46px;
-  left: 16px;
+  inset-inline-start: 16px;
   z-index: 1;
-  padding: 24px;
+  padding: 12px;
   background-color: var(--context-menu-background);
   border: 1px solid var(--context-menu-border);
   border-radius: 6px;
@@ -21,20 +21,51 @@ export const root = css`
   width: 360px;
 `;
 
-export const title = css`
-  color: var(--active);
-  ${fontSize5};
-  margin-bottom: 24px;
+/* The title and the close button on one line, the button at the end the line ends at. */
+export const header = css`
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
 `;
 
-export const subTitle = css`
-  margin-top: 24px;
+/* Set as the locale picker sets its own. */
+export const title = css`
   color: var(--active);
   ${typography.normal};
 `;
 
-export const palette = css`
+/** A 26px square tool tinted under the pointer, as the editor's other panels close. */
+export const close = css`
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 26px;
+  height: 26px;
+  border-radius: 4px;
+  color: var(--foreground);
+  cursor: pointer;
+
+  &:hover {
+    color: var(--active);
+    background-color: var(--context-menu-hover);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--input-active);
+    outline-offset: 1px;
+  }
+`;
+
+export const subTitle = css`
   margin-top: 12px;
+  color: var(--foreground);
+  ${typography.paragraph};
+`;
+
+export const palette = css`
+  margin-top: 8px;
   display: grid;
   grid-template-columns: repeat(10, minmax(0, 1fr));
   gap: 8px;
@@ -52,14 +83,15 @@ export const color = css`
   }
 `;
 
-export const lightDarkButtonGroup = css`
-  margin-top: 12px;
+/* Equal thirds, except that a label longer than its third widens its own button rather than wrap. */
+export const appearanceButtonGroup = css`
+  margin-top: 8px;
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(max-content, 1fr));
   gap: 8px;
 `;
 
-export const lightDarkButton = css`
+export const appearanceButton = css`
   display: flex;
   align-items: center;
   justify-content: center;
@@ -67,6 +99,7 @@ export const lightDarkButton = css`
   border: 1px solid var(--context-menu-border);
   border-radius: 6px;
   height: 32px;
+  padding-inline: 8px;
   ${typography.paragraph};
 
   &:hover {

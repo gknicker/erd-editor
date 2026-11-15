@@ -15,10 +15,12 @@ export default defineConfig({
       provider: 'v8',
       reporter: ['text', 'json-summary'],
       // main.ts, ErdView.ts and loadErdEditor.ts run only inside Obsidian,
-      // which the smoke drives.
+      // which the smoke drives; erdEditorModule.ts runs on a mocked editor.
       include: [
+        'src/erdEditorModule.ts',
         'src/hub/**/*.ts',
         'src/keys.ts',
+        'src/readableDiagram.ts',
         'src/settings.ts',
         'src/tabSave.ts',
       ],

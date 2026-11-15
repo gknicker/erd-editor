@@ -1,5 +1,6 @@
 package com.github.dineug.erdeditorintellijplugin.hub.document
 
+import com.github.dineug.erdeditorintellijplugin.hub.HUB_PROTOCOL_VERSION
 import com.github.dineug.erdeditorintellijplugin.hub.HubJson
 import com.github.dineug.erdeditorintellijplugin.hub.HubPlatform
 import com.github.dineug.erdeditorintellijplugin.hub.HubRuntime
@@ -39,7 +40,7 @@ import java.util.concurrent.atomic.AtomicInteger
 /**
  * Joins over a real unix socket, or a named pipe on Windows, read by a TestPeer as the MCP server
  * reads them: a join's answer before the actions its window held back, a join after shutdown, and
- * a peer whose paths leave the lock's folders, which the hub closes and ends on its own (G16, S4).
+ * a peer whose paths leave the lock's folders, which the hub closes and ends on its own.
  */
 class JoinOverSocketTest {
     @get:Rule
@@ -212,7 +213,7 @@ class JoinOverSocketTest {
     }
 
     private fun connect(pipe: String, token: String): TestPeer = TestPeer.connect(pipe).also(peers::add).apply {
-        send("""{"id":1,"method":"hello","params":{"token":"$token","protocolVersion":1,"client":"spec"}}""")
+        send("""{"id":1,"method":"hello","params":{"token":"$token","protocolVersion":$HUB_PROTOCOL_VERSION,"client":"spec"}}""")
         val answer = receiveFrames(1).single()
         assertTrue(answer, answer.startsWith("""{"id":1,"ok":true,"method":"hello""""))
     }

@@ -2,10 +2,20 @@ import { query } from '@dineug/erd-editor-schema';
 import { createAction } from '@dineug/r-html';
 import { round } from 'es-toolkit/compat';
 
+import {
+  TABLE_GROUP_PADDING,
+  TABLE_SORT_MARGIN,
+  TABLE_SORT_START,
+} from '@/constants/layout';
+import { isOwnStep, POSITION_REGISTER } from '@/engine/geometryRegisters';
+import { RootState } from '@/engine/state';
+import { Table } from '@/internal-types';
+import { type Rect, unionRect } from '@/konva/scene/metrics';
 import { arrayHas } from '@/utils/arrayHas';
 import { calcTableHeight, calcTableWidths } from '@/utils/calcTable';
 import { createTable } from '@/utils/collection/table.entity';
-import { textInRange } from '@/utils/validation';
+import { getTableGroupId, padRect } from '@/utils/tableGroup';
+import { canvasSizeInRange, textInRange } from '@/utils/validation';
 
 import { ActionMap, ActionType, ReducerType } from './actions';
 
@@ -33,19 +43,36 @@ export const moveTableAction = createAction<
   ActionMap[typeof ActionType.moveTable]
 >(ActionType.moveTable);
 
+/**
+ * A step of a drag. The store's own adds through each table's position
+ * register at its version, so the absolute move it sends next stands on every
+ * peer at that version; a peer's step or a replica's adds outside it.
+ */
 const moveTable: ReducerType<typeof ActionType.moveTable> = (
-  { collections },
-  { payload: { ids, movementX, movementY } }
+  { collections, lww },
+  { payload: { ids, movementX, movementY }, version, tags },
+  context
 ) => {
   const collection = query(collections).collection('tableEntities');
   for (const id of ids) {
     collection.getOrCreate(id, id => createTable({ id }));
   }
 
-  collection.updateMany(ids, table => {
+  const step = (table: Table) => {
     table.ui.x = round(table.ui.x + movementX, 4);
     table.ui.y = round(table.ui.y + movementY, 4);
-  });
+  };
+  if (!isOwnStep(context, tags)) {
+    collection.updateMany(ids, step);
+    return;
+  }
+
+  const safeVersion = version ?? context.clock.getVersion();
+  for (const id of ids) {
+    collection.replaceOperator(lww, safeVersion, id, POSITION_REGISTER, () => {
+      collection.updateOne(id, step);
+    });
+  }
 };
 
 export const moveToTableAction = createAction<
@@ -53,15 +80,19 @@ export const moveToTableAction = createAction<
 >(ActionType.moveToTable);
 
 const moveToTable: ReducerType<typeof ActionType.moveToTable> = (
-  { collections },
-  { payload: { id, x, y } }
+  { collections, lww },
+  { payload: { id, x, y }, version },
+  { clock }
 ) => {
+  const safeVersion = version ?? clock.getVersion();
   const collection = query(collections).collection('tableEntities');
   collection.getOrCreate(id, id => createTable({ id }));
 
-  collection.updateOne(id, table => {
-    table.ui.x = x;
-    table.ui.y = y;
+  collection.replaceOperator(lww, safeVersion, id, POSITION_REGISTER, () => {
+    collection.updateOne(id, table => {
+      table.ui.x = x;
+      table.ui.y = y;
+    });
   });
 };
 
@@ -102,6 +133,51 @@ const changeTableName: ReducerType<typeof ActionType.changeTableName> = (
     collection.updateOne(id, table => {
       table.name = value;
       table.ui.widthName = textInRange(toWidth(value));
+    });
+  });
+};
+
+export const changeTableLogicalNameAction = createAction<
+  ActionMap[typeof ActionType.changeTableLogicalName]
+>(ActionType.changeTableLogicalName);
+
+const changeTableLogicalName: ReducerType<
+  typeof ActionType.changeTableLogicalName
+> = (
+  { collections, lww },
+  { payload: { id, value }, version },
+  { toWidth, clock }
+) => {
+  const safeVersion = version ?? clock.getVersion();
+  const collection = query(collections).collection('tableEntities');
+  collection.getOrCreate(id, id => createTable({ id }));
+
+  collection.replaceOperator(lww, safeVersion, id, 'logicalName', () => {
+    collection.updateOne(id, table => {
+      table.logicalName = value;
+      table.ui.widthLogicalName = textInRange(toWidth(value));
+    });
+  });
+};
+
+export const changeTableNameDerivedAction = createAction<
+  ActionMap[typeof ActionType.changeTableNameDerived]
+>(ActionType.changeTableNameDerived);
+
+/**
+ * Whether the dictionaries filled the table's name, which its next logical
+ * name then derives again; false leaves the name to whoever wrote it.
+ */
+const changeTableNameDerived: ReducerType<
+  typeof ActionType.changeTableNameDerived
+> = ({ collections, lww }, { payload: { id, value }, version }, { clock }) => {
+  const safeVersion = version ?? clock.getVersion();
+  const collection = query(collections).collection('tableEntities');
+  collection.getOrCreate(id, id => createTable({ id }));
+
+  collection.replaceOperator(lww, safeVersion, id, 'nameDerived', () => {
+    collection.updateOne(id, table => {
+      table.nameDerived = value;
     });
   });
 };
@@ -147,6 +223,30 @@ const changeTableColor: ReducerType<typeof ActionType.changeTableColor> = (
   });
 };
 
+export const changeTableGroupAction = createAction<
+  ActionMap[typeof ActionType.changeTableGroup]
+>(ActionType.changeTableGroup);
+
+/**
+ * Puts a table in the group the value names, or in none for ''. One register
+ * per table, so of two peers placing one table the later write wins.
+ */
+const changeTableGroup: ReducerType<typeof ActionType.changeTableGroup> = (
+  { collections, lww },
+  { payload: { id, value }, version },
+  { clock }
+) => {
+  const safeVersion = version ?? clock.getVersion();
+  const collection = query(collections).collection('tableEntities');
+  collection.getOrCreate(id, id => createTable({ id }));
+
+  collection.replaceOperator(lww, safeVersion, id, 'groupId', () => {
+    collection.updateOne(id, table => {
+      table.groupId = value;
+    });
+  });
+};
+
 export const changeZIndexAction = createAction<
   ActionMap[typeof ActionType.changeZIndex]
 >(ActionType.changeZIndex);
@@ -167,38 +267,151 @@ export const sortTableAction = createAction<
   ActionMap[typeof ActionType.sortTable]
 >(ActionType.sortTable);
 
+/** One cell of the sort's rows, at the size it draws, and how it is put at a corner. */
+type SortCell = {
+  width: number;
+  height: number;
+  place: (x: number, y: number) => void;
+};
+
+/**
+ * Puts cells in rows from the start corner, each the margin wider and taller
+ * than it draws, a row wrapping before the cell that would cross the width;
+ * the first row starts rowHeight tall, which only a cell too wide for any meets.
+ */
+function placeInRows(
+  cells: SortCell[],
+  start: number,
+  width: number,
+  rowHeight: number
+): void {
+  let widthSum = start;
+  let currentHeight = start;
+  let maxHeight = rowHeight;
+
+  cells.forEach(cell => {
+    const cellWidth = cell.width + TABLE_SORT_MARGIN;
+    const cellHeight = cell.height + TABLE_SORT_MARGIN;
+
+    if (widthSum + cellWidth > width) {
+      currentHeight += maxHeight;
+      maxHeight = 0;
+      widthSum = start;
+    }
+
+    if (maxHeight < cellHeight) {
+      maxHeight = cellHeight;
+    }
+
+    cell.place(widthSum, currentHeight);
+    widthSum += cellWidth;
+  });
+}
+
+const tableCell = (state: RootState, table: Table): SortCell => ({
+  width: calcTableWidths(table, state).width,
+  height: calcTableHeight(table),
+  place: (x, y) => {
+    table.ui.x = x;
+    table.ui.y = y;
+  },
+});
+
+/**
+ * The width the sort wraps its rows at: a hundred per table, inside the
+ * canvas bounds, the size an importer gave the canvas it laid its tables on.
+ */
+const sortWidth = ({ doc }: RootState) =>
+  canvasSizeInRange(doc.tableIds.length * 100);
+
+/**
+ * A group's members in rows of their own inside its box, the members' bounds
+ * and the padding, which becomes the group's rect where the cell is put. The
+ * rows wrap so that the box fits the sort width beside the start corner.
+ */
+function groupCell(
+  state: RootState,
+  groupId: string,
+  members: SortCell[]
+): SortCell {
+  const rects: Rect[] = [];
+  placeInRows(
+    members.map((member, index) => ({
+      ...member,
+      place: (x, y) => {
+        rects[index] = { x, y, width: member.width, height: member.height };
+      },
+    })),
+    0,
+    sortWidth(state) - TABLE_SORT_START - TABLE_GROUP_PADDING * 2,
+    0
+  );
+  const box = padRect(rects.reduce(unionRect));
+
+  return {
+    width: box.width,
+    height: box.height,
+    place: (x, y) => {
+      members.forEach((member, index) =>
+        member.place(x + rects[index].x - box.x, y + rects[index].y - box.y)
+      );
+      query(state.collections)
+        .collection('tableGroupEntities')
+        .updateOne(groupId, group => {
+          group.ui.x = x;
+          group.ui.y = y;
+          group.ui.width = box.width;
+          group.ui.height = box.height;
+        });
+    },
+  };
+}
+
+/**
+ * The tables as the sort's cells: one in no group alone, and the members of a
+ * group gathered in one cell where its first member comes, so a group stays
+ * together. A document with no group gets one cell per table, as it always did.
+ */
+function toSortCells(state: RootState, tables: Table[]): SortCell[] {
+  const membersByGroup = new Map<string, SortCell[]>();
+  const order: Array<SortCell | string> = [];
+
+  tables.forEach(table => {
+    const cell = tableCell(state, table);
+    const groupId = getTableGroupId(state, table);
+    const members = groupId ? membersByGroup.get(groupId) : undefined;
+
+    if (!groupId) {
+      order.push(cell);
+    } else if (members) {
+      members.push(cell);
+    } else {
+      membersByGroup.set(groupId, [cell]);
+      order.push(groupId);
+    }
+  });
+
+  return order.map(cell =>
+    typeof cell === 'string'
+      ? groupCell(state, cell, membersByGroup.get(cell)!)
+      : cell
+  );
+}
+
 const sortTable: ReducerType<typeof ActionType.sortTable> = state => {
-  const { doc, settings, collections } = state;
-  const canvasWidth = settings.width;
+  const { doc, collections } = state;
   const tables = query(collections)
     .collection('tableEntities')
     .selectByIds(doc.tableIds);
-  const TABLE_MARGIN = 80;
 
   tables.sort((a, b) => a.columnIds.length - b.columnIds.length);
 
-  let widthSum = 50;
-  let currentHeight = 50;
-  let maxHeight = 50;
-
-  tables.forEach(table => {
-    const width = calcTableWidths(table, state).width + TABLE_MARGIN;
-    const height = calcTableHeight(table) + TABLE_MARGIN;
-
-    if (widthSum + width > canvasWidth) {
-      currentHeight += maxHeight;
-      maxHeight = 0;
-      widthSum = 50;
-    }
-
-    if (maxHeight < height) {
-      maxHeight = height;
-    }
-
-    table.ui.y = currentHeight;
-    table.ui.x = widthSum;
-    widthSum += width;
-  });
+  placeInRows(
+    toSortCells(state, tables),
+    TABLE_SORT_START,
+    sortWidth(state),
+    TABLE_SORT_START
+  );
 };
 
 export const tableReducers = {
@@ -209,8 +422,11 @@ export const tableReducers = {
   [ActionType.changeTableName]: changeTableName,
   [ActionType.changeTableComment]: changeTableComment,
   [ActionType.changeTableColor]: changeTableColor,
+  [ActionType.changeTableGroup]: changeTableGroup,
   [ActionType.changeZIndex]: changeZIndex,
   [ActionType.sortTable]: sortTable,
+  [ActionType.changeTableLogicalName]: changeTableLogicalName,
+  [ActionType.changeTableNameDerived]: changeTableNameDerived,
 };
 
 export const actions = {
@@ -221,6 +437,9 @@ export const actions = {
   changeTableNameAction,
   changeTableCommentAction,
   changeTableColorAction,
+  changeTableGroupAction,
   changeZIndexAction,
   sortTableAction,
+  changeTableLogicalNameAction,
+  changeTableNameDerivedAction,
 };

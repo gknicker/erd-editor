@@ -6,10 +6,24 @@ import {
 } from '@dineug/r-html';
 
 import { TablePlacement } from '@/constants/tablePlacement';
+import type { LocaleOption } from '@/i18n/locales';
 import { ValuesType } from '@/internal-types';
-import { ThemeOptions } from '@/themes/radix-ui-theme';
+import type { ThemeOptions } from '@/themes/radix-ui-theme';
 import type { GeometrySource } from '@/utils/draw-relationship/geometrySource';
 import { safeCallback } from '@/utils/safeCallback';
+
+/**
+ * What Map Columns opens on: a relationship drawn between two tables and not
+ * made yet, or one the document holds whose columns it changes.
+ */
+export type MapColumnsOpening =
+  | {
+      mode: 'create';
+      startTableId: string;
+      endTableId: string;
+      relationshipType: number;
+    }
+  | { mode: 'edit'; relationshipId: string };
 
 const InternalActionType = {
   openColorPicker: 'openColorPicker',
@@ -19,15 +33,21 @@ const InternalActionType = {
   dragendColumnAll: 'dragendColumnAll',
   copy: 'copy',
   paste: 'paste',
-  schemaGC: 'schemaGC',
   toggleSearch: 'toggleSearch',
+  openFindReplace: 'openFindReplace',
+  openExportImage: 'openExportImage',
+  openMapColumns: 'openMapColumns',
   openThemeBuilder: 'openThemeBuilder',
   setThemeOptions: 'setThemeOptions',
+  openLocalePicker: 'openLocalePicker',
+  setLocaleOption: 'setLocaleOption',
   mouseTrackerStart: 'mouseTrackerStart',
   mouseTrackerEnd: 'mouseTrackerEnd',
   openDiffViewer: 'openDiffViewer',
   openAutomaticTablePlacement: 'openAutomaticTablePlacement',
+  cancelElkPlacement: 'cancelElkPlacement',
   duplicateDragStart: 'duplicateDragStart',
+  duplicateDragCancel: 'duplicateDragCancel',
   dragSelectStart: 'dragSelectStart',
 } as const;
 type InternalActionType = ValuesType<typeof InternalActionType>;
@@ -42,6 +62,8 @@ type InternalActionMap = {
   [InternalActionType.openToast]: {
     message: DOMTemplateLiterals;
     close?: Promise<void>;
+    /** One toast per key: a toast opened under a key already up takes its place. */
+    key?: string;
   };
   [InternalActionType.openTableProperties]: {
     tableId: string;
@@ -53,10 +75,16 @@ type InternalActionMap = {
   [InternalActionType.paste]: {
     event: ClipboardEvent;
   };
-  [InternalActionType.schemaGC]: void;
   [InternalActionType.toggleSearch]: void;
+  [InternalActionType.openFindReplace]: void;
+  [InternalActionType.openExportImage]: void;
+  [InternalActionType.openMapColumns]: MapColumnsOpening;
   [InternalActionType.openThemeBuilder]: void;
   [InternalActionType.setThemeOptions]: Partial<ThemeOptions>;
+  [InternalActionType.openLocalePicker]: void;
+  [InternalActionType.setLocaleOption]: {
+    locale: LocaleOption;
+  };
   [InternalActionType.mouseTrackerStart]: void;
   [InternalActionType.mouseTrackerEnd]: void;
   [InternalActionType.openDiffViewer]: {
@@ -65,10 +93,12 @@ type InternalActionMap = {
   [InternalActionType.openAutomaticTablePlacement]: {
     placement: TablePlacement;
   };
+  [InternalActionType.cancelElkPlacement]: void;
   [InternalActionType.duplicateDragStart]: {
     tableIds: string[];
     memoIds: string[];
   } | void;
+  [InternalActionType.duplicateDragCancel]: void;
   [InternalActionType.dragSelectStart]: {
     x: number;
     y: number;
@@ -133,13 +163,21 @@ export const pasteAction = createAction<
   InternalActionMap[typeof InternalActionType.paste]
 >(InternalActionType.paste);
 
-export const schemaGCAction = createAction<
-  InternalActionMap[typeof InternalActionType.schemaGC]
->(InternalActionType.schemaGC);
-
 export const toggleSearchAction = createAction<
   InternalActionMap[typeof InternalActionType.toggleSearch]
 >(InternalActionType.toggleSearch);
+
+export const openFindReplaceAction = createAction<
+  InternalActionMap[typeof InternalActionType.openFindReplace]
+>(InternalActionType.openFindReplace);
+
+export const openExportImageAction = createAction<
+  InternalActionMap[typeof InternalActionType.openExportImage]
+>(InternalActionType.openExportImage);
+
+export const openMapColumnsAction = createAction<
+  InternalActionMap[typeof InternalActionType.openMapColumns]
+>(InternalActionType.openMapColumns);
 
 export const openThemeBuilderAction = createAction<
   InternalActionMap[typeof InternalActionType.openThemeBuilder]
@@ -148,6 +186,14 @@ export const openThemeBuilderAction = createAction<
 export const setThemeOptionsAction = createAction<
   InternalActionMap[typeof InternalActionType.setThemeOptions]
 >(InternalActionType.setThemeOptions);
+
+export const openLocalePickerAction = createAction<
+  InternalActionMap[typeof InternalActionType.openLocalePicker]
+>(InternalActionType.openLocalePicker);
+
+export const setLocaleOptionAction = createAction<
+  InternalActionMap[typeof InternalActionType.setLocaleOption]
+>(InternalActionType.setLocaleOption);
 
 export const mouseTrackerStartAction = createAction<
   InternalActionMap[typeof InternalActionType.mouseTrackerStart]
@@ -165,9 +211,18 @@ export const openAutomaticTablePlacementAction = createAction<
   InternalActionMap[typeof InternalActionType.openAutomaticTablePlacement]
 >(InternalActionType.openAutomaticTablePlacement);
 
+/** Aborts every ELK placement the ERD tab still waits on, which it hears with another tab shown too. */
+export const cancelElkPlacementAction = createAction<
+  InternalActionMap[typeof InternalActionType.cancelElkPlacement]
+>(InternalActionType.cancelElkPlacement);
+
 export const duplicateDragStartAction = createAction<
   InternalActionMap[typeof InternalActionType.duplicateDragStart]
 >(InternalActionType.duplicateDragStart);
+
+export const duplicateDragCancelAction = createAction<
+  InternalActionMap[typeof InternalActionType.duplicateDragCancel]
+>(InternalActionType.duplicateDragCancel);
 
 export const dragSelectStartAction = createAction<
   InternalActionMap[typeof InternalActionType.dragSelectStart]

@@ -1,10 +1,9 @@
-import { toJson } from '@dineug/erd-editor-schema';
+import { toDocumentJson, toJson } from '@dineug/erd-editor-schema';
 import {
   type AnyAction,
   type CompositionActions,
   compositionActionsFlat,
 } from '@dineug/r-html';
-import { isEmpty } from 'es-toolkit/compat';
 
 import { ChangeActionTypes, StreamActionTypes } from '@/engine/action-types';
 import { createEngineContext } from '@/engine/context';
@@ -15,6 +14,7 @@ import {
   focusTableAction,
   focusTableEndAction,
   getLWWAction,
+  unselectAllAction,
 } from '@/engine/modules/editor/atom.actions';
 import { initialLoadJsonAction$ } from '@/engine/modules/editor/generator.actions';
 import type { FocusType } from '@/engine/modules/editor/state';
@@ -24,14 +24,18 @@ import {
   type FocusPresence,
 } from '@/engine/presence';
 import { createRxStore } from '@/engine/rx-store';
-import { createSharedStore } from '@/engine/shared-store';
+import {
+  createSharedStore,
+  type ReseedOptions,
+  type SharedRegisters,
+} from '@/engine/shared-store';
 import type { RootState } from '@/engine/state';
 import { createStreamFlusher } from '@/engine/stream-flush';
 import { defaultToWidth } from '@/engine/to-width';
 import type { Unsubscribe, ValuesType } from '@/internal-types';
 import { arrayHas } from '@/utils/arrayHas';
+import { toLoadValue } from '@/utils/loadValue';
 import { safeCallback } from '@/utils/safeCallback';
-import { toSafeString } from '@/utils/validation';
 
 export type PeerStoreOptions = {
   nickname: string;
@@ -104,19 +108,39 @@ export class PeerStoreError extends Error {
 
 export type PeerStore = {
   readonly editorId: string;
-  /** The document as the element would save it. */
+  /** The document as the element would save it, in the form a file holds. */
   readonly value: string;
+  /**
+   * The document as this peer holds it, removed entities included, for another
+   * peer's setInitialValue, so an undo of a removal restores the entity whole there.
+   */
+  readonly runtimeValue: string;
   /** The live state, for readers that serialize it another way. */
   readonly state: RootState;
   readonly isReadonly: boolean;
   readonly isDestroyed: boolean;
   setReadonly: (readonly: boolean) => void;
   /**
-   * Replaces the document and forgets every undo entry and label with it,
-   * since those were taken against the old one. The one reseed operation.
+   * Replaces the document and forgets every undo entry, label and register with
+   * it, since those were taken against the old one, and once subscribed asks the
+   * other peers for their registers again.
    */
   setInitialValue: (value: string) => void;
   mergeClock: (version: number) => void;
+  /** A copy of the registers the peer holds, as JSON. */
+  getLWW: () => SharedRegisters;
+  /** Takes another store's registers and the version beside them, sending nothing. */
+  mergeLWW: (lww: SharedRegisters, version: number) => void;
+  /** The highest version the peer's clock has merged. */
+  getVersion: () => number;
+  /** Drops the cursor, focus, selection and marquee one other editor sent, with their expiry. */
+  forgetPeer: (editorId: string) => void;
+  /**
+   * Opens a document again with the registers and the version held beside it,
+   * as setInitialValue does, its selection dropped too, refused inside a group.
+   * A peer has no screen, so keepScreen changes nothing.
+   */
+  reseed: (value: string, options: ReseedOptions) => void;
   dispatch: (
     actions: CompositionActions,
     options?: DispatchOptions
@@ -150,6 +174,8 @@ const hasCreateActionTypes = arrayHas<string>([
   'index.add',
   'indexColumn.add',
   'relationship.add',
+  'tableGroup.add',
+  'dictionary.add',
 ]);
 
 /**
@@ -224,14 +250,17 @@ export function createPeerStore({
   readonly = false,
 }: PeerStoreOptions): PeerStore {
   let counter: ReturnType<typeof createCountingHistory> | null = null;
-  const rxStore = createRxStore(createEngineContext({ toWidth }), {
-    manualStreamFlush: true,
-    observable: false,
-    getHistory: options => {
-      counter = createCountingHistory(createHistory(options));
-      return counter.history;
-    },
-  });
+  const rxStore = createRxStore(
+    createEngineContext({ toWidth, routes: false }),
+    {
+      manualStreamFlush: true,
+      observable: false,
+      getHistory: options => {
+        counter = createCountingHistory(createHistory(options));
+        return counter.history;
+      },
+    }
+  );
   const getPushes = () => counter?.getPushes() ?? 0;
   const getLimit = () => counter?.getLimit() ?? 0;
   const sharedStore = createSharedStore(
@@ -441,15 +470,21 @@ export function createPeerStore({
   const setInitialValue = (value: string) => {
     assertUsable('setInitialValue');
     assertOutsideGroup('setInitialValue');
-    const safeValue = toSafeString(value);
-
     rxStore.dispatchSync(
       focusTableEndAction(),
-      initialLoadJsonAction$(isEmpty(safeValue) ? '{}' : safeValue)
+      initialLoadJsonAction$(toLoadValue(value))
     );
     rxStore.resetHistory();
     revertLog = [];
     redoStack = [];
+  };
+
+  const reseed = (value: string, { lww, version }: ReseedOptions) => {
+    assertUsable('reseed');
+    assertOutsideGroup('reseed');
+    rxStore.dispatchSync(unselectAllAction());
+    setInitialValue(value);
+    sharedStore.mergeLWW(lww, version);
   };
 
   const subscribe = (fn: (actions: AnyAction[]) => void): Unsubscribe => {
@@ -501,6 +536,9 @@ export function createPeerStore({
   return Object.freeze({
     editorId,
     get value() {
+      return toDocumentJson(rxStore.state);
+    },
+    get runtimeValue() {
       return toJson(rxStore.state);
     },
     get state() {
@@ -519,6 +557,14 @@ export function createPeerStore({
     mergeClock: (version: number) => {
       rxStore.context.clock.merge(version);
     },
+    getLWW: sharedStore.getLWW,
+    mergeLWW: (lww: SharedRegisters, version: number) => {
+      if (destroyed) return;
+      sharedStore.mergeLWW(lww, version);
+    },
+    getVersion: sharedStore.getVersion,
+    forgetPeer: sharedStore.forgetPeer,
+    reseed,
     dispatch,
     receive,
     group,

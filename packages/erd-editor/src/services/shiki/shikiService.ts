@@ -8,23 +8,30 @@ import {
 import { createJavaScriptRegexEngine } from 'shiki/engine/javascript';
 
 import type { Lang } from '@/constants/language';
+import { graphqlGrammar } from '@/services/shiki/graphqlGrammar';
 
 type Grammar = () => Promise<{ default: LanguageRegistration[] }>;
 
 /**
  * What constants/language.ts maps a Language onto, each imported the first
- * time it is highlighted, with what it embeds: graphql brings javascript,
- * typescript, jsx and tsx. A panel shows one language; the rest wait.
+ * time it is highlighted but GraphQL's, a small in-house copy read with the
+ * module. A panel shows one language; the rest wait.
  */
 const GRAMMARS = new Map<Lang, Grammar>([
   ['csharp', () => import('@shikijs/langs/csharp')],
   ['go', () => import('@shikijs/langs/go')],
-  ['graphql', () => import('@shikijs/langs/graphql')],
+  // In-house, so a lazy import would be a chunk of this package's own.
+  ['graphql', () => Promise.resolve({ default: [graphqlGrammar] })],
   ['java', () => import('@shikijs/langs/java')],
+  ['json', () => import('@shikijs/langs/json')],
   ['kotlin', () => import('@shikijs/langs/kotlin')],
+  ['mermaid', () => import('@shikijs/langs/mermaid')],
+  ['php', () => import('@shikijs/langs/php')],
   ['python', () => import('@shikijs/langs/python')],
+  ['rust', () => import('@shikijs/langs/rust')],
   ['scala', () => import('@shikijs/langs/scala')],
   ['sql', () => import('@shikijs/langs/sql')],
+  ['swift', () => import('@shikijs/langs/swift')],
   ['typescript', () => import('@shikijs/langs/typescript')],
 ]);
 

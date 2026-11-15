@@ -27,7 +27,14 @@ export const contentArea = css`
   width: 100%;
   height: 100%;
   overflow: hidden;
-  padding-left: 16px;
+  padding-inline-start: 16px;
+`;
+
+/* The page's name, and while readonly the badge that says so after it. */
+export const header = css`
+  display: flex;
+  align-items: center;
+  gap: 8px;
 `;
 
 export const content = css`
@@ -39,7 +46,8 @@ export const content = css`
 `;
 
 export const section = css`
-  margin: 0 32px 32px 0;
+  margin-block: 0 32px;
+  margin-inline: 0 32px;
   min-width: 300px;
 `;
 
@@ -54,6 +62,79 @@ export const row = css`
 export const vertical = (size: number) => css`
   width: ${size}px;
   height: 100%;
+`;
+
+export const lockSection = css`
+  display: flex;
+  flex-direction: column;
+  margin-bottom: 16px;
+`;
+
+/*
+ * The rows share the names' column, as wide as the longest name and never
+ * under 140px, so a longer language moves every value along and covers none.
+ */
+export const lockList = css`
+  display: grid;
+  grid-template-columns: minmax(140px, max-content) max-content;
+  grid-auto-rows: 28px;
+  align-items: center;
+  white-space: nowrap;
+`;
+
+export const lockRow = css`
+  display: contents;
+`;
+
+export const lockName = css`
+  padding-inline-end: 12px;
+`;
+
+/* A row's value and its button, so a long value moves its own button alone. */
+export const lockControl = css`
+  display: flex;
+  align-items: center;
+`;
+
+/* The value the file keeps, dimmed while unlocked, when it follows the screen. */
+export const lockValue = css`
+  min-width: 120px;
+  margin-inline-end: 8px;
+  color: var(--placeholder);
+
+  &[data-locked] {
+    color: var(--foreground);
+  }
+`;
+
+/* A 24px square tool, its lock in the accent while on. */
+export const lockButton = css`
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  border-radius: 4px;
+  color: var(--placeholder);
+  cursor: pointer;
+
+  &[data-locked] {
+    color: var(--active);
+  }
+
+  &:not(:disabled):hover {
+    background-color: var(--context-menu-hover);
+  }
+
+  &:disabled {
+    cursor: not-allowed;
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--input-active);
+    outline-offset: 1px;
+  }
 `;
 
 export const columnOrderSection = css`
@@ -87,5 +168,14 @@ export const columnOrderItem = css`
 
   &.dragging {
     opacity: 0.5;
+  }
+
+  &[data-readonly] {
+    cursor: default;
+  }
+
+  &[data-readonly]:hover {
+    background-color: transparent;
+    color: var(--foreground);
   }
 `;

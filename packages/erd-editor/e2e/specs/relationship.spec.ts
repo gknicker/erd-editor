@@ -35,6 +35,9 @@ const DRAW_CURSOR = /^url\("data:image\/svg\+xml,[^"]+"\) 16 16, auto$/;
 /** The editor root sets no cursor of its own once a draw is over. */
 const IDLE_CURSOR = 'auto';
 
+/** The Database bit PostgreSQL has in a saved document's settings. */
+const POSTGRESQL = 16;
+
 test.describe('relationship drawing', () => {
   test('draws a ZeroN relationship and mints the foreign key column', async ({
     erd,
@@ -62,10 +65,10 @@ test.describe('relationship drawing', () => {
     expect(relationship.end.columnIds).toEqual([fkColumnId]);
 
     const fkColumn = await erd.column(fkColumnId);
-    // The FK copies the source primary key's name and data type, and is marked
-    // notNull — but deliberately *not* primaryKey, which is why the
-    // relationship below stays non-identifying.
-    expect(fkColumn.name).toBe('id');
+    // The FK is named after the source table and its primary key, copies the
+    // key's data type, and is marked notNull, but deliberately not primaryKey,
+    // which is why the relationship below stays non-identifying.
+    expect(fkColumn.name).toBe('users_id');
     expect(fkColumn.dataType).toBe('int');
     expect(fkColumn.options).toBe(ColumnOption.notNull);
     expect(relationship.identification).toBe(false);
@@ -92,6 +95,34 @@ test.describe('relationship drawing', () => {
     await expect(
       erd.canvas.locator('.column-row[data-table-id="posts"]')
     ).toHaveCount(3);
+  });
+
+  test('gives the foreign key of a serial key the integer it stores and keeps the key serial', async ({
+    erd,
+  }) => {
+    const schema = twoTables();
+    schema.settings.database = POSTGRESQL;
+    schema.collections.tableColumnEntities.users_id.dataType = 'SERIAL';
+    await erd.seed(schema);
+    await erd.focusCanvas();
+
+    await erd.press(Shortcut.relationshipZeroN);
+    await erd.clickTableHeader('users');
+    await erd.clickTableHeader('posts');
+
+    const relationshipId = only(await erd.relationshipIds());
+    const relationship = await erd.relationship(relationshipId);
+    const fkColumnId = only(relationship.end.columnIds);
+    expect((await erd.column(fkColumnId)).dataType).toBe('INTEGER');
+
+    // Data type sync is on in the seed, and a change to the foreign key stops
+    // at the serial key instead of overwriting it.
+    const dataTypeCell = erd.cell(erd.columnEl(fkColumnId), 'columnDataType');
+    await erd.editCell(dataTypeCell, 'bigint');
+    await erd.press(Shortcut.stop);
+
+    expect((await erd.column(fkColumnId)).dataType).toBe('bigint');
+    expect((await erd.column('users_id')).dataType).toBe('SERIAL');
   });
 
   // The other three shortcuts differ in the bit they stamp on the relationship
@@ -187,6 +218,8 @@ test.describe('relationship drawing', () => {
     const fkColumnId = columnIds[columnIds.length - 1];
     expect(columnIds).toEqual(['users_id', 'users_name', fkColumnId]);
     expect(relationship.end.columnIds).toEqual([fkColumnId]);
+    // Named after the table, so it no longer repeats the key's own name.
+    expect((await erd.column(fkColumnId)).name).toBe('users_id');
 
     await expect(erd.relationshipEl(relationshipId)).toBeVisible();
     await expect(erd.columnKey(fkColumnId, 'fk')).toBeVisible();

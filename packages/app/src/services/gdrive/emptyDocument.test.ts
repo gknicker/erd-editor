@@ -12,7 +12,15 @@ describe('createEmptyDocument', () => {
 
     expect(isEditorDocument(json)).toBe(true);
     expect(json.version).toBe('3.0.0');
-    expect(json.doc.tableIds).toEqual([]);
+    expect(json.doc).toEqual({});
+  });
+
+  it('locks every setting, the view at the start, as a new diagram in the editor', () => {
+    const { settings } = JSON.parse(createEmptyDocument());
+
+    expect(settings.lockSettings).toBe(63);
+    expect(settings).not.toHaveProperty('ignoreSaveSettings');
+    expect(settings).toMatchObject({ originX: 0, originY: 0, zoomLevel: 1 });
   });
 
   it('opens with no edit to save', () => {

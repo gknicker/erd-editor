@@ -15,6 +15,10 @@ import {
   formatTable as formatTableDBML,
 } from './dbml';
 import {
+  createCode as createCodeDoctrine,
+  createTableCode as createTableCodeDoctrine,
+} from './doctrine';
+import {
   createCode as createCodeDrizzle,
   formatTable as formatTableDrizzle,
 } from './drizzle';
@@ -32,13 +36,33 @@ import {
   formatTable as formatTableJPA,
 } from './jpa';
 import {
+  createCode as createCodeJSONSchema,
+  createTableCode as createTableCodeJSONSchema,
+} from './jsonSchema';
+import {
   createCode as createCodeKotlin,
   formatTable as formatTableKotlin,
 } from './kotlin';
 import {
+  createCode as createCodeMermaid,
+  formatTable as formatTableMermaid,
+} from './mermaid';
+import {
+  createCode as createCodePHP,
+  createTableCode as createTableCodePHP,
+} from './php';
+import {
+  createCode as createCodeRust,
+  formatTable as formatTableRust,
+} from './rust';
+import {
   createCode as createCodeScala,
   formatTable as formatTableScala,
 } from './scala';
+import {
+  createCode as createCodeSeaORM,
+  createTableCode as createTableCodeSeaORM,
+} from './seaorm';
 import {
   createCode as createCodeSequelize,
   formatTable as formatTableSequelize,
@@ -48,6 +72,10 @@ import {
   formatTable as formatTableSQLAlchemy,
 } from './sqlalchemy';
 import {
+  createCode as createCodeSwift,
+  createTableCode as createTableCodeSwift,
+} from './swift';
+import {
   createCode as createCodeTypeORM,
   formatTable as formatTableTypeORM,
 } from './typeorm';
@@ -55,6 +83,10 @@ import {
   createCode as createCodeTypescript,
   formatTable as formatTableTypescript,
 } from './typescript';
+import {
+  createCode as createCodeZod,
+  createTableCode as createTableCodeZod,
+} from './zod';
 
 export function createGeneratorCode(state: RootState): string {
   const {
@@ -90,6 +122,22 @@ export function createGeneratorCode(state: RootState): string {
       return createCodeDBML(state);
     case Language.AML:
       return createCodeAML(state);
+    case Language.Mermaid:
+      return createCodeMermaid(state);
+    case Language.PHP:
+      return createCodePHP(state);
+    case Language.Doctrine:
+      return createCodeDoctrine(state);
+    case Language.Rust:
+      return createCodeRust(state);
+    case Language.SeaORM:
+      return createCodeSeaORM(state);
+    case Language.Swift:
+      return createCodeSwift(state);
+    case Language.Zod:
+      return createCodeZod(state);
+    case Language.JSONSchema:
+      return createCodeJSONSchema(state);
   }
 
   return '';
@@ -161,6 +209,31 @@ export function createGeneratorCodeTable(
       formatTableAML(state, { buffer, table });
       buffer.push('');
       break;
+    case Language.Mermaid:
+      formatTableMermaid(state, { buffer, table });
+      buffer.push('');
+      break;
+    case Language.Rust:
+      formatTableRust(state, { buffer, table });
+      buffer.push('');
+      break;
+    // Nothing may come before <?php, the blank line above included, or PHP
+    // refuses the declare(strict_types=1) under it.
+    case Language.PHP:
+      return createTableCodePHP(state, table);
+    case Language.Doctrine:
+      return createTableCodeDoctrine(state, table);
+    // A SeaORM module file holds the entity alone, not the pub mod around it.
+    case Language.SeaORM:
+      return createTableCodeSeaORM(state, table);
+    // One table's file needs the header the whole text writes once: Swift's
+    // import Foundation, the zod import, the $schema of a JSON Schema.
+    case Language.Swift:
+      return createTableCodeSwift(state, table);
+    case Language.Zod:
+      return createTableCodeZod(state, table);
+    case Language.JSONSchema:
+      return createTableCodeJSONSchema(state, table);
   }
 
   return buffer.join('\n');

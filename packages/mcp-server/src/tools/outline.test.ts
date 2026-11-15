@@ -1,12 +1,20 @@
 import {
   createPeerStore,
   defaultToWidth,
+  dictionaryActions,
+  Language,
   measureTableSize,
   type PeerStore,
+  settingsActions,
 } from '@dineug/erd-editor/peer.js';
 import { afterEach, describe, expect, it } from 'vite-plus/test';
 
-import { createSeededPeer, createSeedValue, SEED } from '@/__test-utils__/seed';
+import {
+  createCrossedRemovalPeer,
+  createSeededPeer,
+  createSeedValue,
+  SEED,
+} from '@/__test-utils__/seed';
 import { toDocumentList, toEntityDetails } from '@/tools/outline';
 import { runTool } from '@/tools/run';
 import { toAgentSnapshot } from '@/tools/snapshot';
@@ -34,12 +42,18 @@ describe('the document list', () => {
     const peer = seeded();
     const list = toDocumentList(peer.state);
 
-    expect(list.settings).toEqual(toAgentSnapshot(peer.state).settings);
+    const { ddlScripts, ...settings } = toAgentSnapshot(peer.state).settings;
+    expect(list.settings).toEqual(settings);
+    expect(ddlScripts).toEqual({ before: '', after: '' });
     expect(list).toMatchObject({
       tableCount: 3,
       relationshipCount: 1,
       indexCount: 1,
       memoCount: 1,
+      tableGroupCount: 1,
+      wordCount: 2,
+      termCount: 1,
+      domainCount: 1,
     });
     expect(Object.keys(list)).toEqual([
       'settings',
@@ -47,23 +61,68 @@ describe('the document list', () => {
       'relationshipCount',
       'indexCount',
       'memoCount',
+      'tableGroupCount',
+      'wordCount',
+      'termCount',
+      'domainCount',
       'tables',
       'relationships',
       'indexes',
+      'tableGroups',
       'memos',
+      'domains',
+      'terms',
+      'words',
     ]);
     expect(
-      list.tables.map(({ id, name, x, y, columnCount }) => ({
+      list.tables.map(({ id, name, groupId, x, y, columnCount }) => ({
         id,
         name,
+        groupId,
         x,
         y,
         columnCount,
       }))
     ).toEqual([
-      { id: SEED.users, name: 'users', x: 100, y: 100, columnCount: 2 },
-      { id: SEED.orders, name: 'orders', x: 500, y: 100, columnCount: 3 },
-      { id: SEED.empty, name: 'empty', x: 100, y: 500, columnCount: 0 },
+      {
+        id: SEED.users,
+        name: 'users',
+        groupId: SEED.group,
+        x: 100,
+        y: 100,
+        columnCount: 2,
+      },
+      {
+        id: SEED.orders,
+        name: 'orders',
+        groupId: undefined,
+        x: 500,
+        y: 100,
+        columnCount: 3,
+      },
+      {
+        id: SEED.empty,
+        name: 'empty',
+        groupId: undefined,
+        x: 100,
+        y: 500,
+        columnCount: 0,
+      },
+    ]);
+    expect(Object.keys(list.tables[1])).not.toContain('groupId');
+    expect(list.tables[0].logicalName).toBe('Member');
+    expect(Object.keys(list.tables[1])).not.toContain('logicalName');
+    expect(list.tableGroups).toEqual([
+      {
+        id: SEED.group,
+        name: 'accounts',
+        color: '',
+        x: 40,
+        y: 20,
+        width: 560,
+        height: 300,
+        tableCount: 1,
+      },
     ]);
     expect(list.relationships).toEqual([
       {
@@ -86,6 +145,88 @@ describe('the document list', () => {
       'width',
       'height',
     ]);
+    expect(list.domains).toEqual([
+      { id: SEED.domain, name: 'Identifier', dataType: 'INT' },
+    ]);
+    expect(list.terms).toEqual([
+      {
+        id: SEED.term,
+        name: 'Member Number',
+        physicalName: 'MBR_NO',
+        domainId: SEED.domain,
+      },
+    ]);
+    expect(list.words).toEqual([
+      { id: SEED.memberWord, name: 'Member', abbreviation: 'MBR' },
+      { id: SEED.numberWord, name: 'Number', abbreviation: 'NO' },
+    ]);
+  });
+
+  // A row the sheet inserted or sorted keeps its place in doc but not its
+  // turn, so the list and the snapshot read the keys, as the sheet does.
+  it("lists each dictionary's rows in the order of their keys, which the document's lists need not share", () => {
+    const peer = seeded();
+    peer.dispatch([
+      dictionaryActions.updateDictionaryAction({
+        kind: 'word',
+        id: SEED.memberWord,
+        values: { order: 'b0' },
+      }),
+      dictionaryActions.updateDictionaryAction({
+        kind: 'word',
+        id: SEED.numberWord,
+        values: { order: 'a0' },
+      }),
+    ]);
+    expect(peer.state.doc.wordIds).toEqual([SEED.memberWord, SEED.numberWord]);
+
+    const keyed = [SEED.numberWord, SEED.memberWord];
+    expect(toDocumentList(peer.state).words.map(({ id }) => id)).toEqual(keyed);
+    expect(toAgentSnapshot(peer.state).words.map(({ id }) => id)).toEqual(
+      keyed
+    );
+  });
+
+  it('lists and counts only the dictionary rows the document lists, a link to a removed domain as none', () => {
+    const peer = seeded();
+    runTool(peer, 'erd_remove_domain', { domainId: SEED.domain });
+    runTool(peer, 'erd_remove_word', { wordId: SEED.memberWord });
+
+    const list = toDocumentList(peer.state);
+
+    expect(peer.state.collections.domainEntities[SEED.domain]).toBeDefined();
+    expect(list).toMatchObject({ wordCount: 1, termCount: 1, domainCount: 0 });
+    expect(list.domains).toEqual([]);
+    expect(list.terms.map(({ id, domainId }) => [id, domainId])).toEqual([
+      [SEED.term, ''],
+    ]);
+    expect(list.words.map(({ id }) => id)).toEqual([SEED.numberWord]);
+  });
+
+  it('lists a locked code setting at the value the file saves, as the snapshot does', () => {
+    const peer = seeded();
+    peer.dispatch([
+      settingsActions.changeLanguageAction({ value: Language.TypeScript }),
+    ]);
+    const { settings } = toDocumentList(peer.state);
+
+    expect(settings.language).toBe('GraphQL');
+    expect(settings).not.toHaveProperty('canvasType');
+  });
+
+  it('leaves the Schema SQL scripts out, which the snapshot gives', () => {
+    const peer = seeded();
+    runTool(peer, 'erd_set_ddl_script', {
+      position: 'before',
+      sql: 'CREATE EXTENSION IF NOT EXISTS pgcrypto;',
+    });
+
+    expect(toDocumentList(peer.state).settings).not.toHaveProperty(
+      'ddlScripts'
+    );
+    expect(toAgentSnapshot(peer.state).settings.ddlScripts.before).toBe(
+      'CREATE EXTENSION IF NOT EXISTS pgcrypto;'
+    );
   });
 
   it('sizes each table with the text measure of the peer hooks and the table sort', () => {
@@ -107,23 +248,22 @@ describe('the document list', () => {
     peer.setInitialValue(JSON.stringify(document));
     const reference = toDocumentList(seeded().state).tables;
 
-    // The peer's own hooks rewrite the loaded widths a few milliseconds on;
-    // the list estimates on copies and leaves the loaded one where it was.
-    expect(toDocumentList(peer.state).tables).toEqual(reference);
-    expect(tableOf(peer, SEED.empty).ui.widthName).toBe(900);
-    await settled();
+    // The load measures with the peer's estimate before it returns, and nothing
+    // measures again after it.
     expect(tableOf(peer, SEED.empty).ui.widthName).not.toBe(900);
+    expect(toDocumentList(peer.state).tables).toEqual(reference);
+    await settled();
     expect(toDocumentList(peer.state).tables).toEqual(reference);
   });
 
   it('leaves the peer state as it found it, widths the peer would estimate otherwise included', () => {
-    const document = JSON.parse(createSeedValue());
-    document.collections.tableEntities[SEED.users].ui.widthName = 900;
-    document.collections.tableColumnEntities[SEED.userName].ui.widthDataType =
-      700;
     const peer = createPeerStore({ nickname: 'agent', presence: false });
     peers.push(peer);
-    peer.setInitialValue(JSON.stringify(document));
+    peer.setInitialValue(createSeedValue());
+    // Widths a load never leaves, so a list that measured into the state shows.
+    tableOf(peer, SEED.users).ui.widthName = 900;
+    peer.state.collections.tableColumnEntities[SEED.userName].ui.widthDataType =
+      700;
     const before = peer.value;
 
     toDocumentList(peer.state);
@@ -164,6 +304,22 @@ describe('the document list', () => {
     expect(list.tables.map(({ id }) => id)).toEqual([SEED.users, SEED.orders]);
     expect(list.tableCount).toBe(2);
     expect(list.memos).toEqual([]);
+  });
+
+  it('lists and counts only the relationships and indexes the file form keeps', () => {
+    const { peer, orphans, kept } = createCrossedRemovalPeer();
+    peers.push(peer);
+    expect(peer.state.doc.relationshipIds).toContain(orphans.relationship);
+    expect(peer.state.doc.indexIds).toContain(orphans.ordersIndex);
+
+    const list = toDocumentList(peer.state);
+    const file = JSON.parse(peer.value);
+
+    expect(list).toMatchObject({ relationshipCount: 0, indexCount: 1 });
+    expect(list.relationships).toEqual([]);
+    expect(list.indexes.map(({ id }) => id)).toEqual([kept.usersIndex]);
+    expect(file.doc.relationshipIds ?? []).toEqual([]);
+    expect(file.doc.indexIds).toEqual([kept.usersIndex]);
   });
 
   it('stays a small part of the snapshot', () => {
@@ -237,11 +393,86 @@ describe('the entity details', () => {
     expect(details.missing).toEqual([SEED.empty, 'nope', SEED.memo]);
   });
 
+  it('reports what the file form drops as missing, and an index without the columns its table dropped', () => {
+    const { peer, orphans, kept } = createCrossedRemovalPeer();
+    peers.push(peer);
+    expect(
+      peer.state.collections.indexEntities[kept.usersIndex].indexColumnIds
+    ).toEqual([orphans.nameColumn, kept.idColumn]);
+
+    const details = toEntityDetails(peer.state, {
+      relationshipIds: [orphans.relationship],
+      indexIds: [orphans.ordersIndex, kept.usersIndex],
+    });
+
+    expect(details.relationships).toEqual([]);
+    expect(
+      details.indexes!.map(({ id, columns }) => [
+        id,
+        columns.map(({ id }) => id),
+      ])
+    ).toEqual([[kept.usersIndex, [kept.idColumn]]]);
+    expect(details.missing).toEqual([
+      orphans.relationship,
+      orphans.ordersIndex,
+    ]);
+  });
+
   it('leaves missing out when every id is live', () => {
     const peer = seeded();
 
     expect(
       toEntityDetails(peer.state, { memoIds: [SEED.memo] })
     ).not.toHaveProperty('missing');
+  });
+
+  it('gives words, terms and domains as the snapshot does, in the order asked, a removed one as missing', () => {
+    const peer = seeded();
+    const snapshot = toAgentSnapshot(peer.state);
+
+    expect(
+      toEntityDetails(peer.state, {
+        domainIds: [SEED.domain],
+        termIds: [SEED.term],
+        wordIds: [SEED.numberWord, SEED.memberWord],
+      })
+    ).toEqual({
+      words: [snapshot.words[1], snapshot.words[0]],
+      terms: snapshot.terms,
+      domains: snapshot.domains,
+    });
+
+    runTool(peer, 'erd_remove_domain', { domainId: SEED.domain });
+    expect(
+      toEntityDetails(peer.state, {
+        termIds: [SEED.term],
+        domainIds: [SEED.domain, 'nope'],
+      })
+    ).toEqual({
+      terms: [{ ...snapshot.terms[0], domainId: '' }],
+      domains: [],
+      missing: [SEED.domain, 'nope'],
+    });
+    expect(
+      toEntityDetails(peer.state, { tableIds: [SEED.users] }).tables![0]
+        .columns[0].domainId
+    ).toBe('');
+  });
+
+  it('gives a table group with its tables as the snapshot does, and a removed one as missing', () => {
+    const peer = seeded();
+    const snapshot = toAgentSnapshot(peer.state);
+
+    expect(
+      toEntityDetails(peer.state, { tableGroupIds: [SEED.group] })
+    ).toEqual({ tableGroups: snapshot.tableGroups });
+    expect(
+      toEntityDetails(peer.state, { tableIds: [SEED.users] }).tables![0].groupId
+    ).toBe(SEED.group);
+
+    runTool(peer, 'erd_remove_table_group', { groupId: SEED.group });
+    expect(
+      toEntityDetails(peer.state, { tableGroupIds: [SEED.group] })
+    ).toEqual({ tableGroups: [], missing: [SEED.group] });
   });
 });

@@ -1,3 +1,4 @@
+import { Show } from '@/constants/schema';
 import { ShowMode } from '@/engine/modules/editor/state';
 import { getSourceView } from '@/engine/modules/editor/view';
 import { RootState } from '@/engine/state';
@@ -55,7 +56,13 @@ function tableSize(
  */
 function documentTableSize(state: RootState, table: Table): PendingSize {
   const { settings } = state;
-  const key = `${getWidthGeneration()}|${settings.show}|${settings.maxWidthComment}|${table.ui.widthName}|${table.ui.widthComment}|${table.columnIds.length}`;
+  // The referential action labels sit on the connectors, the groups behind the
+  // tables and the memos beside them, and none sizes a table.
+  const show =
+    settings.show &
+    ~(Show.hideReferentialAction | Show.hideTableGroup | Show.hideMemo);
+  // The name view picks which header names the width adds up.
+  const key = `${getWidthGeneration()}|${show}|${settings.maxWidthComment}|${settings.nameViewMode}|${table.ui.widthName}|${table.ui.widthLogicalName}|${table.ui.widthComment}|${table.columnIds.length}`;
 
   return {
     key,
@@ -68,8 +75,8 @@ function documentTableSize(state: RootState, table: Table): PendingSize {
 }
 
 /**
- * Keyed on what a view draws and none of the settings only the document shows,
- * so a show bit toggled under a view neither remeasures it nor makes its scene
+ * Keyed on what a view draws, its name view included, and on none of the settings only the
+ * document shows, so a show bit toggled under a view neither remeasures it nor makes its scene
  * an observer of the bit. With no view open every row shows, as under allFields, and the two share a key.
  */
 function viewTableSize(
@@ -77,9 +84,10 @@ function viewTableSize(
   table: Table,
   source: ViewSource
 ): PendingSize {
+  const { nameViewMode } = state.settings;
   const showMode = getSourceView(state, source)?.showMode ?? ShowMode.allFields;
   const columnIds = getVisibleColumnIds(state, table, source);
-  const key = `${getWidthGeneration()}|${table.ui.widthName}|${table.columnIds.length}|${showMode}|${columnIds.length}`;
+  const key = `${getWidthGeneration()}|${nameViewMode}|${table.ui.widthName}|${table.ui.widthLogicalName}|${table.columnIds.length}|${showMode}|${columnIds.length}`;
 
   return {
     key,

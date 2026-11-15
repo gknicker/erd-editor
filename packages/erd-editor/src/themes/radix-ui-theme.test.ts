@@ -10,31 +10,39 @@ import {
   GrayColor,
   GrayColorList,
   Palette,
-  type ThemeOptions,
+  type ResolvedThemeOptions,
 } from '@/themes/radix-ui-theme';
 import { ThemeConfig } from '@/themes/radix-ui-theme.config';
 import { ThemeTokens } from '@/themes/tokens';
 
-const lightGrayBlue: ThemeOptions = {
+const lightGrayBlue: ResolvedThemeOptions = {
   appearance: Appearance.light,
   grayColor: GrayColor.gray,
   accentColor: AccentColor.blue,
 };
 
-const darkGrayBlue: ThemeOptions = {
+const darkGrayBlue: ResolvedThemeOptions = {
   appearance: Appearance.dark,
   grayColor: GrayColor.gray,
   accentColor: AccentColor.blue,
 };
 
-const everyThemeOptions: ThemeOptions[] = AppearanceList.flatMap(appearance =>
-  GrayColorList.flatMap(grayColor =>
-    AccentColorList.map(accentColor => ({ appearance, grayColor, accentColor }))
-  )
+const everyThemeOptions: ResolvedThemeOptions[] = AppearanceList.flatMap(
+  appearance =>
+    GrayColorList.flatMap(grayColor =>
+      AccentColorList.map(accentColor => ({
+        appearance,
+        grayColor,
+        accentColor,
+      }))
+    )
 );
 
-const labelOf = ({ appearance, grayColor, accentColor }: ThemeOptions) =>
-  `${appearance}/${grayColor}/${accentColor}`;
+const labelOf = ({
+  appearance,
+  grayColor,
+  accentColor,
+}: ResolvedThemeOptions) => `${appearance}/${grayColor}/${accentColor}`;
 
 /** The 0..1 linear-light channels of an opaque #rrggbb radix step. */
 function toLinearRgb(hex: string): number[] {
@@ -185,19 +193,15 @@ describe('createTheme', () => {
     const light = createTheme(lightGrayBlue);
     const dark = createTheme(darkGrayBlue);
 
-    expect(light.diffInsertBackground).toBe('#d6f1df');
-    expect(light.diffDeleteBackground).toBe('#ffdbdc');
-    expect(light.diffCrossBackground).toBe('#d5efff');
     expect(light.diffInsertForeground).toBe('#218358');
     expect(light.diffDeleteForeground).toBe('#ce2c31');
-    expect(light.diffCrossForeground).toBe('#0d74ce');
+    expect(light.diffModifyForeground).toBe('#895503');
+    expect(light.diffRenameForeground).toBe('#0d74ce');
 
-    expect(dark.diffInsertBackground).toBe('#113b29');
-    expect(dark.diffDeleteBackground).toBe('#500f1c');
-    expect(dark.diffCrossBackground).toBe('#003362');
     expect(dark.diffInsertForeground).toBe('#3dd68c');
     expect(dark.diffDeleteForeground).toBe('#ff9592');
-    expect(dark.diffCrossForeground).toBe('#70b8ff');
+    expect(dark.diffModifyForeground).toBe('#ffca16');
+    expect(dark.diffRenameForeground).toBe('#70b8ff');
   });
 
   it('honours a non-gray gray scale and a non-blue accent', () => {
@@ -364,6 +368,207 @@ describe('the selected column row fill', () => {
   });
 });
 
+describe('the tree', () => {
+  it('keeps its muted text at 4.5:1 on the tree and on each row fill', () => {
+    everyThemeOptions.forEach(options => {
+      const theme = createTheme(options);
+
+      [theme.treeBackground, theme.treeRowHover, theme.treeRowCurrent].forEach(
+        fill => {
+          expect(
+            contrast(theme.treeMuted, fill),
+            labelOf(options)
+          ).toBeGreaterThanOrEqual(4.5);
+        }
+      );
+    });
+  });
+
+  /**
+   * Measured 2026-10-13: on the light hover fill, gray-3, the added green and
+   * the renamed blue read 4.14 and 4.18 at the least, so they hold 4.1 there;
+   * every other status letter keeps 4.5:1 on the tree and under the pointer.
+   */
+  it('keeps the diff status letters at 4.5:1 on the tree and under the pointer, save the light hover green and blue', () => {
+    everyThemeOptions.forEach(options => {
+      const theme = createTheme(options);
+      const light = options.appearance === Appearance.light;
+      const statuses = [
+        theme.diffInsertForeground,
+        theme.diffDeleteForeground,
+        theme.diffModifyForeground,
+        theme.diffRenameForeground,
+      ];
+
+      statuses.forEach(status => {
+        expect(
+          contrast(status, theme.treeBackground),
+          labelOf(options)
+        ).toBeGreaterThanOrEqual(4.5);
+      });
+      statuses.forEach(status => {
+        const fallback =
+          light &&
+          (status === theme.diffInsertForeground ||
+            status === theme.diffRenameForeground);
+        expect(
+          contrast(status, theme.treeRowHover),
+          labelOf(options)
+        ).toBeGreaterThanOrEqual(fallback ? 4.1 : 4.5);
+      });
+    });
+  });
+
+  it('keeps the diff colours at 4.5:1 on a table, where the canvas writes a changed cell in them', () => {
+    everyThemeOptions.forEach(options => {
+      const theme = createTheme(options);
+
+      [
+        theme.diffInsertForeground,
+        theme.diffDeleteForeground,
+        theme.diffModifyForeground,
+        theme.diffRenameForeground,
+      ].forEach(status => {
+        expect(
+          contrast(status, theme.tableBackground),
+          labelOf(options)
+        ).toBeGreaterThanOrEqual(4.5);
+      });
+    });
+  });
+
+  it('keeps a match, active text on its fill, at 4.5:1', () => {
+    everyThemeOptions.forEach(options => {
+      const theme = createTheme(options);
+
+      expect(
+        contrast(theme.active, theme.treeMatch),
+        labelOf(options)
+      ).toBeGreaterThanOrEqual(4.5);
+    });
+  });
+
+  it('keeps the key glyphs at 3:1 on the tree and on each row fill', () => {
+    everyThemeOptions.forEach(options => {
+      const theme = createTheme(options);
+
+      [theme.treeBackground, theme.treeRowHover, theme.treeRowCurrent].forEach(
+        fill => {
+          [theme.keyPK, theme.keyFK, theme.keyPFK].forEach(icon => {
+            expect(
+              contrast(icon, fill),
+              labelOf(options)
+            ).toBeGreaterThanOrEqual(3);
+          });
+        }
+      );
+    });
+  });
+});
+
+describe('the dictionary marks', () => {
+  /**
+   * Measured 2026-10-20: light red and amber step 11 read 3.95:1 and under on
+   * the gray-5 band, so light takes #b1252a and #835103, whose least, 4.70:1
+   * and 4.73:1, is on the gray-6 a neutral accent selects a row with.
+   */
+  it('keeps the error and warning text at 4.5:1 on every fill the canvas writes a marked cell on', () => {
+    everyThemeOptions.forEach(options => {
+      const theme = createTheme(options);
+      // A header's names sit on its band, a row's on the body or on the fill a
+      // hover or a selection gives the row.
+      const fills = [
+        theme.tableBackground,
+        theme.tableHeaderBackground,
+        theme.columnHover,
+        theme.columnSelect,
+        theme.columnSelectHover,
+      ];
+
+      [
+        theme.dictionaryErrorForeground,
+        theme.dictionaryWarningForeground,
+      ].forEach(mark => {
+        fills.forEach(fill => {
+          expect(
+            contrast(mark, fill),
+            `${labelOf(options)} ${mark} on ${fill}`
+          ).toBeGreaterThanOrEqual(4.5);
+        });
+      });
+    });
+  });
+
+  it('keeps the text of each level at 4.5:1 on its own fill, where a sheet marks a cell', () => {
+    everyThemeOptions.forEach(options => {
+      const theme = createTheme(options);
+
+      expect(
+        contrast(
+          theme.dictionaryErrorForeground,
+          theme.dictionaryErrorBackground
+        ),
+        labelOf(options)
+      ).toBeGreaterThanOrEqual(4.5);
+      expect(
+        contrast(
+          theme.dictionaryWarningForeground,
+          theme.dictionaryWarningBackground
+        ),
+        labelOf(options)
+      ).toBeGreaterThanOrEqual(4.5);
+    });
+  });
+});
+
+describe('the Dictionary tab sheet', () => {
+  /**
+   * Measured 2026-10-20: gray-11 labels read 4.48:1 at the least on a light
+   * gray-5 band and 4.19:1 on a light gray-6, so light takes a gray-4 band, at
+   * 4.82:1 the least, and a neutral accent keeps accent-3, at 5.10:1 the least.
+   */
+  it('keeps the cell text and the header labels at 4.5:1 on each fill of its own they are drawn on', () => {
+    everyThemeOptions.forEach(options => {
+      const theme = createTheme(options);
+      // The grid writes a cell in active and a header label in foreground,
+      // which a header keeps where a selected range meets its row or column.
+      const pairs = [
+        [theme.active, theme.dictionaryBackground],
+        [theme.foreground, theme.dictionaryHeaderBackground],
+        [theme.foreground, theme.dictionaryHeaderSelect],
+      ];
+
+      pairs.forEach(([text, fill]) => {
+        expect(
+          contrast(text, fill),
+          `${labelOf(options)} ${text} on ${fill}`
+        ).toBeGreaterThanOrEqual(4.5);
+      });
+    });
+  });
+
+  /** The least CIE76 step an eye tells apart; light gray under the gray accent, the nearest, measures 2.8. */
+  const MIN_VISIBLE_DELTA_E = 2.3;
+
+  /** Twice that, as the table header band keeps; light olive, the nearest, measures 7.95. */
+  const MIN_BAND_DELTA_E = 5;
+
+  it('sets its header band apart from its cells, and a selected header apart from the band', () => {
+    everyThemeOptions.forEach(options => {
+      const theme = createTheme(options);
+
+      expect(
+        deltaE(theme.dictionaryHeaderBackground, theme.dictionaryBackground),
+        labelOf(options)
+      ).toBeGreaterThan(MIN_BAND_DELTA_E);
+      expect(
+        deltaE(theme.dictionaryHeaderSelect, theme.dictionaryHeaderBackground),
+        labelOf(options)
+      ).toBeGreaterThan(MIN_VISIBLE_DELTA_E);
+    });
+  });
+});
+
 describe('the table header band', () => {
   /** Twice the least visible CIE76 step. Light sand, the nearest to its canvas, measures 5.32. */
   const MIN_BAND_DELTA_E = 5;
@@ -395,8 +600,61 @@ describe('the table header band', () => {
   });
 });
 
+/** A #rrggbbaa radix alpha step laid over an opaque #rrggbb, as the canvas paints it. */
+function over(top: string, bottom: string): string {
+  expect(top).toMatch(/^#[0-9a-f]{8}$/);
+  const alpha = parseInt(top.slice(7, 9), 16) / 255;
+  const channel = (index: number) =>
+    Math.round(
+      parseInt(top.slice(index, index + 2), 16) * alpha +
+        parseInt(bottom.slice(index, index + 2), 16) * (1 - alpha)
+    )
+      .toString(16)
+      .padStart(2, '0');
+  return `#${[1, 3, 5].map(channel).join('')}`;
+}
+
+describe('a table group with no color', () => {
+  /** The bar for the table header band, which the bar must not be read as. */
+  const MIN_GROUP_DELTA_E = 5;
+
+  it('sets its bar, its body and the canvas apart, and its bar apart from a table header, in every theme', () => {
+    everyThemeOptions.forEach(options => {
+      const theme = createTheme(options);
+      const body = over(theme.tableGroupBackground, theme.canvasBackground);
+      const label = labelOf(options);
+
+      expect(
+        deltaE(theme.tableGroupHeaderBackground, body),
+        label
+      ).toBeGreaterThan(MIN_GROUP_DELTA_E);
+      expect(deltaE(body, theme.canvasBackground), label).toBeGreaterThan(
+        MIN_GROUP_DELTA_E
+      );
+      expect(
+        deltaE(theme.tableGroupHeaderBackground, theme.tableHeaderBackground),
+        label
+      ).toBeGreaterThan(MIN_GROUP_DELTA_E);
+    });
+  });
+
+  it('keeps the group name at 7:1 on its bar and frames the box in the bar color', () => {
+    everyThemeOptions.forEach(options => {
+      const theme = createTheme(options);
+
+      expect(
+        contrast(theme.active, theme.tableGroupHeaderBackground),
+        labelOf(options)
+      ).toBeGreaterThanOrEqual(7);
+      expect(theme.tableGroupBorder, labelOf(options)).toBe(
+        theme.tableGroupHeaderBackground
+      );
+    });
+  });
+});
+
 describe('the light appearance', () => {
-  const lightThemeOptions = everyThemeOptions.filter(
+  const lightResolvedThemeOptions = everyThemeOptions.filter(
     options => options.appearance === Appearance.light
   );
 
@@ -404,7 +662,7 @@ describe('the light appearance', () => {
   const MIN_GRAPHIC_CONTRAST = 3;
 
   it('keeps every key icon at 3:1 on the table it sits in', () => {
-    lightThemeOptions.forEach(options => {
+    lightResolvedThemeOptions.forEach(options => {
       const theme = createTheme(options);
 
       [theme.keyPK, theme.keyFK, theme.keyPFK].forEach(key => {
@@ -417,7 +675,7 @@ describe('the light appearance', () => {
   });
 
   it('keeps both relationship colours at 3:1 on the canvas', () => {
-    lightThemeOptions.forEach(options => {
+    lightResolvedThemeOptions.forEach(options => {
       const theme = createTheme(options);
 
       [theme.keyFK, theme.keyPFK].forEach(line => {
@@ -430,7 +688,7 @@ describe('the light appearance', () => {
   });
 
   it('edges a table more sharply against the canvas than the shared gray-6 did', () => {
-    lightThemeOptions.forEach(options => {
+    lightResolvedThemeOptions.forEach(options => {
       const theme = createTheme(options);
 
       expect(
@@ -441,7 +699,7 @@ describe('the light appearance', () => {
   });
 
   it('draws every visualization stroke a gray step darker than dark does', () => {
-    lightThemeOptions.forEach(options => {
+    lightResolvedThemeOptions.forEach(options => {
       const theme = createTheme(options);
       const label = labelOf(options);
 
@@ -453,7 +711,7 @@ describe('the light appearance', () => {
 
   /** These strokes rest dimmed until a hover lights them, so dark sets their bar rather than 3:1. */
   it('holds every visualization stroke level with its dark contrast', () => {
-    lightThemeOptions.forEach(options => {
+    lightResolvedThemeOptions.forEach(options => {
       const light = createTheme(options);
       const dark = createTheme({ ...options, appearance: Appearance.dark });
       const strokes = [
@@ -474,7 +732,7 @@ describe('the light appearance', () => {
   });
 
   it('casts a table and memo shadow in a colour konva reads alpha from', () => {
-    lightThemeOptions.forEach(options => {
+    lightResolvedThemeOptions.forEach(options => {
       const theme = createTheme(options);
 
       expect(theme.tableShadow, labelOf(options)).toBe('rgba(0, 0, 0, 0.18)');

@@ -1,12 +1,18 @@
+import {
+  SchemaSQLHeaderList,
+  SchemaSQLStatementsList,
+} from '@dineug/erd-editor/peer.js';
 import { Cause, Context, Effect, Schema } from 'effect';
-import { McpSchema, McpServer } from 'effect/unstable/ai';
+import { McpSchema, McpServer } from 'effect/ai';
 
 import { SessionManager } from '@/session/manager';
+import { CHECK_LEVELS, CHECKS_TOOL } from '@/tools/checks';
 import { describeArg, describeTool } from '@/tools/copy';
 import { ToolError, ToolErrorCode } from '@/tools/errors';
 import { answer } from '@/tools/handlers';
 import type { EntityIds } from '@/tools/outline';
 import {
+  checksReader,
   type DocumentReader,
   documentReader,
   entityReader,
@@ -30,18 +36,33 @@ const stringsField = (tool: string, name: string) =>
     })
   );
 
+const literalsField = <const L extends ReadonlyArray<string>>(
+  tool: string,
+  name: string,
+  literals: L
+) =>
+  Schema.optionalKey(
+    Schema.Literals(literals).annotate({
+      description: describeArg(tool, name),
+    })
+  );
+
 export const ReadParams = Schema.Struct({
   path: pathField(READ_TOOL),
   format: Schema.Literals(READ_FORMATS).annotate({
     description: describeArg(READ_TOOL, 'format'),
   }),
-  vendor: Schema.optionalKey(
-    Schema.Literals(SQL_VENDORS).annotate({
-      description: describeArg(READ_TOOL, 'vendor'),
+  vendor: literalsField(READ_TOOL, 'vendor', SQL_VENDORS),
+  statements: literalsField(READ_TOOL, 'statements', SchemaSQLStatementsList),
+  header: literalsField(READ_TOOL, 'header', SchemaSQLHeaderList),
+  logicalNameAsComment: Schema.optionalKey(
+    Schema.Boolean.annotate({
+      description: describeArg(READ_TOOL, 'logicalNameAsComment'),
     })
   ),
   tableIds: stringsField(READ_TOOL, 'tableIds'),
   tableNames: stringsField(READ_TOOL, 'tableNames'),
+  groupNames: stringsField(READ_TOOL, 'groupNames'),
 });
 
 export const ListParams = Schema.Struct({
@@ -66,6 +87,23 @@ export const ListParams = Schema.Struct({
   ),
 });
 
+export const ChecksParams = Schema.Struct({
+  path: pathField(CHECKS_TOOL),
+  level: literalsField(CHECKS_TOOL, 'level', CHECK_LEVELS),
+  tableIds: stringsField(CHECKS_TOOL, 'tableIds'),
+  tableNames: stringsField(CHECKS_TOOL, 'tableNames'),
+  offset: Schema.optionalKey(
+    Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).annotate({
+      description: describeArg(CHECKS_TOOL, 'offset'),
+    })
+  ),
+  limit: Schema.optionalKey(
+    Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).annotate({
+      description: describeArg(CHECKS_TOOL, 'limit'),
+    })
+  ),
+});
+
 /** The kinds erd_get takes, each an argument of its own; tables by id or by name. */
 export const ENTITY_ID_ARGS = Object.freeze([
   'tableIds',
@@ -73,6 +111,10 @@ export const ENTITY_ID_ARGS = Object.freeze([
   'relationshipIds',
   'indexIds',
   'memoIds',
+  'tableGroupIds',
+  'wordIds',
+  'termIds',
+  'domainIds',
 ] as const);
 
 export const GetParams = Schema.Struct({
@@ -82,6 +124,10 @@ export const GetParams = Schema.Struct({
   relationshipIds: stringsField(GET_TOOL, 'relationshipIds'),
   indexIds: stringsField(GET_TOOL, 'indexIds'),
   memoIds: stringsField(GET_TOOL, 'memoIds'),
+  tableGroupIds: stringsField(GET_TOOL, 'tableGroupIds'),
+  wordIds: stringsField(GET_TOOL, 'wordIds'),
+  termIds: stringsField(GET_TOOL, 'termIds'),
+  domainIds: stringsField(GET_TOOL, 'domainIds'),
 });
 
 /** erd_get needs one id at least, in any of its lists. */
@@ -164,16 +210,35 @@ const addReadTool = <
     });
   });
 
-/** erd_read, erd_list and erd_get, in that order. */
+/** erd_read, erd_list, erd_get and erd_list_checks, in that order. */
 export const registerReadTools = Effect.gen(function* () {
   yield* addReadTool(
     READ_TOOL,
     ReadParams,
-    ({ format, vendor, tableIds, tableNames }) =>
-      Effect.succeed(documentReader(format, vendor, { tableIds, tableNames }))
+    ({
+      format,
+      vendor,
+      statements,
+      header,
+      logicalNameAsComment,
+      tableIds,
+      tableNames,
+      groupNames,
+    }) =>
+      Effect.succeed(
+        documentReader(
+          format,
+          vendor,
+          { tableIds, tableNames, groupNames },
+          { statements, header, logicalNameAsComment }
+        )
+      )
   );
   yield* addReadTool(LIST_TOOL, ListParams, ({ path: _, ...options }) =>
     Effect.succeed(listReader(options))
   );
   yield* addReadTool(GET_TOOL, GetParams, toEntityReader);
+  yield* addReadTool(CHECKS_TOOL, ChecksParams, ({ path: _, ...options }) =>
+    Effect.succeed(checksReader(options))
+  );
 });

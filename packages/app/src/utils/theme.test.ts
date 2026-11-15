@@ -5,6 +5,8 @@ import { join } from 'node:path';
 
 import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
 
+import { embedAppearance, parseEmbedParams } from './embedOptions';
+import { isEmbedViewerUrl } from './embedPath';
 import {
   applyDocumentAppearance,
   applyPresetTheme,
@@ -100,8 +102,8 @@ describe('parseThemeState', () => {
     ).toEqual({ ...DEFAULT_THEME, grayColor: 'sand' });
   });
 
-  it('defaults to dark, the look every existing user has', () => {
-    expect(DEFAULT_THEME.appearance).toBe('dark');
+  it('defaults to system, as the display language does', () => {
+    expect(DEFAULT_THEME.appearance).toBe('system');
   });
 });
 
@@ -142,13 +144,13 @@ describe('applyPresetTheme', () => {
     grayColor: 'olive',
   };
 
-  it('keeps system when the builder only changed colors', () => {
+  it('keeps system when the builder picks colors under it', () => {
     expect(
-      applyPresetTheme(
-        system,
-        { appearance: 'light', accentColor: 'tomato', grayColor: 'sand' },
-        'light'
-      )
+      applyPresetTheme(system, {
+        appearance: 'system',
+        accentColor: 'tomato',
+        grayColor: 'sand',
+      })
     ).toEqual({
       appearance: 'system',
       accentColor: 'tomato',
@@ -156,37 +158,40 @@ describe('applyPresetTheme', () => {
     });
   });
 
-  it('leaves system for the appearance the builder switched to', () => {
+  it('takes the light or dark the builder picked over system', () => {
     expect(
-      applyPresetTheme(
-        system,
-        { appearance: 'dark', accentColor: 'jade', grayColor: 'olive' },
-        'light'
-      )
+      applyPresetTheme(system, {
+        appearance: 'dark',
+        accentColor: 'jade',
+        grayColor: 'olive',
+      })
     ).toEqual({ ...system, appearance: 'dark' });
+    expect(applyPresetTheme(system, { appearance: 'light' }).appearance).toBe(
+      'light'
+    );
   });
 
-  it('switches an explicit preference the same way', () => {
+  it('takes system the builder picked over light or dark', () => {
     const light: ThemeState = { ...system, appearance: 'light' };
 
-    expect(
-      applyPresetTheme(light, { appearance: 'dark' }, 'light').appearance
-    ).toBe('dark');
-    expect(
-      applyPresetTheme(light, { appearance: 'light' }, 'light').appearance
-    ).toBe('light');
+    expect(applyPresetTheme(light, { appearance: 'system' }).appearance).toBe(
+      'system'
+    );
+    expect(applyPresetTheme(light, { appearance: 'dark' }).appearance).toBe(
+      'dark'
+    );
   });
 
   it('ignores what the builder never emits and keeps the current values', () => {
     expect(
-      applyPresetTheme(
-        system,
-        { appearance: 'system', accentColor: 'beige', grayColor: 3 },
-        'dark'
-      )
+      applyPresetTheme(system, {
+        appearance: 'inherit',
+        accentColor: 'beige',
+        grayColor: 3,
+      })
     ).toEqual(system);
-    expect(applyPresetTheme(system, null, 'dark')).toEqual(system);
-    expect(applyPresetTheme(system, 'dark', 'light')).toEqual(system);
+    expect(applyPresetTheme(system, null)).toEqual(system);
+    expect(applyPresetTheme(system, 'dark')).toEqual(system);
   });
 });
 
@@ -250,26 +255,29 @@ describe('index.html pre-paint script', () => {
   const html = readFileSync(join(process.cwd(), 'index.html'), 'utf8');
   const script = /<script>([\s\S]*?)<\/script>/.exec(html)?.[1] ?? '';
 
-  function runScript(stored: string | null | Error, systemDark: boolean) {
+  function runScript(
+    stored: string | null | Error,
+    systemDark: boolean,
+    url = 'https://erd-editor.io/'
+  ) {
     const root = document.createElement('html');
     root.className = 'dark-theme';
     root.style.colorScheme = 'dark';
-    const localStorage = {
-      getItem: (key: string) => {
-        if (stored instanceof Error) throw stored;
-        return key === THEME_STORAGE_KEY ? stored : null;
-      },
-    };
+    const getItem = vi.fn((key: string) => {
+      if (stored instanceof Error) throw stored;
+      return key === THEME_STORAGE_KEY ? stored : null;
+    });
     const matchMedia = (query: string) => ({
       matches: query === SYSTEM_DARK_QUERY && systemDark,
     });
 
-    new Function('localStorage', 'matchMedia', 'document', script)(
-      localStorage,
+    new Function('localStorage', 'matchMedia', 'document', 'location', script)(
+      { getItem },
       matchMedia,
-      { documentElement: root }
+      { documentElement: root },
+      new URL(url)
     );
-    return root;
+    return Object.assign(root, { getItem });
   }
 
   function expectedAppearance(stored: string | null, systemDark: boolean) {
@@ -321,10 +329,91 @@ describe('index.html pre-paint script', () => {
     }
   );
 
-  it('keeps dark when storage is blocked', () => {
-    const root = runScript(new Error('SecurityError'), false);
+  it.each([
+    [true, 'dark'],
+    [false, 'light'],
+  ])(
+    'follows a dark system %s when storage is blocked',
+    (systemDark, appearance) => {
+      const root = runScript(new Error('SecurityError'), systemDark);
 
-    expect([...root.classList]).toEqual(['dark-theme']);
-    expect(root.style.colorScheme).toBe('dark');
+      expect([...root.classList]).toEqual([`${appearance}-theme`]);
+      expect(root.style.colorScheme).toBe(appearance);
+    }
+  );
+
+  const STORED_LIGHT = JSON.stringify({
+    ...DEFAULT_THEME,
+    appearance: 'light',
   });
+  const STORED_DARK = JSON.stringify({ ...DEFAULT_THEME, appearance: 'dark' });
+
+  it.each([
+    ['/embed?src=x', 'dark'],
+    ['/embed', 'light'],
+    ['/', 'light'],
+    ['/embed?src=x&theme=light', 'light'],
+    ['/embed?src=x&theme=LIGHT', 'dark'],
+  ])(
+    'paints %s as %s from a stored light theme on a dark system',
+    (path, appearance) => {
+      const root = runScript(
+        STORED_LIGHT,
+        true,
+        `https://erd-editor.io${path}`
+      );
+
+      expect([...root.classList]).toEqual([`${appearance}-theme`]);
+      expect(root.style.colorScheme).toBe(appearance);
+    }
+  );
+
+  // Whether each URL is an embedded viewer, as the router and main.tsx judge it.
+  const URLS = [
+    ['/embed?src=x', true],
+    ['/embed?src=x&theme=light', true],
+    ['/embed?src=x&theme=dark', true],
+    ['/embed?src=x&theme=system', true],
+    ['/embed?src=x&theme=LIGHT', true],
+    ['/embed?theme=dark&src=x&theme=light', true],
+    ['/EMBED?src=x', true],
+    ['/%65mbed?src=x', true],
+    ['/embed/?src=x', true],
+    ['/embed//?src=x&theme=light', true],
+    ['/', false],
+    ['/?schema=x', false],
+    ['/embed', false],
+    ['/embedx?src=x', false],
+    ['/embed/x?src=x', false],
+    ['/embed%2F?src=x', false],
+    ['/embed%?src=x', false],
+    ['/embed?src=', false],
+    ['/embed?src=&src=x', false],
+    ['/embed?theme=light', false],
+    ['/embed?theme=light&src=', false],
+    ['/live/#room,key', false],
+  ] as const;
+
+  it.each(
+    URLS.flatMap(([path, viewer]) =>
+      [STORED_LIGHT, STORED_DARK].flatMap(stored => [
+        [path, viewer, stored, true] as const,
+        [path, viewer, stored, false] as const,
+      ])
+    )
+  )(
+    'agrees with isEmbedViewerUrl on %s (%s) with %s stored and a dark system %s',
+    (path, viewer, stored, systemDark) => {
+      const url = new URL(`https://erd-editor.io${path}`);
+      const root = runScript(stored, systemDark, url.href);
+      const appearance = isEmbedViewerUrl(url)
+        ? embedAppearance(parseEmbedParams(url.search).theme, systemDark)
+        : expectedAppearance(stored, systemDark);
+
+      expect(isEmbedViewerUrl(url)).toBe(viewer);
+      expect([...root.classList]).toEqual([`${appearance}-theme`]);
+      expect(root.style.colorScheme).toBe(appearance);
+      expect(root.getItem).toHaveBeenCalledTimes(viewer ? 0 : 1);
+    }
+  );
 });

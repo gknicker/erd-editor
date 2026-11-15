@@ -1,0 +1,1366 @@
+import { toJson } from '@dineug/erd-editor-schema';
+import { AnyAction, DOMTemplateLiterals, html } from '@dineug/r-html';
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from 'vite-plus/test';
+
+import {
+  createTestAppContext,
+  flush,
+  mount,
+  Mounted,
+} from '@/__test-utils__/index';
+import { AppContext } from '@/components/appContext';
+import {
+  APPEND_GAP,
+  TABLE_SORT_MARGIN,
+  TABLE_SORT_START,
+} from '@/constants/layout';
+import {
+  CanvasType,
+  Database,
+  Language,
+  NameViewMode,
+  Show,
+} from '@/constants/schema';
+import { addDictionaryAction } from '@/engine/modules/dictionary/atom.actions';
+import {
+  changeViewportAction,
+  clearAction,
+  initialClearAction,
+  initialLoadJsonAction,
+  loadJsonAction,
+  selectAction,
+} from '@/engine/modules/editor/atom.actions';
+import {
+  loadJsonAction$,
+  moveAllAction$,
+} from '@/engine/modules/editor/generator.actions';
+import {
+  SelectType,
+  ViewKind,
+  VisualizationMode,
+} from '@/engine/modules/editor/state';
+import { getActiveView } from '@/engine/modules/editor/view';
+import {
+  changeVisualizationModeAction,
+  viewOpenAction,
+} from '@/engine/modules/editor/view.actions';
+import { addMemoAction } from '@/engine/modules/memo/atom.actions';
+import {
+  changeCanvasTypeAction,
+  changeDatabaseAction,
+  changeDatabaseNameAction,
+  changeLanguageAction,
+  changeShowAction,
+  scrollToAction,
+  toNameViewModeAction,
+} from '@/engine/modules/settings/atom.actions';
+import {
+  addTableAction,
+  changeTableNameAction,
+  moveToTableAction,
+} from '@/engine/modules/table/atom.actions';
+import { dropTablesIntoGroupsAction$ } from '@/engine/modules/table-group/generator.actions';
+import type { RxStoreOptions } from '@/engine/rx-store';
+import { getContentRect } from '@/konva/scene/contentBounds';
+import { getTableRect, unionRect } from '@/konva/scene/metrics';
+import { toScreenPoint } from '@/konva/scene/viewport';
+import type { ElkLayoutPoint, ElkLayoutRequest } from '@/services/elk-layout';
+import { flattenElkNodes } from '@/services/elk-layout/elkGraph';
+import {
+  appendSchema,
+  appendSchemaJSON,
+  appendSchemaPlaced,
+  importSchema,
+  importSchemaPlaced,
+} from '@/utils/file/importSchema';
+import { padRect } from '@/utils/tableGroup';
+
+type Layout = (
+  request: ElkLayoutRequest,
+  onSlow?: () => void
+) => Promise<ElkLayoutPoint[]>;
+
+const hoisted = vi.hoisted(() => ({
+  elkLayout: null as Layout | null,
+  requests: [] as ElkLayoutRequest[],
+}));
+
+/**
+ * ELK answers from a shared worker, which this environment runs none of, so
+ * the one call across that boundary is the one the test stands in for.
+ */
+vi.mock('@/services/elk-layout', async importOriginal => {
+  const actual = await importOriginal<typeof import('@/services/elk-layout')>();
+
+  return {
+    ...actual,
+    createElkLayout: (request: ElkLayoutRequest, onSlow?: () => void) => {
+      hoisted.requests.push(request);
+      return hoisted.elkLayout
+        ? hoisted.elkLayout(request, onSlow)
+        : Promise.reject(new Error('no worker'));
+    },
+  };
+});
+
+/** A fan: one parent and two children, which Flow and the grid lay out apart. */
+const FAN_SQL = `
+CREATE TABLE users (id INT NOT NULL, PRIMARY KEY (id));
+CREATE TABLE posts (
+  id INT NOT NULL,
+  user_id INT,
+  PRIMARY KEY (id),
+  FOREIGN KEY (user_id) REFERENCES users (id)
+);
+CREATE TABLE photos (
+  id INT NOT NULL,
+  user_id INT,
+  PRIMARY KEY (id),
+  FOREIGN KEY (user_id) REFERENCES users (id)
+);
+`;
+
+const BOOKS_SQL = `
+CREATE TABLE authors (id INT NOT NULL, PRIMARY KEY (id));
+CREATE TABLE books (
+  id INT NOT NULL,
+  author_id INT,
+  PRIMARY KEY (id),
+  FOREIGN KEY (author_id) REFERENCES authors (id)
+);
+`;
+
+const UNRELATED_SQL = `
+CREATE TABLE users (id INT NOT NULL);
+CREATE TABLE posts (id INT NOT NULL);
+`;
+
+/** FAN_SQL's fan in DBML, its parent and one child in a table group. */
+const FAN_DBML = `
+Table users {
+  id int [pk, not null]
+}
+Table posts {
+  id int [pk, not null]
+  user_id int [ref: > users.id]
+}
+Table photos {
+  id int [pk, not null]
+  user_id int [ref: > users.id]
+}
+TableGroup accounts [color: #3498db] {
+  users
+  posts
+}
+`;
+
+type Toast = { message: DOMTemplateLiterals; close?: Promise<void> };
+
+let toastContainer: Mounted | null = null;
+const contexts: AppContext[] = [];
+
+function createApp(options?: RxStoreOptions): AppContext {
+  const app = createTestAppContext(options);
+  contexts.push(app);
+  app.store.dispatchSync(
+    addTableAction({ id: 'old', ui: { x: 900, y: 900, zIndex: 2 } }),
+    changeTableNameAction({ id: 'old', value: 'old' })
+  );
+  return app;
+}
+
+function tableNames(app: AppContext): string[] {
+  const { doc, collections } = app.store.state;
+  return doc.tableIds.map(id => collections.tableEntities[id].name);
+}
+
+function cornerOf(app: AppContext, name: string) {
+  const { collections } = app.store.state;
+  const table = Object.values(collections.tableEntities).find(
+    table => table.name === name
+  );
+  if (!table) throw new Error(`table not found: ${name}`);
+  return { x: table.ui.x, y: table.ui.y };
+}
+
+/** The first group the document lists. */
+function groupOf(app: AppContext) {
+  const { doc, collections } = app.store.state;
+  return collections.tableGroupEntities[doc.tableGroupIds[0]];
+}
+
+function groupRect(app: AppContext) {
+  const { x, y, width, height } = groupOf(app).ui;
+  return { x, y, width, height };
+}
+
+/** The box a group takes round the tables named: their bounds and the padding. */
+function membersBox(app: AppContext, names: string[]) {
+  const { state } = app.store;
+  return padRect(
+    Object.values(state.collections.tableEntities)
+      .filter(table => names.includes(table.name))
+      .map(table => getTableRect(state, table))
+      .reduce(unionRect)
+  );
+}
+
+/** Three tables of one column, which the grid lays out in one row. */
+const ROW_SQL = `
+CREATE TABLE a (id INT);
+CREATE TABLE b (id INT);
+CREATE TABLE c (id INT);
+`;
+
+/** The gaps between neighbours in a row of the tables named, as the scene draws them. */
+function rowGaps(app: AppContext, names: string[]): number[] {
+  const { state } = app.store;
+  const rects = Object.values(state.collections.tableEntities)
+    .filter(table => names.includes(table.name))
+    .map(table => getTableRect(state, table))
+    .sort((a, b) => a.y - b.y || a.x - b.x);
+
+  return rects.slice(1).flatMap((rect, index) => {
+    const before = rects[index];
+    return rect.y === before.y ? [rect.x - before.x - before.width] : [];
+  });
+}
+
+/** The reader's own switch to the view of both, which the name view's lock keeps out of the file. */
+function showBothNames(app: AppContext) {
+  app.store.dispatchSync(
+    toNameViewModeAction(app.store.state, NameViewMode.both, false)
+  );
+}
+
+/** The batches that reach the document, past the history's own bookkeeping. */
+function recordActions(app: AppContext): AnyAction[][] {
+  const batches: AnyAction[][] = [];
+  app.store.subscribe(actions => {
+    const edits = actions.filter(
+      ({ type }) => type !== 'editor.changeHasHistory'
+    );
+    edits.length && batches.push(edits);
+  });
+  return batches;
+}
+
+const ADD_TYPES = ['table.add', 'memo.add', 'tableGroup.add'];
+
+/** The ids a batch's selects name ahead of the add that creates them. */
+function selectedBeforeAdded(actions: AnyAction[]): string[] {
+  const added = new Set<string>();
+  const early: string[] = [];
+  for (const { type, payload } of actions) {
+    if (ADD_TYPES.includes(type)) added.add(payload.id);
+    if (type === 'editor.select') {
+      early.push(...Object.keys(payload).filter(id => !added.has(id)));
+    }
+  }
+  return early;
+}
+
+function listenToasts(app: AppContext): Toast[] {
+  const toasts: Toast[] = [];
+  app.emitter.on({
+    openToast: ({ payload }) => {
+      toasts.push(payload as Toast);
+    },
+  });
+  return toasts;
+}
+
+/**
+ * Dispatches a load and fails if any placement still hears it: the only thing
+ * a placement does with a load is abort its own controller.
+ */
+function expectDeafToLoads(app: AppContext) {
+  const abort = vi.spyOn(AbortController.prototype, 'abort');
+  try {
+    app.store.dispatchSync(loadJsonAction$(JSON.stringify({})));
+    expect(abort).not.toHaveBeenCalled();
+  } finally {
+    abort.mockRestore();
+  }
+}
+
+/** A Flow layout in a column, each node 1000 below the last, from 400, 300. */
+const columnLayout: Layout = async ({ nodes }) =>
+  nodes.map((node, index) => ({ id: node.id, x: 400, y: 300 + index * 1000 }));
+
+/**
+ * The column layout held back until the test lands it, raising the slow toast
+ * at once when asked to, as a layout that runs long does.
+ */
+function pendingColumnLayout({ slow = false } = {}): () => Promise<void> {
+  let settle = (_: ElkLayoutPoint[]) => {};
+  hoisted.elkLayout = (_, onSlow) => {
+    slow && onSlow?.();
+    return new Promise(resolve => (settle = resolve));
+  };
+  return async () => settle(await columnLayout(hoisted.requests[0]));
+}
+
+beforeEach(() => {
+  hoisted.elkLayout = null;
+  hoisted.requests.length = 0;
+});
+
+afterEach(() => {
+  contexts.splice(0).forEach(app => app.store.destroy());
+  toastContainer?.unmount();
+  toastContainer = null;
+});
+
+/**
+ * A new document, every lock on, whose reader moved the tab and the language
+ * off the values the locks hold.
+ */
+function moveOffTheLocks(app: AppContext) {
+  app.store.dispatchSync(
+    changeCanvasTypeAction({ value: CanvasType.schemaSQL }),
+    changeLanguageAction({ value: Language.Kotlin })
+  );
+}
+
+/** The screen and the file of each setting the move touched. */
+function screenAndFile(app: AppContext) {
+  const { settings } = app.store.state;
+  const saved = JSON.parse(toJson(app.store.state)).settings;
+  return {
+    screen: [settings.canvasType, settings.language],
+    locked: [settings.lockedValues.canvasType, settings.lockedValues.language],
+    file: [saved.canvasType, saved.language],
+  };
+}
+
+const KEPT_LOCKS = {
+  screen: [CanvasType.schemaSQL, Language.Kotlin],
+  locked: [CanvasType.ERD, Language.GraphQL],
+  file: [CanvasType.ERD, Language.GraphQL],
+};
+
+/** A row in each dictionary, which no schema text brings. */
+const dictionaryRows = () => [
+  addDictionaryAction({ kind: 'word', id: 'w1', values: { name: 'W' } }),
+  addDictionaryAction({ kind: 'term', id: 't1', values: { name: 'T' } }),
+  addDictionaryAction({ kind: 'domain', id: 'd1', values: { name: 'D' } }),
+];
+
+const KEPT_IDS = { words: ['w1'], terms: ['t1'], domains: ['d1'] };
+
+function dictionaryIds(app: AppContext) {
+  const { doc } = app.store.state;
+  return {
+    words: [...doc.wordIds],
+    terms: [...doc.termIds],
+    domains: [...doc.domainIds],
+  };
+}
+
+describe('importSchema', () => {
+  it('replaces the document at once with the tables in the grid', () => {
+    const app = createApp();
+
+    importSchema(app, 'sql', UNRELATED_SQL);
+
+    expect(tableNames(app).sort()).toEqual(['posts', 'users']);
+    expect(hoisted.requests).toEqual([]);
+    const corners = [cornerOf(app, 'users'), cornerOf(app, 'posts')];
+    expect(corners.every(({ y }) => y === TABLE_SORT_START)).toBe(true);
+  });
+
+  it('keeps the screen of each locked setting and the value the lock holds', () => {
+    const app = createApp();
+    moveOffTheLocks(app);
+
+    importSchema(app, 'sql', UNRELATED_SQL);
+
+    expect(screenAndFile(app)).toEqual(KEPT_LOCKS);
+  });
+
+  it('keeps the screen of each locked setting through an undo of the import', () => {
+    const app = createApp();
+    moveOffTheLocks(app);
+    importSchema(app, 'sql', UNRELATED_SQL);
+
+    app.store.undo();
+
+    expect(tableNames(app)).toEqual(['old']);
+    expect(screenAndFile(app)).toEqual(KEPT_LOCKS);
+  });
+
+  it.each([
+    ['graphql', 'type Row { id: ID! at: DateTime! }'],
+    ['dbml', 'Enum status { created }\nTable orders {\n  state status\n}'],
+    ['aml', 'type state (created, shipped)\n\norders\n  status state'],
+  ] as const)(
+    'reads %s by the database of the document it lands in',
+    (type, value) => {
+      const typesUnder = (database: number) => {
+        const app = createApp();
+        app.store.dispatchSync(changeDatabaseAction({ value: database }));
+        importSchema(app, type, value);
+        return Object.values(
+          app.store.state.collections.tableColumnEntities
+        ).map(column => column.dataType);
+      };
+
+      expect(typesUnder(Database.PostgreSQL)).not.toEqual(
+        typesUnder(Database.MySQL)
+      );
+    }
+  );
+
+  it.each([
+    ['graphql', 'type Account { id: ID! }', 'Account'],
+    ['dbml', 'Table accounts {\n  id int\n}', 'accounts'],
+    ['aml', 'accounts\n  id int pk', 'accounts'],
+  ] as const)('reads %s through its own parser', (type, value, name) => {
+    const app = createApp();
+
+    importSchema(app, type, value);
+
+    expect(tableNames(app)).toEqual([name]);
+  });
+
+  it('keeps the words, terms and domains of the document it replaces', () => {
+    const app = createApp();
+    app.store.dispatchSync(...dictionaryRows());
+
+    importSchema(app, 'sql', UNRELATED_SQL);
+
+    expect(tableNames(app).sort()).toEqual(['posts', 'users']);
+    expect(dictionaryIds(app)).toEqual(KEPT_IDS);
+  });
+
+  it('wraps a DBML table group round its members where the grid puts them', () => {
+    const app = createApp();
+
+    importSchema(app, 'dbml', FAN_DBML);
+
+    expect(groupOf(app)).toMatchObject({ name: 'accounts', color: '#3498db' });
+    expect(groupRect(app)).toEqual(membersBox(app, ['users', 'posts']));
+  });
+
+  it('lays the grid out at the widths the reader sees in the view of both', () => {
+    const app = createApp();
+    showBothNames(app);
+
+    importSchema(app, 'sql', ROW_SQL);
+
+    expect(app.store.state.settings.nameViewMode).toBe(NameViewMode.both);
+    expect(rowGaps(app, ['a', 'b', 'c'])).toEqual([
+      TABLE_SORT_MARGIN,
+      TABLE_SORT_MARGIN,
+    ]);
+  });
+});
+
+describe('importSchemaPlaced', () => {
+  it('lands the tables where Flow put them, from the corner the grid starts at', async () => {
+    const app = createApp();
+    hoisted.elkLayout = columnLayout;
+
+    await importSchemaPlaced(app, 'sql', FAN_SQL);
+
+    expect(hoisted.requests).toHaveLength(1);
+    expect(hoisted.requests[0].placement).toBe('flow');
+    const [first, second, third] = hoisted.requests[0].nodes.map(({ id }) => {
+      const table = app.store.state.collections.tableEntities[id];
+      return { x: table.ui.x, y: table.ui.y };
+    });
+    expect(first).toEqual({ x: TABLE_SORT_START, y: TABLE_SORT_START });
+    expect(second).toEqual({ x: TABLE_SORT_START, y: TABLE_SORT_START + 1000 });
+    expect(third).toEqual({ x: TABLE_SORT_START, y: TABLE_SORT_START + 2000 });
+  });
+
+  it('leaves the document as it was until the placement lands, then replaces it in one batch', async () => {
+    const app = createApp();
+    const batches = recordActions(app);
+    const land = pendingColumnLayout();
+
+    const placing = importSchemaPlaced(app, 'sql', FAN_SQL);
+    await flush();
+    expect(tableNames(app)).toEqual(['old']);
+    expect(batches).toEqual([]);
+
+    await land();
+    await placing;
+
+    expect(batches).toHaveLength(1);
+    expect(batches[0].map(({ type }) => type)).toEqual([
+      'editor.clear',
+      'editor.loadJson',
+    ]);
+  });
+
+  it('puts the previous document back on a single undo', async () => {
+    const app = createApp();
+    hoisted.elkLayout = columnLayout;
+
+    await importSchemaPlaced(app, 'sql', FAN_SQL);
+    expect(tableNames(app).sort()).toEqual(['photos', 'posts', 'users']);
+
+    app.store.undo();
+
+    expect(tableNames(app)).toEqual(['old']);
+    expect(cornerOf(app, 'old')).toEqual({ x: 900, y: 900 });
+  });
+
+  it('keeps the words, terms and domains, through its undo and redo too', async () => {
+    const app = createApp();
+    app.store.dispatchSync(...dictionaryRows());
+    hoisted.elkLayout = columnLayout;
+    const batches = recordActions(app);
+
+    await importSchemaPlaced(app, 'sql', FAN_SQL);
+
+    expect(batches[0].map(({ payload }) => payload?.keepDictionaries)).toEqual([
+      true,
+      true,
+    ]);
+    expect(tableNames(app).sort()).toEqual(['photos', 'posts', 'users']);
+    expect(dictionaryIds(app)).toEqual(KEPT_IDS);
+
+    app.store.undo();
+    expect(tableNames(app)).toEqual(['old']);
+    expect(dictionaryIds(app)).toEqual(KEPT_IDS);
+
+    app.store.redo();
+    expect(dictionaryIds(app)).toEqual(KEPT_IDS);
+    expect(app.store.state.collections.termEntities.t1.name).toBe('T');
+  });
+
+  it('keeps every setting of the document it replaces but the view', async () => {
+    const app = createApp();
+    app.store.dispatchSync(
+      changeDatabaseNameAction({ value: 'shop' }),
+      changeDatabaseAction({ value: Database.PostgreSQL }),
+      scrollToAction({ originX: -700, originY: -700 })
+    );
+    hoisted.elkLayout = columnLayout;
+
+    await importSchemaPlaced(app, 'sql', FAN_SQL);
+
+    const { settings } = app.store.state;
+    expect(settings.databaseName).toBe('shop');
+    expect(settings.database).toBe(Database.PostgreSQL);
+    expect([settings.originX, settings.originY]).not.toEqual([-700, -700]);
+  });
+
+  it('keeps the screen of each locked setting and the value the lock holds', async () => {
+    const app = createApp();
+    moveOffTheLocks(app);
+    hoisted.elkLayout = columnLayout;
+
+    await importSchemaPlaced(app, 'sql', FAN_SQL);
+
+    expect(screenAndFile(app)).toEqual(KEPT_LOCKS);
+  });
+
+  it('keeps a setting changed while it places, the tab the reader moved to included', async () => {
+    const app = createApp();
+    const land = pendingColumnLayout();
+
+    const placing = importSchemaPlaced(app, 'sql', FAN_SQL);
+    await flush();
+    app.store.dispatchSync(
+      changeDatabaseNameAction({ value: 'renamed' }),
+      changeCanvasTypeAction({ value: CanvasType.settings })
+    );
+    await land();
+    await placing;
+
+    const { settings } = app.store.state;
+    expect(tableNames(app).sort()).toEqual(['photos', 'posts', 'users']);
+    expect(settings.databaseName).toBe('renamed');
+    expect(settings.canvasType).toBe(CanvasType.settings);
+  });
+
+  it('lands the grid at once where the tables share no relationship, its points inside the load', async () => {
+    const app = createApp();
+    const batches = recordActions(app);
+
+    await importSchemaPlaced(app, 'sql', UNRELATED_SQL);
+
+    expect(hoisted.requests).toEqual([]);
+    expect(batches).toHaveLength(1);
+    expect(batches[0].map(({ type }) => type)).toEqual([
+      'editor.clear',
+      'editor.loadJson',
+    ]);
+    expect(tableNames(app).sort()).toEqual(['posts', 'users']);
+    const { tableEntities } = JSON.parse(
+      batches[0][1].payload.value
+    ).collections;
+    for (const id of app.store.state.doc.tableIds) {
+      const { x, y } = app.store.state.collections.tableEntities[id].ui;
+      expect(tableEntities[id].ui).toMatchObject({ x, y });
+    }
+    expect(cornerOf(app, 'users').y).toBe(TABLE_SORT_START);
+  });
+
+  it('lands the grid without a word when no layout comes back', async () => {
+    const app = createApp();
+    const toasts = listenToasts(app);
+
+    await importSchemaPlaced(app, 'sql', FAN_SQL);
+
+    expect(hoisted.requests).toHaveLength(1);
+    expect(tableNames(app).sort()).toEqual(['photos', 'posts', 'users']);
+    expect(cornerOf(app, 'users').y).toBe(TABLE_SORT_START);
+    expect(cornerOf(app, 'posts').y).toBe(TABLE_SORT_START);
+    expect(toasts).toEqual([]);
+  });
+
+  it('wraps a group round where Flow put its members, its box at the corner the grid starts at', async () => {
+    const app = createApp();
+    hoisted.elkLayout = async ({ nodes }) =>
+      flattenElkNodes(nodes).map((node, index) => ({
+        id: node.id,
+        x: 400,
+        y: 300 + index * 1000,
+      }));
+
+    await importSchemaPlaced(app, 'dbml', FAN_DBML);
+
+    const { id } = groupOf(app);
+    expect(
+      hoisted.requests[0].nodes.some(({ children }) =>
+        children?.some(child => child.id === id)
+      )
+    ).toBe(true);
+    expect(groupRect(app)).toEqual(membersBox(app, ['users', 'posts']));
+    expect(groupRect(app)).toMatchObject({
+      x: TABLE_SORT_START,
+      y: TABLE_SORT_START,
+    });
+  });
+
+  it('wraps a group round its members in the grid when no layout comes back', async () => {
+    const app = createApp();
+
+    await importSchemaPlaced(app, 'dbml', FAN_DBML);
+
+    expect(groupRect(app)).toEqual(membersBox(app, ['users', 'posts']));
+  });
+
+  it('lands the grid at once when the slow toast is cancelled', async () => {
+    const app = createApp();
+    const toasts = listenToasts(app);
+    hoisted.elkLayout = (_, onSlow) => {
+      onSlow?.();
+      return new Promise(() => {});
+    };
+
+    const placing = importSchemaPlaced(app, 'sql', FAN_SQL);
+    await flush();
+    app.store.dispatchSync(changeDatabaseNameAction({ value: 'renamed' }));
+    const batches = recordActions(app);
+    toastContainer = mount(html`${toasts[0].message}`);
+    await flush();
+    expect(toastContainer.container.textContent).toContain('Placing tables');
+    toastContainer.container
+      .querySelector('button')
+      ?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    await placing;
+
+    expect(batches).toHaveLength(1);
+    expect(tableNames(app).sort()).toEqual(['photos', 'posts', 'users']);
+    expect(cornerOf(app, 'users').y).toBe(TABLE_SORT_START);
+    expect(cornerOf(app, 'posts').y).toBe(TABLE_SORT_START);
+    expect(app.store.state.settings.databaseName).toBe('renamed');
+
+    app.store.undo();
+
+    expect(tableNames(app)).toEqual(['old']);
+    expectDeafToLoads(app);
+  });
+
+  it('lands nothing once a load has replaced the document meanwhile', async () => {
+    const app = createApp();
+    const toasts = listenToasts(app);
+    const land = pendingColumnLayout({ slow: true });
+
+    const placing = importSchemaPlaced(app, 'sql', FAN_SQL);
+    await flush();
+    importSchema(app, 'sql', 'CREATE TABLE newer (id INT);');
+    await expect(toasts[0].close).resolves.toBeUndefined();
+    await land();
+    await placing;
+
+    expect(tableNames(app)).toEqual(['newer']);
+    expectDeafToLoads(app);
+  });
+
+  it.each([
+    ['editor.clear', () => clearAction()],
+    ['editor.loadJson', () => loadJsonAction({ value: '{}' })],
+    ['editor.initialClear', () => initialClearAction()],
+    ['editor.initialLoadJson', () => initialLoadJsonAction({ value: '{}' })],
+  ])('lands nothing once an %s alone has come meanwhile', async (_, load) => {
+    const app = createApp();
+    const land = pendingColumnLayout();
+
+    const placing = importSchemaPlaced(app, 'sql', FAN_SQL);
+    await flush();
+    app.store.dispatchSync(load());
+    await land();
+    await placing;
+
+    expect(tableNames(app)).toEqual([]);
+  });
+
+  it('lands the import started last when two placements overlap', async () => {
+    const app = createApp();
+    const settles: Array<(points: ElkLayoutPoint[]) => void> = [];
+    hoisted.elkLayout = () => new Promise(resolve => settles.push(resolve));
+
+    const first = importSchemaPlaced(app, 'sql', FAN_SQL);
+    await flush();
+    const second = importSchemaPlaced(app, 'sql', BOOKS_SQL);
+    await flush();
+    // The worker answers in the order it was asked, the first layout first.
+    settles[0](await columnLayout(hoisted.requests[0]));
+    await first;
+    expect(tableNames(app)).toEqual(['old']);
+    settles[1](await columnLayout(hoisted.requests[1]));
+    await second;
+
+    expect(tableNames(app).sort()).toEqual(['authors', 'books']);
+    expect(cornerOf(app, 'authors').x).toBe(TABLE_SORT_START);
+    expect(cornerOf(app, 'books').x).toBe(TABLE_SORT_START);
+  });
+
+  it('stops listening for loads once it has landed', async () => {
+    const app = createApp();
+    hoisted.elkLayout = columnLayout;
+
+    await importSchemaPlaced(app, 'sql', FAN_SQL);
+
+    expect(tableNames(app).sort()).toEqual(['photos', 'posts', 'users']);
+    expectDeafToLoads(app);
+  });
+
+  it('asks no layout and opens no toast in a readonly editor, which drops the load', async () => {
+    let readonly = false;
+    const app = createApp({ getReadonly: () => readonly });
+    readonly = true;
+    const toasts = listenToasts(app);
+    hoisted.elkLayout = (request, onSlow) => {
+      onSlow?.();
+      return columnLayout(request);
+    };
+
+    await expect(
+      importSchemaPlaced(app, 'sql', FAN_SQL)
+    ).resolves.toBeUndefined();
+
+    expect(hoisted.requests).toEqual([]);
+    expect(toasts).toEqual([]);
+    expect(tableNames(app)).toEqual(['old']);
+  });
+});
+
+/** Where the block an append brings starts, under the diagram as it stands. */
+function appendCorner(app: AppContext) {
+  const content = getContentRect(app.store.state)!;
+  return { x: content.x, y: content.y + content.height + APPEND_GAP };
+}
+
+/** The diagram on a screen of its own, which the appended block lies below. */
+function createScreenApp(options?: RxStoreOptions): AppContext {
+  const app = createApp(options);
+  app.store.dispatchSync(changeViewportAction({ width: 800, height: 600 }));
+  app.store.resetHistory();
+  return app;
+}
+
+/** The ids of the selected tables, in the order the selection holds them. */
+function selectedTableIds(app: AppContext): string[] {
+  return Object.entries(app.store.state.editor.selectedMap)
+    .filter(([, type]) => type === SelectType.table)
+    .map(([id]) => id);
+}
+
+function selectedNames(app: AppContext): string[] {
+  const { collections } = app.store.state;
+  return selectedTableIds(app)
+    .map(id => collections.tableEntities[id].name)
+    .sort();
+}
+
+/** Stands the reader in a Flow view, which drops every edit of the document. */
+function enterFlow(app: AppContext) {
+  app.store.dispatchSync(
+    changeCanvasTypeAction({ value: CanvasType.visualization }),
+    changeVisualizationModeAction({ value: VisualizationMode.flow }),
+    viewOpenAction({ kind: ViewKind.flow })
+  );
+}
+
+/** Stands the reader in the visualization tab's Graph mode, which opens no view. */
+function enterGraph(app: AppContext) {
+  app.store.dispatchSync(
+    changeCanvasTypeAction({ value: CanvasType.visualization }),
+    changeVisualizationModeAction({ value: VisualizationMode.graph })
+  );
+}
+
+/** Stands the reader on a tab of the editor other than the ERD. */
+const enterTab = (value: string) => (app: AppContext) => {
+  app.store.dispatchSync(changeCanvasTypeAction({ value }));
+};
+
+/** A document of two tables 600 apart and a memo 360 below the first. */
+function accountsJson(): string {
+  const app = createTestAppContext();
+  contexts.push(app);
+  app.store.dispatchSync(
+    addTableAction({ id: 'accounts', ui: { x: 40, y: 40, zIndex: 2 } }),
+    changeTableNameAction({ id: 'accounts', value: 'accounts' }),
+    addTableAction({ id: 'roles', ui: { x: 640, y: 40, zIndex: 2 } }),
+    changeTableNameAction({ id: 'roles', value: 'roles' }),
+    addMemoAction({ id: 'note', ui: { x: 40, y: 400, zIndex: 2 } })
+  );
+  return JSON.stringify(app.store.state);
+}
+
+describe('appendSchema', () => {
+  it('adds an import below the diagram in the grid, leaving what was there', () => {
+    const app = createScreenApp();
+    const corner = appendCorner(app);
+
+    appendSchema(app, 'sql', UNRELATED_SQL);
+
+    expect(tableNames(app)[0]).toBe('old');
+    expect(tableNames(app).slice(1).sort()).toEqual(['posts', 'users']);
+    expect(cornerOf(app, 'old')).toEqual({ x: 900, y: 900 });
+    for (const name of ['posts', 'users']) {
+      expect(cornerOf(app, name).y).toBe(corner.y);
+    }
+    expect(hoisted.requests).toEqual([]);
+  });
+
+  it('lays its grid out at the widths the reader sees in the view of both', () => {
+    const app = createScreenApp();
+    showBothNames(app);
+
+    appendSchema(app, 'sql', ROW_SQL);
+
+    expect(rowGaps(app, ['a', 'b', 'c'])).toEqual([
+      TABLE_SORT_MARGIN,
+      TABLE_SORT_MARGIN,
+    ]);
+  });
+
+  it('selects what it adds alone and brings it on screen', () => {
+    const app = createScreenApp();
+    app.store.dispatchSync(
+      scrollToAction({ originX: 0, originY: 0 }),
+      changeDatabaseNameAction({ value: 'kept' })
+    );
+
+    appendSchema(app, 'sql', UNRELATED_SQL);
+
+    const { settings } = app.store.state;
+    expect(selectedNames(app)).toEqual(['posts', 'users']);
+    expect(settings.originY).toBeLessThan(0);
+    expect(settings.databaseName).toBe('kept');
+  });
+
+  it.each([
+    [
+      'a DBML file, a table group among them',
+      (app: AppContext) => appendSchema(app, 'dbml', FAN_DBML),
+      SelectType.tableGroup,
+    ],
+    [
+      'a json file, a memo among them',
+      (app: AppContext) => appendSchemaJSON(app, accountsJson()),
+      SelectType.memo,
+    ],
+  ] as const)(
+    'adds each entity of %s before the select that names it',
+    (_, append, type) => {
+      const app = createScreenApp();
+      const batches = recordActions(app);
+
+      append(app);
+
+      const [landing] = batches;
+      const named = Object.assign(
+        {},
+        ...landing
+          .filter(action => action.type === 'editor.select')
+          .map(({ payload }) => payload)
+      );
+      expect(selectedBeforeAdded(landing)).toEqual([]);
+      expect(Object.values(named)).toContain(type);
+      expect(named).toEqual({ ...app.store.state.editor.selectedMap });
+    }
+  );
+
+  it('adds a DBML table group round its members where the grid puts them, below the diagram', () => {
+    const app = createScreenApp();
+    const corner = appendCorner(app);
+
+    appendSchema(app, 'dbml', FAN_DBML);
+
+    expect(groupOf(app)).toMatchObject({ name: 'accounts', color: '#3498db' });
+    expect(groupRect(app)).toEqual(membersBox(app, ['users', 'posts']));
+    expect(groupRect(app).y).toBe(corner.y);
+    expect(cornerOf(app, 'old')).toEqual({ x: 900, y: 900 });
+  });
+
+  /**
+   * A drop judges each selected table no selected group carries, against the
+   * boxes without it: a group left behind unselected would lose every member
+   * the moment its block was dragged clear of its stored rect.
+   */
+  it('selects the groups it adds beside their tables, so a drag of the block keeps every membership', () => {
+    const app = createScreenApp();
+
+    appendSchema(app, 'dbml', FAN_DBML);
+    const { id } = groupOf(app);
+    const { x } = groupRect(app);
+
+    expect(app.store.state.editor.selectedMap[id]).toBe(SelectType.tableGroup);
+    expect(selectedNames(app)).toEqual(['photos', 'posts', 'users']);
+
+    for (let step = 0; step < 10; step++) {
+      app.store.dispatchSync(moveAllAction$(150, 0));
+    }
+    app.store.dispatchSync(dropTablesIntoGroupsAction$());
+
+    const members = Object.values(app.store.state.collections.tableEntities)
+      .filter(table => table.groupId === id)
+      .map(table => table.name)
+      .sort();
+    expect(members).toEqual(['posts', 'users']);
+    expect(groupRect(app).x).toBe(x + 1500);
+  });
+
+  it('leaves the groups it adds unselected while groups are hidden, whose drop judges none', () => {
+    const app = createScreenApp();
+    app.store.dispatchSync(
+      changeShowAction({ show: Show.hideTableGroup, value: true })
+    );
+
+    appendSchema(app, 'dbml', FAN_DBML);
+    const { id } = groupOf(app);
+
+    expect(app.store.state.editor.selectedMap[id]).toBeUndefined();
+    expect(selectedNames(app)).toEqual(['photos', 'posts', 'users']);
+
+    for (let step = 0; step < 10; step++) {
+      app.store.dispatchSync(moveAllAction$(150, 0));
+    }
+    app.store.dispatchSync(dropTablesIntoGroupsAction$());
+
+    const members = Object.values(app.store.state.collections.tableEntities)
+      .filter(table => table.groupId === id)
+      .map(table => table.name)
+      .sort();
+    expect(members).toEqual(['posts', 'users']);
+  });
+
+  it('takes the tables, the selection and the scroll back on a single undo', () => {
+    const app = createScreenApp();
+    const { originX, originY } = app.store.state.settings;
+
+    appendSchema(app, 'sql', UNRELATED_SQL);
+    app.store.undo();
+
+    expect(tableNames(app)).toEqual(['old']);
+    expect(app.store.state.settings).toMatchObject({ originX, originY });
+  });
+
+  it('leaves a Flow view for the ERD tab first, in a dispatch of its own', () => {
+    const app = createScreenApp();
+    enterFlow(app);
+    const batches = recordActions(app);
+
+    appendSchema(app, 'sql', UNRELATED_SQL);
+
+    expect(app.store.state.settings.canvasType).toBe(CanvasType.ERD);
+    expect(getActiveView(app.store.state)).toBeNull();
+    expect(batches[0].map(({ type }) => type)).toEqual([
+      'settings.changeCanvasType',
+    ]);
+    expect(batches[1].map(({ type }) => type)).toContain('table.add');
+    expect(tableNames(app)).toHaveLength(3);
+  });
+
+  it.each([
+    ['a Flow view', enterFlow],
+    ['Graph mode', enterGraph],
+    ['the Schema SQL tab', enterTab(CanvasType.schemaSQL)],
+    ['the Code Generator tab', enterTab(CanvasType.generatorCode)],
+    ['the Settings tab', enterTab(CanvasType.settings)],
+  ] as const)(
+    'brings the ERD tab up from %s first, in no undo step, then selects and scrolls to what it adds',
+    (_, enter) => {
+      const app = createScreenApp();
+      app.store.dispatchSync(scrollToAction({ originX: 0, originY: 0 }));
+      enter(app);
+      app.store.resetHistory();
+      const batches = recordActions(app);
+
+      appendSchema(app, 'sql', UNRELATED_SQL);
+
+      expect(app.store.state.settings.canvasType).toBe(CanvasType.ERD);
+      expect(batches.map(batch => batch.map(({ type }) => type))).toEqual([
+        ['settings.changeCanvasType'],
+        expect.arrayContaining([
+          'table.add',
+          'editor.select',
+          'settings.scrollTo',
+        ]),
+      ]);
+      expect(selectedNames(app)).toEqual(['posts', 'users']);
+      expect(app.store.state.settings.originY).toBeLessThan(0);
+
+      app.store.undo();
+
+      expect(tableNames(app)).toEqual(['old']);
+      expect(app.store.state.settings).toMatchObject({
+        canvasType: CanvasType.ERD,
+        originY: 0,
+      });
+      expect(app.store.history.hasUndo()).toBe(false);
+    }
+  );
+
+  it('dispatches no tab change when the ERD tab is up already', () => {
+    const app = createScreenApp();
+    const batches = recordActions(app);
+
+    appendSchema(app, 'sql', UNRELATED_SQL);
+
+    expect(batches).toHaveLength(1);
+    expect(batches[0].map(({ type }) => type)).not.toContain(
+      'settings.changeCanvasType'
+    );
+  });
+
+  it.each([
+    ['a Flow view', enterFlow, CanvasType.visualization],
+    [
+      'the Schema SQL tab',
+      enterTab(CanvasType.schemaSQL),
+      CanvasType.schemaSQL,
+    ],
+  ] as const)(
+    'stays in %s when the import brings nothing',
+    (_, enter, canvasType) => {
+      const app = createScreenApp();
+      enter(app);
+      const batches = recordActions(app);
+
+      appendSchema(app, 'sql', 'SELECT 1;');
+
+      expect(batches).toEqual([]);
+      expect(app.store.state.settings.canvasType).toBe(canvasType);
+    }
+  );
+});
+
+describe('appendSchemaJSON', () => {
+  it('leaves the memos it adds unselected while memos are hidden', () => {
+    const app = createScreenApp();
+    app.store.dispatchSync(
+      changeShowAction({ show: Show.hideMemo, value: true })
+    );
+
+    appendSchemaJSON(app, accountsJson());
+
+    const { doc, editor } = app.store.state;
+    expect(doc.memoIds).toHaveLength(1);
+    expect(editor.selectedMap[doc.memoIds[0]]).toBeUndefined();
+    expect(selectedNames(app)).toEqual(['accounts', 'roles']);
+  });
+
+  it('adds the tables and memos of a document apart as the file has them, selected', () => {
+    const app = createScreenApp();
+    const corner = appendCorner(app);
+
+    appendSchemaJSON(app, accountsJson());
+
+    expect(cornerOf(app, 'accounts')).toEqual(corner);
+    expect(cornerOf(app, 'roles')).toEqual({ x: corner.x + 600, y: corner.y });
+    expect(selectedNames(app)).toEqual(['accounts', 'roles']);
+    const { doc, editor, collections } = app.store.state;
+    const [memoId] = doc.memoIds;
+    expect(collections.memoEntities[memoId].ui.y).toBe(corner.y + 360);
+    expect(editor.selectedMap[memoId]).toBe(SelectType.memo);
+  });
+
+  it('adds nothing for text the parser cannot read', () => {
+    const app = createScreenApp();
+    const batches = recordActions(app);
+
+    appendSchemaJSON(app, '{"version": "3.0.0",');
+
+    expect(batches).toEqual([]);
+    expect(tableNames(app)).toEqual(['old']);
+  });
+});
+
+describe('appendSchemaPlaced', () => {
+  it('lands the tables where Flow put them, under the diagram', async () => {
+    const app = createScreenApp();
+    const corner = appendCorner(app);
+    hoisted.elkLayout = columnLayout;
+
+    await appendSchemaPlaced(app, 'sql', FAN_SQL);
+
+    // The layout answers a column, each table 1000 below the last.
+    const corners = ['users', 'posts', 'photos']
+      .map(name => cornerOf(app, name))
+      .sort((a, b) => a.y - b.y);
+    expect(hoisted.requests).toHaveLength(1);
+    expect(corners).toEqual([
+      corner,
+      { x: corner.x, y: corner.y + 1000 },
+      { x: corner.x, y: corner.y + 2000 },
+    ]);
+    expect(cornerOf(app, 'old')).toEqual({ x: 900, y: 900 });
+    expect(selectedNames(app)).toEqual(['photos', 'posts', 'users']);
+  });
+
+  it('adds a DBML table group round where Flow put its members, its box at the corner of the block', async () => {
+    const app = createScreenApp();
+    const corner = appendCorner(app);
+    hoisted.elkLayout = columnLayout;
+
+    await appendSchemaPlaced(app, 'dbml', FAN_DBML);
+
+    expect(groupRect(app)).toEqual(membersBox(app, ['users', 'posts']));
+    expect(groupRect(app)).toMatchObject(corner);
+  });
+
+  it('reads the diagram as it lands, so a table moved meanwhile is cleared all the same', async () => {
+    const app = createScreenApp();
+    const land = pendingColumnLayout();
+
+    const placing = appendSchemaPlaced(app, 'sql', FAN_SQL);
+    await flush();
+    app.store.dispatchSync(moveToTableAction({ id: 'old', x: 900, y: 3000 }));
+    const corner = appendCorner(app);
+    await land();
+    await placing;
+
+    const tops = ['users', 'posts', 'photos'].map(
+      name => cornerOf(app, name).y
+    );
+    expect(Math.min(...tops)).toBe(corner.y);
+  });
+
+  it('lands the grid under the diagram when no layout comes back', async () => {
+    const app = createScreenApp();
+    const corner = appendCorner(app);
+
+    await appendSchemaPlaced(app, 'sql', FAN_SQL);
+
+    expect(hoisted.requests).toHaveLength(1);
+    expect(tableNames(app)).toHaveLength(4);
+    expect(cornerOf(app, 'users').y).toBe(corner.y);
+    expect(cornerOf(app, 'posts').y).toBe(corner.y);
+  });
+
+  it('lands nothing once a load has replaced the document meanwhile', async () => {
+    const app = createScreenApp();
+    const land = pendingColumnLayout();
+
+    const placing = appendSchemaPlaced(app, 'sql', FAN_SQL);
+    await flush();
+    importSchema(app, 'sql', 'CREATE TABLE newer (id INT);');
+    await land();
+    await placing;
+
+    expect(tableNames(app)).toEqual(['newer']);
+  });
+
+  it('lands both of two appends that overlap, in the order they started', async () => {
+    const app = createScreenApp();
+    const settles: Array<(points: ElkLayoutPoint[]) => void> = [];
+    hoisted.elkLayout = () => new Promise(resolve => settles.push(resolve));
+
+    const first = appendSchemaPlaced(app, 'sql', FAN_SQL);
+    await flush();
+    const second = appendSchemaPlaced(app, 'sql', BOOKS_SQL);
+    await flush();
+    // The second layout comes back first, and waits for the first to land.
+    settles[1](await columnLayout(hoisted.requests[1]));
+    await flush();
+    expect(tableNames(app)).toEqual(['old']);
+    settles[0](await columnLayout(hoisted.requests[0]));
+    await Promise.all([first, second]);
+
+    expect(tableNames(app).slice(1, 4).sort()).toEqual([
+      'photos',
+      'posts',
+      'users',
+    ]);
+    expect(tableNames(app).slice(4).sort()).toEqual(['authors', 'books']);
+    const firstBottom = Math.max(
+      ...['users', 'posts', 'photos'].map(name => cornerOf(app, name).y)
+    );
+    expect(cornerOf(app, 'authors').y).toBeGreaterThan(firstBottom);
+    expect(selectedNames(app)).toEqual(['authors', 'books']);
+  });
+
+  it('lands after a replace placing when it started, on the document the replace brings', async () => {
+    const app = createScreenApp();
+    const settles: Array<(points: ElkLayoutPoint[]) => void> = [];
+    hoisted.elkLayout = () => new Promise(resolve => settles.push(resolve));
+
+    const replacing = importSchemaPlaced(app, 'sql', FAN_SQL);
+    await flush();
+    const appending = appendSchemaPlaced(app, 'sql', BOOKS_SQL);
+    await flush();
+    settles[1](await columnLayout(hoisted.requests[1]));
+    settles[0](await columnLayout(hoisted.requests[0]));
+    await Promise.all([replacing, appending]);
+
+    expect(tableNames(app).slice(0, 3).sort()).toEqual([
+      'photos',
+      'posts',
+      'users',
+    ]);
+    expect(tableNames(app).slice(3).sort()).toEqual(['authors', 'books']);
+
+    app.store.undo();
+
+    expect(tableNames(app).sort()).toEqual(['photos', 'posts', 'users']);
+  });
+
+  it('lands nothing once a replace started after it has superseded it', async () => {
+    const app = createScreenApp();
+    const settles: Array<(points: ElkLayoutPoint[]) => void> = [];
+    hoisted.elkLayout = () => new Promise(resolve => settles.push(resolve));
+
+    const appending = appendSchemaPlaced(app, 'sql', BOOKS_SQL);
+    await flush();
+    const replacing = importSchemaPlaced(app, 'sql', FAN_SQL);
+    await flush();
+    settles[0](await columnLayout(hoisted.requests[0]));
+    settles[1](await columnLayout(hoisted.requests[1]));
+    await Promise.all([appending, replacing]);
+
+    expect(tableNames(app).sort()).toEqual(['photos', 'posts', 'users']);
+  });
+
+  it('brings the ERD tab up when the reader moved to another tab while it placed', async () => {
+    const app = createScreenApp();
+    app.store.dispatchSync(scrollToAction({ originX: 0, originY: 0 }));
+    const land = pendingColumnLayout();
+
+    const placing = appendSchemaPlaced(app, 'sql', FAN_SQL);
+    await flush();
+    enterTab(CanvasType.generatorCode)(app);
+    await land();
+    await placing;
+
+    expect(app.store.state.settings.canvasType).toBe(CanvasType.ERD);
+    expect(selectedNames(app)).toEqual(['photos', 'posts', 'users']);
+    expect(app.store.state.settings.originY).toBeLessThan(0);
+  });
+});
+
+describe('an append to a readonly editor', () => {
+  /** A screen app whose readonly switch the test turns, off while it is set up. */
+  function createReadonlyApp() {
+    const state = { readonly: false };
+    const app = createScreenApp({ getReadonly: () => state.readonly });
+    app.store.dispatchSync(
+      selectAction({ old: SelectType.table }),
+      scrollToAction({ originX: -10, originY: -20 })
+    );
+    return { app, state };
+  }
+
+  /** What an append's landing would move although the adds are dropped. */
+  const viewOf = ({ store: { state } }: AppContext) => ({
+    selectedMap: { ...state.editor.selectedMap },
+    originX: state.settings.originX,
+    originY: state.settings.originY,
+    canvasType: state.settings.canvasType,
+  });
+
+  it.each([
+    ['appendSchema', (app: AppContext) => appendSchema(app, 'sql', FAN_SQL)],
+    [
+      'appendSchemaJSON',
+      (app: AppContext) => appendSchemaJSON(app, accountsJson()),
+    ],
+    [
+      'appendSchemaPlaced',
+      (app: AppContext) => appendSchemaPlaced(app, 'sql', FAN_SQL),
+    ],
+  ] as const)(
+    '%s adds nothing and leaves the selection, the scroll and the tab',
+    async (_, append) => {
+      const { app, state } = createReadonlyApp();
+      hoisted.elkLayout = columnLayout;
+      const view = viewOf(app);
+      state.readonly = true;
+      const batches = recordActions(app);
+
+      await append(app);
+
+      expect(batches).toEqual([]);
+      expect(tableNames(app)).toEqual(['old']);
+      expect(viewOf(app)).toEqual(view);
+      expect(hoisted.requests).toEqual([]);
+    }
+  );
+
+  it('keeps a Flow view open, the ERD tab never brought up', () => {
+    const { app, state } = createReadonlyApp();
+    enterFlow(app);
+    state.readonly = true;
+
+    appendSchema(app, 'sql', UNRELATED_SQL);
+
+    expect(app.store.state.settings.canvasType).toBe(CanvasType.visualization);
+    expect(getActiveView(app.store.state)).not.toBeNull();
+  });
+
+  it('keeps the Schema SQL tab, the ERD tab never brought up', () => {
+    const { app, state } = createReadonlyApp();
+    enterTab(CanvasType.schemaSQL)(app);
+    state.readonly = true;
+
+    appendSchema(app, 'sql', UNRELATED_SQL);
+
+    expect(app.store.state.settings.canvasType).toBe(CanvasType.schemaSQL);
+    expect(tableNames(app)).toEqual(['old']);
+  });
+
+  it('lands nothing of a placed append once the editor turned readonly meanwhile', async () => {
+    const { app, state } = createReadonlyApp();
+    const view = viewOf(app);
+    const land = pendingColumnLayout();
+
+    const placing = appendSchemaPlaced(app, 'sql', FAN_SQL);
+    await flush();
+    state.readonly = true;
+    const batches = recordActions(app);
+    await land();
+    await placing;
+
+    expect(batches).toEqual([]);
+    expect(tableNames(app)).toEqual(['old']);
+    expect(viewOf(app)).toEqual(view);
+  });
+});

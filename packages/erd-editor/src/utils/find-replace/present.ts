@@ -1,0 +1,109 @@
+import { query } from '@dineug/erd-editor-schema';
+
+import { RootState } from '@/engine/state';
+import { sourceI18n } from '@/i18n/source';
+import type { I18n, PlainMessageKey } from '@/i18n/translate';
+
+import { FindField, FindMatch, isTableLogicalName } from './findMatches';
+
+/** The kind of text a match was found in, as its result row names it. */
+export const FindFieldLabel: Record<FindField, PlainMessageKey> = {
+  [FindField.tableName]: 'findReplace.field.tableName',
+  [FindField.tableComment]: 'findReplace.field.tableComment',
+  [FindField.columnName]: 'findReplace.field.columnName',
+  [FindField.columnComment]: 'findReplace.field.columnComment',
+  [FindField.memo]: 'findReplace.field.memo',
+  [FindField.indexName]: 'findReplace.field.indexName',
+  [FindField.tableGroupName]: 'findReplace.field.tableGroupName',
+  [FindField.logicalName]: 'findReplace.field.logicalName',
+};
+
+const nameOf = (name: string | undefined, { t }: Pick<I18n, 't'>) =>
+  name?.trim() || t('common.unnamed');
+
+/**
+ * Where a match sits, as a reader finds it on the canvas: the table, the
+ * table and column, the table an index belongs to, and nothing for a memo or
+ * a table group, which stand on their own.
+ */
+export function locationOf(
+  { collections }: RootState,
+  match: FindMatch,
+  i18n: Pick<I18n, 't'> = sourceI18n
+): string {
+  const { field, id, tableId } = match;
+  if (field === FindField.memo || field === FindField.tableGroupName) return '';
+
+  const table = query(collections)
+    .collection('tableEntities')
+    .selectById(tableId);
+  const tableName = nameOf(table?.name, i18n);
+  if (
+    field === FindField.tableName ||
+    field === FindField.tableComment ||
+    field === FindField.indexName ||
+    isTableLogicalName(match)
+  ) {
+    return tableName;
+  }
+
+  const column = query(collections)
+    .collection('tableColumnEntities')
+    .selectById(id);
+  return `${tableName}.${nameOf(column?.name, i18n)}`;
+}
+
+/** A result row's second line: where the match sits, then the kind of text it was found in. */
+export function describeMatch(
+  state: RootState,
+  match: FindMatch,
+  i18n: Pick<I18n, 't'> = sourceI18n
+): string {
+  const location = locationOf(state, match, i18n);
+  const kind = i18n.t(FindFieldLabel[match.field]);
+  return location
+    ? i18n.t('findReplace.matchLocation', { location, kind })
+    : kind;
+}
+
+/** Whether a cut at the offset falls between a high and a low surrogate. */
+const splitsPair = (text: string, at: number) =>
+  /[\uD800-\uDBFF]/.test(text.charAt(at - 1)) &&
+  /[\uDC00-\uDFFF]/.test(text.charAt(at));
+
+export type Snippet = {
+  text: string;
+  start: number;
+  end: number;
+};
+
+/**
+ * The part of a long text a result row has room for, on one line, with the
+ * match inside it: from the start of a word some way before it, then as much
+ * after as fits. The range given back is the match's place within the excerpt.
+ */
+export function snippetOf(
+  { text, start, end }: Pick<FindMatch, 'text' | 'start' | 'end'>,
+  before = 24,
+  length = 96
+): Snippet {
+  let from = Math.max(0, Math.min(start - before, text.length - length));
+  // A cut inside a word reads as a typo, so it moves up to the next one.
+  const space = from > 0 ? text.slice(from, start).search(/\s/) : -1;
+  if (space !== -1) from += space + 1;
+
+  let to = Math.min(text.length, Math.max(end, from + length));
+  // A cut between the halves of a surrogate pair widens to the whole
+  // character, unless the match itself starts or ends there.
+  if (from < start && splitsPair(text, from)) from -= 1;
+  if (to > end && splitsPair(text, to)) to += 1;
+  const lead = from > 0 ? '…' : '';
+  const trail = to < text.length ? '…' : '';
+  const excerpt = text.slice(from, to).replace(/\s/g, ' ');
+
+  return {
+    text: `${lead}${excerpt}${trail}`,
+    start: start - from + lead.length,
+    end: end - from + lead.length,
+  };
+}

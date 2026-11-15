@@ -3,6 +3,8 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
 
+import type { PluginOption } from 'vite-plus';
+
 import { BROWSER_TARGET } from '../build-target.ts';
 import {
   assertInlineWorkersEncoded,
@@ -15,6 +17,7 @@ import {
   createLibraryConfig,
   createLibraryTasks,
   createWorkerOptions,
+  type RHtmlPluginLoader,
 } from './vite/library-config.ts';
 import {
   createExternal,
@@ -31,6 +34,7 @@ import {
 } from './vite/worker-url.ts';
 
 const workspaceDir = join(import.meta.dirname, '..');
+const factorySource = join(import.meta.dirname, 'vite/library-config.ts');
 const editorDir = join(workspaceDir, 'packages/erd-editor');
 const rHtmlDir = join(workspaceDir, 'packages/r-html');
 const replicationStoreWorkerDir = join(
@@ -45,11 +49,33 @@ type CacheInput =
 type LibraryTask = {
   command: string[];
   dependsOn?: unknown[];
-  input: CacheInput[];
-  output?: string[];
+  cache: { input: CacheInput[]; output?: string[] };
 };
 type LibraryTasks = { build: LibraryTask; test?: LibraryTask };
 type Mutation = [label: string, mutate: (tasks: LibraryTasks) => void];
+
+async function pluginNames(plugins: PluginOption[] | undefined) {
+  const names: string[] = [];
+  for (const plugin of await Promise.all(plugins ?? [])) {
+    if (Array.isArray(plugin)) {
+      names.push(...(await pluginNames(plugin)));
+    } else if (plugin) {
+      names.push(plugin.name);
+    }
+  }
+  return names;
+}
+
+function recordingLoader() {
+  const calls: Array<{ packageDir: string; options: unknown }> = [];
+  const load: RHtmlPluginLoader = async packageDir => ({
+    rHtml: options => {
+      calls.push({ packageDir, options });
+      return [{ name: 'test-r-html' }];
+    },
+  });
+  return { calls, load };
+}
 
 test('package metadata derives the external policy', () => {
   const { manifest } = loadLibraryMetadata(rHtmlDir);
@@ -81,11 +107,14 @@ test('type-gate inputs come from tsconfig and workspace manifests', () => {
       pattern: 'packages/erd-editor-schema/dist/**/*.d.ts',
       base: 'workspace',
     },
+    { pattern: 'packages/grid/dist/**/*.d.ts', base: 'workspace' },
     { pattern: 'packages/r-html/dist/**/*.d.ts', base: 'workspace' },
+    { pattern: 'packages/r-html-konva/dist/**/*.d.ts', base: 'workspace' },
     {
       pattern: 'packages/schema-sql-parser/dist/**/*.d.ts',
       base: 'workspace',
     },
+    { pattern: 'packages/uuid/dist/**/*.d.ts', base: 'workspace' },
     {
       pattern: 'packages/vite-plugin-r-html/dist/**/*.d.ts',
       base: 'workspace',
@@ -107,9 +136,12 @@ test('standard library factory preserves build policies', () => {
   assert.deepEqual(tasks?.build.command, ['tsc --noEmit', 'vp build']);
   assert.deepEqual(tasks?.test?.command, ['tsc --noEmit', 'vp test run']);
   assert.deepEqual(tasks?.build.dependsOn, tasks?.test?.dependsOn);
-  assert.deepEqual(tasks?.build.output, ['dist/**']);
-  assert.deepEqual(tasks?.build.input, [...metadata.typeGateInput, '!dist/**']);
-  assert.deepEqual(tasks?.test?.input, metadata.typeGateInput);
+  assert.deepEqual(tasks?.build.cache.output, ['dist/**']);
+  assert.deepEqual(tasks?.build.cache.input, [
+    ...metadata.typeGateInput,
+    '!dist/**',
+  ]);
+  assert.deepEqual(tasks?.test?.cache.input, metadata.typeGateInput);
   assert.deepEqual(config.build?.target, BROWSER_TARGET);
   assert.deepEqual(config.build?.lib, {
     entry: ['./src/index.ts'],
@@ -133,6 +165,63 @@ test('standard library factory preserves build policies', () => {
   assert.equal(external.test('stylis/lib/serializer'), true);
   assert.deepEqual(config.server, { open: false });
   assert.equal(config.worker, undefined);
+});
+
+test('a jsx library loads the r-html plugin through its own package', async () => {
+  const jsx = { konvaImportSource: '@/host' };
+  const loader = recordingLoader();
+  const config = createLibraryConfig(
+    rHtmlDir,
+    { dts: () => ({ name: 'test-dts' }), jsx },
+    loader.load
+  );
+
+  assert.deepEqual((await pluginNames(config.plugins)).sort(), [
+    'test-dts',
+    'test-r-html',
+  ]);
+  assert.deepEqual(loader.calls, [
+    { packageDir: rHtmlDir, options: { jsx, refresh: false } },
+  ]);
+
+  const plain = recordingLoader();
+  const withoutJsx = createLibraryConfig(
+    rHtmlDir,
+    { dts: () => ({ name: 'test-dts' }) },
+    plain.load
+  );
+  assert.deepEqual(await pluginNames(withoutJsx.plugins), ['test-dts']);
+  assert.deepEqual(plain.calls, []);
+});
+
+test('reading task metadata never loads the jsx plugin', () => {
+  const saved = process.env['VP_RESOLVING_CONFIG_METADATA'];
+  let loads = 0;
+  process.env['VP_RESOLVING_CONFIG_METADATA'] = '1';
+  try {
+    const config = createLibraryConfig(
+      rHtmlDir,
+      {
+        dts: () => ({ name: 'test-dts' }),
+        jsx: { konvaImportSource: '@/host' },
+        workers: true,
+      },
+      async () => {
+        loads += 1;
+        return { rHtml: () => [] };
+      }
+    );
+    assert.equal(config.plugins, undefined);
+    assert.deepEqual(config.worker?.plugins?.(), [undefined]);
+    assert.ok(config.run?.tasks?.build);
+  } finally {
+    if (saved === undefined) {
+      delete process.env['VP_RESOLVING_CONFIG_METADATA'];
+    } else {
+      process.env['VP_RESOLVING_CONFIG_METADATA'] = saved;
+    }
+  }
+  assert.equal(loads, 0);
 });
 
 test('a node library keeps its builtins as imports and targets node', () => {
@@ -186,14 +275,45 @@ test('a library that spawns a worker gets the shared worker build', () => {
   assert.ok(config.worker?.rolldownOptions?.external instanceof RegExp);
 });
 
-test('a package may append a build step after the standard one', () => {
-  const tasks = createLibraryTasks(editorDir, {
-    build: ['vp build -c vite.umd.config.ts'],
-  }) as LibraryTasks;
+test('a jsx library compiles its workers through the r-html plugin too', async () => {
+  const jsx = { konvaImportSource: '@/host' };
+  const call = { packageDir: rHtmlDir, options: { jsx, refresh: false } };
+  const loader = recordingLoader();
+  const config = createLibraryConfig(
+    rHtmlDir,
+    { dts: () => ({ name: 'test-dts' }), jsx, workers: true },
+    loader.load
+  );
+
+  assert.deepEqual(await pluginNames(config.worker?.plugins?.()), [
+    'test-r-html',
+  ]);
+  await pluginNames(config.plugins);
+  assert.deepEqual(loader.calls, [call, call]);
+
+  const withoutJsx = createLibraryConfig(rHtmlDir, {
+    dts: () => ({ name: 'test-dts' }),
+    workers: true,
+  });
+  assert.equal(withoutJsx.worker?.plugins, undefined);
+});
+
+test('the editor appends both script-tag builds after the standard one', () => {
+  // Read as text: node's loader refuses the config's extensionless
+  // build-target import, and importing it would also set up dts().
+  const config = readFileSync(join(editorDir, 'vite.config.ts'), 'utf8');
+  const list = /createLibraryTasks\(packageDir, \{\s*build: \[([^\]]*)\]/.exec(
+    config
+  )?.[1];
+  assert.ok(list, 'vite.config.ts passes a build list to createLibraryTasks');
+
+  const build = [...list.matchAll(/(['"])(.*?)\1/g)].map(match => match[2]);
+  const tasks = createLibraryTasks(editorDir, { build }) as LibraryTasks;
   assert.deepEqual(tasks.build.command, [
     'tsc --noEmit',
     'vp build',
     'vp build -c vite.umd.config.ts',
+    'vp build -c vite.umd.config.ts --mode viewer',
   ]);
 });
 
@@ -213,6 +333,14 @@ test('task metadata does not require generated workspace plugins', () => {
     /const rHtmlPackage: string = ['"]@dineug\/vite-plugin-r-html['"]/
   );
   assert.match(config, /await import\(rHtmlPackage\)/);
+
+  const factory = readFileSync(factorySource, 'utf8');
+  assert.doesNotMatch(factory, /from ['"]@dineug\//);
+  assert.doesNotMatch(factory, /import\(['"]@dineug\//);
+  assert.match(
+    factory,
+    /createRequire\(join\(packageDir, 'package\.json'\)\)\.resolve\(\s*'@dineug\/vite-plugin-r-html'\s*\)/
+  );
 });
 
 test('required task contracts reject cache-gate mutations', () => {
@@ -220,7 +348,7 @@ test('required task contracts reject cache-gate mutations', () => {
     [
       'factory input',
       tasks => {
-        tasks.build.input = tasks.build.input.filter(
+        tasks.build.cache.input = tasks.build.cache.input.filter(
           entry =>
             typeof entry === 'string' ||
             !('pattern' in entry) ||
@@ -231,7 +359,7 @@ test('required task contracts reject cache-gate mutations', () => {
     [
       'workspace declaration input',
       tasks => {
-        tasks.build.input = tasks.build.input.filter(
+        tasks.build.cache.input = tasks.build.cache.input.filter(
           entry =>
             typeof entry === 'string' ||
             !('pattern' in entry) ||
@@ -248,7 +376,7 @@ test('required task contracts reject cache-gate mutations', () => {
     [
       'dist exclusion',
       tasks => {
-        tasks.build.input = tasks.build.input.filter(
+        tasks.build.cache.input = tasks.build.cache.input.filter(
           entry => entry !== '!dist/**'
         );
       },
@@ -256,7 +384,7 @@ test('required task contracts reject cache-gate mutations', () => {
     [
       'build output',
       tasks => {
-        tasks.build.output = [];
+        tasks.build.cache.output = [];
       },
     ],
   ];
@@ -273,26 +401,26 @@ test('required task contracts reject cache-gate mutations', () => {
 
 function assertRequiredTaskContracts(tasks: LibraryTasks) {
   const metadataInput = loadLibraryMetadata(editorDir).typeGateInput;
-  assert.deepEqual(tasks.test?.input, metadataInput);
-  assert.deepEqual(tasks.build.input, [...metadataInput, '!dist/**']);
+  assert.deepEqual(tasks.test?.cache.input, metadataInput);
+  assert.deepEqual(tasks.build.cache.input, [...metadataInput, '!dist/**']);
   assert.equal(tasks.build.command[0], 'tsc --noEmit');
-  assert.deepEqual(tasks.build.output, ['dist/**']);
+  assert.deepEqual(tasks.build.cache.output, ['dist/**']);
 }
 
 test('library worker urls become the one spelling every bundler resolves', () => {
   const emitted = `let e = new SharedWorker(new URL(
 			/* @vite-ignore */
-			"/workers/schemaGC.shared-worker.js",
+			"/workers/exportPng.shared-worker.js",
 			"" + import.meta.url
 		), { type: "module", name: n });`;
 
   assert.equal(
     rewriteWorkerUrls(emitted, 'index.js'),
-    `let e = new SharedWorker(new URL("./workers/schemaGC.shared-worker.js", import.meta.url), { type: "module", name: n });`
+    `let e = new SharedWorker(new URL("./workers/exportPng.shared-worker.js", import.meta.url), { type: "module", name: n });`
   );
   assert.equal(
-    relativeWorkerUrl('engine/index.js', '/workers/schemaGC.shared-worker.js'),
-    '../workers/schemaGC.shared-worker.js'
+    relativeWorkerUrl('engine/index.js', '/workers/exportPng.shared-worker.js'),
+    '../workers/exportPng.shared-worker.js'
   );
   assert.equal(
     relativeWorkerUrl('assets/iframe-abc.js', '/assets/worker-def.js'),
@@ -311,8 +439,22 @@ export default function WorkerWrapper(options) {
 
   const rewritten = rewriteInlineWorkers(chunk);
   assert.ok(rewritten);
-  assert.match(rewritten, /new SharedWorker\(__toDataUrl\(jsContent\)/);
-  assert.match(rewritten, /function __toDataUrl\(source\)/);
+  assert.match(
+    rewritten,
+    /new SharedWorker\(\(\(source\) => \{[\s\S]*?\}\)\(jsContent\)/
+  );
+  // The encoder is an expression at the url, so nothing is declared beside a
+  // umd chunk's wrapper, where it would be a global of the page.
+  assert.ok(rewritten.endsWith('}'));
+  assert.doesNotMatch(rewritten, /function __toDataUrl/);
+  const url = Function(
+    'jsContent',
+    `return ${rewritten.match(/\(\(source\) => \{[\s\S]*?\}\)\(jsContent\)/)![0]}`
+  )('é');
+  assert.equal(
+    url,
+    `data:text/javascript;base64,${Buffer.from('é').toString('base64')}`
+  );
   assert.equal(
     readStringLiteral(chunk, 'jsContent'),
     'self.onconnect = () => {};\n'
@@ -324,7 +466,7 @@ new SharedWorker("data:text/javascript;charset=utf-8," + encodeURIComponent(jsCo
 new SharedWorker("data:text/javascript;charset=utf-8," + encodeURIComponent(jsContent$1), o);`;
   const both = rewriteInlineWorkers(twice);
   assert.ok(both);
-  assert.equal((both.match(/__toDataUrl\(/g) ?? []).length, 3);
+  assert.equal((both.match(/\(\(source\) => \{/g) ?? []).length, 2);
   assert.doesNotMatch(both, /encodeURIComponent/);
 
   // A worker module reached through require() is initialized lazily, and
@@ -338,7 +480,7 @@ new SharedWorker("data:text/javascript;charset=utf-8," + encodeURIComponent(jsCo
     readStringLiteral(lazy, 'jsContent$3'),
     'self.onconnect = () => {};'
   );
-  assert.match(rewriteInlineWorkers(lazy) ?? '', /__toDataUrl\(jsContent\$3\)/);
+  assert.match(rewriteInlineWorkers(lazy) ?? '', /\}\)\(jsContent\$3\)/);
   assert.equal(
     readStringLiteral('if (jsContent == "a") {}', 'jsContent'),
     null
@@ -374,7 +516,7 @@ test('an IDE webview reads dependency url workers through the runtime module', (
       runtime
     )
   );
-  const code = `let e = new SharedWorker(new URL("./workers/schemaGC.shared-worker.js", import.meta.url), { type: "module", name: n });
+  const code = `let e = new SharedWorker(new URL("./workers/exportPng.shared-worker.js", import.meta.url), { type: "module", name: n });
 let w = new Worker(new URL("./workers/other.js", import.meta.url), { type: "module" });`;
 
   const rewritten = rewriteUrlWorkersToBlob(code, id, runtime);
@@ -385,7 +527,7 @@ let w = new Worker(new URL("./workers/other.js", import.meta.url), { type: "modu
   );
   assert.match(
     rewritten,
-    /^import __workerUrl0 from "\/repo\/packages\/erd-editor\/dist\/workers\/schemaGC\.shared-worker\.js\?sharedworker&url";$/m
+    /^import __workerUrl0 from "\/repo\/packages\/erd-editor\/dist\/workers\/exportPng\.shared-worker\.js\?sharedworker&url";$/m
   );
   assert.match(
     rewritten,

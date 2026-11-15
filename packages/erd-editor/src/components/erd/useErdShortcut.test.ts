@@ -1,5 +1,5 @@
 import { query } from '@dineug/erd-editor-schema';
-import { AnyAction, FC, html } from '@dineug/r-html';
+import { AnyAction, CompositionActions, FC, html } from '@dineug/r-html';
 import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
 
 import {
@@ -9,18 +9,30 @@ import {
   Mounted,
 } from '@/__test-utils__/index';
 import { AppContext } from '@/components/appContext';
+import type { ErdTarget } from '@/components/erd/goToErdTarget';
 import { useErdShortcut } from '@/components/erd/useErdShortcut';
+import { openExplorer } from '@/components/explorer/explorerCommands';
+import { jumpTo } from '@/components/explorer/explorerNavigation';
+import { explorerViewOf } from '@/components/explorer/explorerView';
 import { Open } from '@/constants/open';
-import { CanvasType, ColumnOption, RelationshipType } from '@/constants/schema';
+import {
+  CanvasType,
+  ColumnOption,
+  RelationshipType,
+  Show,
+} from '@/constants/schema';
 import { History } from '@/engine/history';
 import {
+  changeDrawTableGroupAction,
   changeOpenMapAction,
   drawStartRelationshipAction,
   editMemoAction,
   editMemoEndAction,
   editTableAction,
+  editTableGroupAction,
   focusColumnAction,
   focusTableAction,
+  selectAction,
   selectAllAction,
   unselectAllAction,
 } from '@/engine/modules/editor/atom.actions';
@@ -32,15 +44,28 @@ import {
 } from '@/engine/modules/editor/state';
 import { addIndexAction } from '@/engine/modules/index/atom.actions';
 import { addIndexColumnAction } from '@/engine/modules/index-column/atom.actions';
-import { selectMemoAction$ } from '@/engine/modules/memo/generator.actions';
+import { addMemoAction } from '@/engine/modules/memo/atom.actions';
+import {
+  addMemoAction$,
+  selectMemoAction$,
+} from '@/engine/modules/memo/generator.actions';
 import { addRelationshipAction } from '@/engine/modules/relationship/atom.actions';
 import {
+  changeShowAction,
   changeZoomLevelAction,
   scrollToAction,
 } from '@/engine/modules/settings/atom.actions';
-import { changeTableNameAction } from '@/engine/modules/table/atom.actions';
+import {
+  changeTableGroupAction,
+  changeTableNameAction,
+} from '@/engine/modules/table/atom.actions';
 import { addTableAction$ } from '@/engine/modules/table/generator.actions';
+import {
+  changeColumnPrimaryKeyAction,
+  removeColumnAction,
+} from '@/engine/modules/table-column/atom.actions';
 import { addColumnAction$ } from '@/engine/modules/table-column/generator.actions';
+import { addTableGroupAction } from '@/engine/modules/table-group/atom.actions';
 import { toScenePoint } from '@/konva/scene/viewport';
 import { bHas } from '@/utils/bit';
 import { copyAction, pasteAction } from '@/utils/emitter';
@@ -170,6 +195,35 @@ describe('useErdShortcut - creation shortcuts', () => {
     expect(app.store.state.doc.memoIds).toHaveLength(1);
   });
 
+  it('adds no memo while memos are hidden', async () => {
+    const app = await setup();
+    app.store.dispatchSync(
+      changeShowAction({ show: Show.hideMemo, value: true })
+    );
+
+    shortcut(app, KeyBindingName.addMemo);
+    await flush();
+
+    expect(app.store.state.doc.memoIds).toHaveLength(0);
+  });
+
+  it('selects every table and no memo while memos are hidden', async () => {
+    const app = await setup();
+    const tableId = seedTable(app);
+    shortcut(app, KeyBindingName.addMemo);
+    await flush();
+    app.store.dispatchSync(
+      changeShowAction({ show: Show.hideMemo, value: true })
+    );
+
+    shortcut(app, KeyBindingName.selectAllTable);
+    await flush();
+
+    expect({ ...app.store.state.editor.selectedMap }).toEqual({
+      [tableId]: 'table',
+    });
+  });
+
   it('adds a column to every selected table', async () => {
     const app = await setup();
     const tableId = seedTable(app);
@@ -203,6 +257,122 @@ describe('useErdShortcut - creation shortcuts', () => {
     await flush();
 
     expect(app.store.state.doc.tableIds).toHaveLength(1);
+  });
+});
+
+describe('useErdShortcut - table group shortcuts', () => {
+  const hideGroups = (app: AppContext) =>
+    app.store.dispatchSync(
+      changeShowAction({ show: Show.hideTableGroup, value: true })
+    );
+
+  it('arms the table group draw and disarms it on the next press, adding no group', async () => {
+    const app = await setup();
+
+    shortcut(app, KeyBindingName.addTableGroup);
+    await flush();
+
+    expect(app.store.state.editor.drawTableGroup).toBe(true);
+    expect(app.store.state.doc.tableGroupIds).toEqual([]);
+
+    shortcut(app, KeyBindingName.addTableGroup);
+    await flush();
+
+    expect(app.store.state.editor.drawTableGroup).toBe(false);
+  });
+
+  it('arms no draw in a readonly editor or while groups are hidden', async () => {
+    let locked = true;
+    const app = await setup(
+      createTestAppContext({ getReadonly: () => locked })
+    );
+
+    shortcut(app, KeyBindingName.addTableGroup);
+    await flush();
+    expect(app.store.state.editor.drawTableGroup).toBe(false);
+
+    locked = false;
+    hideGroups(app);
+    shortcut(app, KeyBindingName.addTableGroup);
+    await flush();
+    expect(app.store.state.editor.drawTableGroup).toBe(false);
+  });
+
+  it('groups the selected tables and opens the new name, as the table menu does', async () => {
+    const app = await setup();
+    const users = seedTable(app);
+    const orders = seedTable(app);
+    seedTable(app);
+    app.store.dispatchSync(
+      selectAction({ [users]: SelectType.table, [orders]: SelectType.table })
+    );
+
+    shortcut(app, KeyBindingName.groupSelectedTables);
+    await flush();
+
+    const [id] = app.store.state.doc.tableGroupIds;
+    expect(id).toBeDefined();
+    expect(getTable(app, users)?.groupId).toBe(id);
+    expect(getTable(app, orders)?.groupId).toBe(id);
+    expect(app.store.state.editor.editTableGroupId).toBe(id);
+  });
+
+  it('groups nothing without a selected table of the document', async () => {
+    const app = await setup();
+    seedTable(app);
+    app.store.dispatchSync(unselectAllAction());
+
+    shortcut(app, KeyBindingName.groupSelectedTables);
+    await flush();
+
+    expect(app.store.state.doc.tableGroupIds).toEqual([]);
+  });
+
+  it('groups nothing in a readonly editor or while groups are hidden', async () => {
+    let locked = false;
+    const app = await setup(
+      createTestAppContext({ getReadonly: () => locked })
+    );
+    const tableId = seedTable(app);
+
+    // The readonly filter drops the group alone; the selection the add would
+    // move to it is editor state, which only the guard keeps.
+    locked = true;
+    shortcut(app, KeyBindingName.groupSelectedTables);
+    await flush();
+    expect(app.store.state.doc.tableGroupIds).toEqual([]);
+    expect({ ...app.store.state.editor.selectedMap }).toEqual({
+      [tableId]: SelectType.table,
+    });
+
+    locked = false;
+    hideGroups(app);
+    shortcut(app, KeyBindingName.groupSelectedTables);
+    await flush();
+    expect(app.store.state.doc.tableGroupIds).toEqual([]);
+  });
+});
+
+describe('useErdShortcut - while a table group name is edited', () => {
+  it('stands the canvas shortcuts down, as for a cell or memo editor', async () => {
+    const app = await setup();
+    app.store.dispatchSync(
+      addTableGroupAction({
+        id: 'g1',
+        ui: { x: 0, y: 0, width: 400, height: 300, zIndex: 1 },
+      }),
+      editTableGroupAction({ id: 'g1' })
+    );
+    expect(isEditingText(app.store.state.editor)).toBe(true);
+
+    shortcut(app, KeyBindingName.addTable);
+    shortcut(app, KeyBindingName.addMemo);
+    shortcut(app, KeyBindingName.removeSelection);
+    await flush();
+
+    expect(app.store.state.doc.tableIds).toEqual([]);
+    expect(app.store.state.doc.memoIds).toEqual([]);
+    expect(app.store.state.doc.tableGroupIds).toEqual(['g1']);
   });
 });
 
@@ -278,12 +448,251 @@ describe('useErdShortcut - removal and stop', () => {
   });
 });
 
+describe('useErdShortcut - stop over a table group draw or name', () => {
+  it('ends the draw mode alone, prevented, and the next press unselects', async () => {
+    const app = await setup();
+    const tableId = seedTable(app);
+    app.store.dispatchSync(changeDrawTableGroupAction({ value: true }));
+
+    const first = pressStop(app);
+    await flush();
+
+    expect(first.defaultPrevented).toBe(true);
+    expect(app.store.state.editor.drawTableGroup).toBe(false);
+    expect(app.store.state.editor.selectedMap).toEqual({
+      [tableId]: SelectType.table,
+    });
+
+    const second = pressStop(app);
+    await flush();
+
+    expect(second.defaultPrevented).toBe(false);
+    expect(app.store.state.editor.selectedMap).toEqual({});
+  });
+
+  it('ends the name editor alone, prevented, the group kept selected', async () => {
+    const app = await setup();
+    app.store.dispatchSync(
+      addTableGroupAction({
+        id: 'g1',
+        ui: { x: 0, y: 0, width: 400, height: 300, zIndex: 1 },
+      }),
+      selectAction({ g1: SelectType.tableGroup }),
+      editTableGroupAction({ id: 'g1' })
+    );
+
+    const event = pressStop(app);
+    await flush();
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(app.store.state.editor.editTableGroupId).toBeNull();
+    expect(app.store.state.editor.selectedMap).toEqual({
+      g1: SelectType.tableGroup,
+    });
+  });
+});
+
+describe('useErdShortcut - remove selection', () => {
+  const seedMemo = (app: AppContext) => {
+    app.store.dispatchSync(addMemoAction$());
+    const { memoIds } = app.store.state.doc;
+    return memoIds[memoIds.length - 1];
+  };
+
+  /** One table holding three columns, the first and the last selected. */
+  async function seedColumnSelection() {
+    const app = await setup();
+    const tableId = seedTable(app);
+    const columnIds = [
+      seedColumn(app, tableId),
+      seedColumn(app, tableId),
+      seedColumn(app, tableId),
+    ];
+    app.store.dispatchSync(
+      focusColumnAction({
+        tableId,
+        columnId: columnIds[0],
+        focusType: FocusType.columnName,
+        $mod: true,
+        shiftKey: false,
+      })
+    );
+    return { app, tableId, columnIds };
+  }
+
+  it('removes every selected table and memo in one undo step, asking the host for focus', async () => {
+    const app = await setup();
+    const listener = vi.fn();
+    document.body.addEventListener(focusEvent.type, listener);
+    const kept = seedTable(app);
+    const memoId = seedMemo(app);
+    const tableId = seedTable(app);
+    app.store.dispatchSync(selectAction({ [memoId]: SelectType.memo }));
+
+    shortcut(app, KeyBindingName.removeSelection);
+    await flush();
+
+    expect(listener).toHaveBeenCalledTimes(1);
+    expect(app.store.state.doc.tableIds).toEqual([kept]);
+    expect(app.store.state.doc.memoIds).toEqual([]);
+
+    app.store.undo();
+    expect(app.store.state.doc.tableIds).toEqual([kept, tableId]);
+    expect(app.store.state.doc.memoIds).toEqual([memoId]);
+    document.body.removeEventListener(focusEvent.type, listener);
+  });
+
+  it('removes a group selected alone, keeping its tables, and one undo brings both back', async () => {
+    const app = await setup();
+    const tableId = seedTable(app);
+    app.store.dispatchSync(
+      addTableGroupAction({
+        id: 'g1',
+        ui: { x: 0, y: 0, width: 600, height: 400, zIndex: 1 },
+      }),
+      changeTableGroupAction({ id: tableId, value: 'g1' }),
+      unselectAllAction(),
+      selectAction({ g1: SelectType.tableGroup })
+    );
+
+    shortcut(app, KeyBindingName.removeSelection);
+    await flush();
+
+    expect(app.store.state.doc.tableGroupIds).toEqual([]);
+    expect(app.store.state.doc.tableIds).toEqual([tableId]);
+    expect(getTable(app, tableId)?.groupId).toBe('');
+
+    app.store.undo();
+    expect(app.store.state.doc.tableGroupIds).toEqual(['g1']);
+    expect(getTable(app, tableId)?.groupId).toBe('g1');
+  });
+
+  it('removes the selected columns while their table is the whole selection, in one undo step', async () => {
+    const { app, tableId, columnIds } = await seedColumnSelection();
+    expect(app.store.state.editor.selectedMap).toEqual({
+      [tableId]: SelectType.table,
+    });
+
+    shortcut(app, KeyBindingName.removeSelection);
+    await flush();
+
+    expect(app.store.state.doc.tableIds).toEqual([tableId]);
+    expect(getTable(app, tableId)?.columnIds).toEqual([columnIds[1]]);
+
+    app.store.undo();
+    expect([...getTable(app, tableId)!.columnIds].sort()).toEqual(
+      [...columnIds].sort()
+    );
+  });
+
+  it('removes once while the key is held, and the press after takes the table its columns left', async () => {
+    const { app, tableId, columnIds } = await seedColumnSelection();
+
+    shortcut(app, KeyBindingName.removeSelection);
+    await flush();
+    app.shortcut$.next({
+      type: KeyBindingName.removeSelection,
+      event: new KeyboardEvent('keydown', { key: 'Delete', repeat: true }),
+    });
+    await flush();
+
+    expect(app.store.state.doc.tableIds).toEqual([tableId]);
+    expect(getTable(app, tableId)?.columnIds).toEqual([columnIds[1]]);
+
+    shortcut(app, KeyBindingName.removeSelection);
+    await flush();
+
+    expect(app.store.state.doc.tableIds).toEqual([]);
+  });
+
+  it('removes the table and the memo beside it rather than its columns', async () => {
+    const { app, tableId } = await seedColumnSelection();
+    const memoId = 'memo-beside';
+    app.store.dispatchSync(
+      addMemoAction({ id: memoId, ui: { x: 0, y: 600, zIndex: 9 } }),
+      selectAction({ [memoId]: SelectType.memo })
+    );
+    expect(app.store.state.editor.focusTable?.selectColumnIds).toHaveLength(2);
+
+    shortcut(app, KeyBindingName.removeSelection);
+    await flush();
+
+    expect(app.store.state.doc.tableIds).toEqual([]);
+    expect(app.store.state.doc.memoIds).toEqual([]);
+  });
+
+  it('removes the table rather than its columns at a zoom that draws names alone', async () => {
+    const { app } = await seedColumnSelection();
+    app.store.dispatchSync(changeZoomLevelAction({ value: 0.5 }));
+
+    shortcut(app, KeyBindingName.removeSelection);
+    await flush();
+
+    expect(app.store.state.doc.tableIds).toEqual([]);
+  });
+
+  it('removes nothing while nothing is selected', async () => {
+    const app = await setup();
+    seedTable(app);
+    seedMemo(app);
+    app.store.dispatchSync(unselectAllAction());
+
+    shortcut(app, KeyBindingName.removeSelection);
+    await flush();
+
+    expect(app.store.state.doc.tableIds).toHaveLength(1);
+    expect(app.store.state.doc.memoIds).toHaveLength(1);
+  });
+
+  it('removes the table once the add of its selected column is undone, and one undo brings it back bare', async () => {
+    const app = await setup();
+    const tableId = seedTable(app);
+    const columnId = seedColumn(app, tableId);
+    app.store.undo();
+    expect(app.store.state.editor.focusTable?.selectColumnIds).toEqual([
+      columnId,
+    ]);
+
+    shortcut(app, KeyBindingName.removeSelection);
+    await flush();
+    expect(app.store.state.doc.tableIds).toEqual([]);
+
+    app.store.undo();
+    expect(app.store.state.doc.tableIds).toEqual([tableId]);
+    expect(getTable(app, tableId)?.columnIds).toEqual([]);
+  });
+
+  it('records nothing for a table or memo whose add was undone, so no undo brings it back', async () => {
+    const app = await setup();
+    const kept = seedTable(app);
+    const memoId = seedMemo(app);
+    const tableId = seedTable(app);
+    app.store.dispatchSync(selectAction({ [memoId]: SelectType.memo }));
+    app.store.undo();
+    app.store.undo();
+    expect(app.store.state.editor.selectedMap).toEqual({
+      [tableId]: SelectType.table,
+      [memoId]: SelectType.memo,
+    });
+
+    shortcut(app, KeyBindingName.removeSelection);
+    await flush();
+    expect(app.store.state.doc.tableIds).toEqual([kept]);
+    expect(app.store.history.hasRedo()).toBe(true);
+
+    app.store.undo();
+    expect(app.store.state.doc.tableIds).toEqual([]);
+    expect(app.store.state.doc.memoIds).toEqual([]);
+  });
+});
+
 describe('useErdShortcut - table properties', () => {
-  it('opens the table properties panel for the first selected table', async () => {
+  it('opens the table properties panel for the first selected table, leaving the Explorer open', async () => {
     const app = await setup();
     const tableId = seedTable(app);
     const listener = vi.fn();
     app.emitter.on({ openTableProperties: listener });
+    openExplorer(app.store);
 
     shortcut(app, KeyBindingName.tableProperties);
     await flush();
@@ -291,6 +700,7 @@ describe('useErdShortcut - table properties', () => {
     expect(listener).toHaveBeenCalledTimes(1);
     expect(listener.mock.calls[0][0].payload).toEqual({ tableId });
     expect(app.store.state.editor.openMap[Open.tableProperties]).toBe(true);
+    expect(explorerViewOf(app.store).open).toBe(true);
   });
 
   it('does nothing when no table is selected', async () => {
@@ -374,10 +784,37 @@ describe('useErdShortcut - canvas modes', () => {
     expect(app.store.state.editor.handTool).toBe(false);
   });
 
+  it('takes the hand up in no readonly editor, and does again once writable', async () => {
+    let locked = true;
+    const app = await setup(
+      createTestAppContext({ getReadonly: () => locked })
+    );
+
+    shortcut(app, KeyBindingName.handTool);
+    await flush();
+    expect(app.store.state.editor.handTool).toBe(false);
+
+    locked = false;
+    shortcut(app, KeyBindingName.handTool);
+    await flush();
+    expect(app.store.state.editor.handTool).toBe(true);
+  });
+
   /**
    * The two modes a press on the canvas can mean are exclusive: taking up the
    * hand ends a draw that was armed, so a press is never read as both.
    */
+  it('puts a table group draw down when the hand tool is taken up', async () => {
+    const app = await setup();
+    app.store.dispatchSync(changeDrawTableGroupAction({ value: true }));
+
+    shortcut(app, KeyBindingName.handTool);
+    await flush();
+
+    expect(app.store.state.editor.handTool).toBe(true);
+    expect(app.store.state.editor.drawTableGroup).toBe(false);
+  });
+
   it('ends a relationship draw when the hand tool is taken up', async () => {
     const app = await setup();
     app.store.dispatchSync(
@@ -529,6 +966,90 @@ describe('useErdShortcut - column shortcuts', () => {
     expect(
       bHas(getColumn(app, columnId)!.options, ColumnOption.primaryKey)
     ).toBe(false);
+  });
+
+  describe('over a column selection', () => {
+    const keys = (app: AppContext, columnIds: string[]) =>
+      columnIds.map(id =>
+        bHas(getColumn(app, id)!.options, ColumnOption.primaryKey)
+      );
+
+    /** Three columns, the focus on the last with the first selected beside it. */
+    async function seedSelection() {
+      const app = await setup();
+      const tableId = seedTable(app);
+      const columnIds = [
+        seedColumn(app, tableId),
+        seedColumn(app, tableId),
+        seedColumn(app, tableId),
+      ];
+      for (const columnId of [columnIds[0], columnIds[2]]) {
+        app.store.dispatchSync(
+          focusColumnAction({
+            tableId,
+            columnId,
+            focusType: FocusType.columnName,
+            $mod: true,
+            shiftKey: false,
+          })
+        );
+      }
+      return { app, tableId, columnIds };
+    }
+
+    it('makes every selected column a key, leaving the rest', async () => {
+      const { app, columnIds } = await seedSelection();
+      expect(app.store.state.editor.focusTable?.selectColumnIds).toEqual([
+        columnIds[2],
+        columnIds[0],
+      ]);
+
+      shortcut(app, KeyBindingName.primaryKey);
+      await flush();
+
+      expect(keys(app, columnIds)).toEqual([true, false, true]);
+    });
+
+    it('clears them all on the next press, in one undo each', async () => {
+      const { app, columnIds } = await seedSelection();
+
+      shortcut(app, KeyBindingName.primaryKey);
+      await flush();
+      shortcut(app, KeyBindingName.primaryKey);
+      await flush();
+      expect(keys(app, columnIds)).toEqual([false, false, false]);
+
+      app.store.undo();
+      expect(keys(app, columnIds)).toEqual([true, false, true]);
+    });
+
+    it('keys the focused column alone while the selection leaves it out', async () => {
+      const { app, columnIds } = await seedSelection();
+      app.store.state.editor.focusTable!.selectColumnIds = [
+        columnIds[0],
+        columnIds[1],
+      ];
+
+      shortcut(app, KeyBindingName.primaryKey);
+      await flush();
+
+      expect(keys(app, columnIds)).toEqual([false, false, true]);
+    });
+
+    it('toggles the focused column alone once the rest of the selection leaves the table', async () => {
+      const { app, tableId, columnIds } = await seedSelection();
+      app.store.dispatchSync(
+        changeColumnPrimaryKeyAction({ tableId, id: columnIds[2], value: true })
+      );
+      // The bare atom a peer, an agent or the undo of an add sends, which
+      // leaves the column in the selection.
+      app.store.dispatchSync(removeColumnAction({ id: columnIds[0], tableId }));
+
+      shortcut(app, KeyBindingName.primaryKey);
+      await flush();
+
+      expect(keys(app, columnIds)).toEqual([false, false, false]);
+    });
   });
 });
 
@@ -1236,8 +1757,11 @@ const BLOCKED_SHORTCUTS = [
   KeyBindingName.addTable,
   KeyBindingName.addColumn,
   KeyBindingName.addMemo,
+  KeyBindingName.addTableGroup,
+  KeyBindingName.groupSelectedTables,
   KeyBindingName.removeTable,
   KeyBindingName.removeColumn,
+  KeyBindingName.removeSelection,
   KeyBindingName.primaryKey,
   KeyBindingName.selectAllTable,
   KeyBindingName.selectAllColumn,
@@ -1275,6 +1799,7 @@ const snapshot = (app: AppContext) => {
   return {
     tableIds: [...doc.tableIds],
     memoIds: [...doc.memoIds],
+    tableGroupIds: [...doc.tableGroupIds],
     columnIds: Object.values(collections.tableEntities).map(table => [
       table.id,
       [...table.columnIds],
@@ -1288,6 +1813,7 @@ const snapshot = (app: AppContext) => {
     openMap: { ...editor.openMap },
     editMemoId: editor.editMemoId,
     drawRelationship: editor.drawRelationship,
+    drawTableGroup: editor.drawTableGroup,
     zoomLevel: settings.zoomLevel,
     focusTable: focusTable
       ? {
@@ -1760,5 +2286,264 @@ describe('useErdShortcut - Escape ends an edit before it unselects', () => {
     await flush();
 
     expect(getTable(seeded.app, seeded.tableId)?.name).toBe('accounts');
+  });
+});
+
+describe('useErdShortcut - a readonly editor', () => {
+  /**
+   * An editor store as the element builds it, a table of two columns written
+   * while writable, then turned readonly and jumped to its first column as an
+   * Explorer row jumps; every dispatch the hook asks for from then on is kept.
+   */
+  async function setupReader(target?: (tableId: string) => ErdTarget) {
+    let readonly = false;
+    const base = createTestAppContext({
+      getReadonly: () => readonly,
+      readonlyEditState: true,
+    });
+    const sent: CompositionActions[] = [];
+    const { store } = base;
+    const app: AppContext = {
+      ...base,
+      store: {
+        ...store,
+        dispatch: (...actions: CompositionActions) => {
+          sent.push(actions);
+          store.dispatch(...actions);
+        },
+        dispatchSync: (...actions: CompositionActions) => {
+          sent.push(actions);
+          store.dispatchSync(...actions);
+        },
+      },
+    };
+    await setup(app);
+    const tableId = seedTable(app);
+    const columnId = seedColumn(app, tableId);
+    seedColumn(app, tableId);
+
+    readonly = true;
+    jumpTo(
+      app.store,
+      target?.(tableId) ?? {
+        kind: 'column',
+        tableId,
+        columnId,
+        focusType: FocusType.columnName,
+      }
+    );
+    await flush();
+    sent.length = 0;
+
+    const setReadonly = (value: boolean) => {
+      readonly = value;
+    };
+    return { app, tableId, columnId, sent, setReadonly };
+  }
+
+  /** Every chord a reader's keys skip, each pressed where it would act: on the jump's table and cell. */
+  const SKIPPED = [
+    KeyBindingName.edit,
+    KeyBindingName.addTable,
+    KeyBindingName.addColumn,
+    KeyBindingName.addMemo,
+    KeyBindingName.addTableGroup,
+    KeyBindingName.groupSelectedTables,
+    KeyBindingName.removeTable,
+    KeyBindingName.removeColumn,
+    KeyBindingName.removeSelection,
+    KeyBindingName.primaryKey,
+    KeyBindingName.selectAllTable,
+    KeyBindingName.selectAllColumn,
+    KeyBindingName.relationshipZeroOne,
+    KeyBindingName.relationshipZeroN,
+    KeyBindingName.relationshipOneOnly,
+    KeyBindingName.relationshipOneN,
+    KeyBindingName.handTool,
+  ];
+
+  it.each(SKIPPED)(
+    'sends nothing and asks the host for no focus for %s',
+    async type => {
+      const { app, sent } = await setupReader();
+      const focus = vi.fn();
+      document.body.addEventListener(focusEvent.type, focus);
+
+      shortcut(app, type);
+      await flush();
+      document.body.removeEventListener(focusEvent.type, focus);
+
+      expect(sent).toEqual([]);
+      expect(focus).not.toHaveBeenCalled();
+    }
+  );
+
+  it.each(SKIPPED)('sends %s again once writable', async type => {
+    const { app, sent, setReadonly } = await setupReader();
+    setReadonly(false);
+
+    shortcut(app, type);
+    await flush();
+
+    expect(sent).not.toEqual([]);
+  });
+
+  it('opens no editor for Enter or Tab on the cell an Explorer row focused, and leaves Tab to the page', async () => {
+    const { app, columnId, sent } = await setupReader();
+    expect(app.store.state.editor.focusTable).toMatchObject({
+      columnId,
+      focusType: FocusType.columnName,
+    });
+    const tab = new KeyboardEvent('keydown', { key: 'Tab', cancelable: true });
+
+    vi.useFakeTimers();
+    shortcut(app, KeyBindingName.edit);
+    app.keydown$.next(tab);
+    vi.runAllTimers();
+    vi.useRealTimers();
+    await flush();
+
+    expect(sent).toEqual([]);
+    expect(tab.defaultPrevented).toBe(false);
+    expect(app.store.state.editor.focusTable).toMatchObject({
+      columnId,
+      focusType: FocusType.columnName,
+      edit: false,
+    });
+  });
+
+  it('leaves a paste to the page, adding nothing to the table a jump selected', async () => {
+    const { app, tableId, sent } = await setupReader();
+    const { event, preventDefault } = createClipboardEvent({
+      'text/plain': 'email\tVARCHAR(255)',
+    });
+
+    app.emitter.emit(pasteAction({ event }));
+    await flush();
+
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(sent).toEqual([]);
+    expect(getTable(app, tableId)?.columnIds).toHaveLength(2);
+  });
+
+  it.each([
+    ['an Explorer column row', undefined],
+    [
+      'a palette # row',
+      (tableId: string): ErdTarget => ({ kind: 'table', tableId }),
+    ],
+  ])(
+    'opens Table Properties on the table %s selected',
+    async (_name, target) => {
+      const { app, tableId } = await setupReader(target);
+      const listener = vi.fn();
+      app.emitter.on({ openTableProperties: listener });
+
+      shortcut(app, KeyBindingName.tableProperties);
+      await flush();
+
+      expect(listener).toHaveBeenCalledTimes(1);
+      expect(listener.mock.calls[0][0].payload).toEqual({ tableId });
+      expect(app.store.state.editor.openMap[Open.tableProperties]).toBe(true);
+    }
+  );
+
+  it('zooms, turns zen mode and stands the Flow view on the table a jump selected', async () => {
+    const { app, tableId } = await setupReader();
+    app.store.dispatchSync(changeZoomLevelAction({ value: 0.8 }));
+
+    shortcut(app, KeyBindingName.zoomIn);
+    await flush();
+    expect(app.store.state.settings.zoomLevel).toBe(0.84);
+    shortcut(app, KeyBindingName.zoomOut);
+    shortcut(app, KeyBindingName.zoomOut);
+    await flush();
+    expect(app.store.state.settings.zoomLevel).toBe(0.76);
+    shortcut(app, KeyBindingName.zoomReset);
+    await flush();
+    expect(app.store.state.settings.zoomLevel).toBe(1);
+
+    shortcut(app, KeyBindingName.zenMode);
+    await flush();
+    expect(app.store.state.editor.zenMode).toBe(true);
+
+    shortcut(app, KeyBindingName.focusView);
+    await flush();
+    expect(app.store.state.settings.canvasType).toBe(CanvasType.visualization);
+    expect(app.store.state.editor.views.flow?.centerIds).toEqual([tableId]);
+  });
+
+  it('copies the column a jump focused, walks the focus with the arrows and unselects on Escape', async () => {
+    const { app, tableId, columnId } = await setupReader();
+
+    const payload = JSON.parse(await copyToClipboard(app)) as ClipboardPayload;
+    expect(payload.kind).toBe(PayloadKind.columns);
+
+    app.keydown$.next(new KeyboardEvent('keydown', { key: 'ArrowDown' }));
+    await flush();
+    expect(app.store.state.editor.focusTable?.columnId).toBe(
+      getTable(app, tableId)!.columnIds[1]
+    );
+    expect(app.store.state.editor.focusTable?.columnId).not.toBe(columnId);
+
+    pressStop(app);
+    await flush();
+    expect(app.store.state.editor.selectedMap).toEqual({});
+    expect(app.store.state.editor.focusTable).toBeNull();
+  });
+
+  it('moves the focus with Shift and an arrow without adding the column it reaches, until writable', async () => {
+    const { app, tableId, columnId, setReadonly } = await setupReader();
+    const [, second] = getTable(app, tableId)!.columnIds;
+    const shiftArrow = (key: string) =>
+      app.keydown$.next(new KeyboardEvent('keydown', { key, shiftKey: true }));
+
+    shiftArrow('ArrowDown');
+    await flush();
+    expect(app.store.state.editor.focusTable).toMatchObject({
+      columnId: second,
+      selectColumnIds: [second],
+    });
+    const payload = JSON.parse(await copyToClipboard(app)) as ClipboardPayload;
+    expect(payload.columns.map(column => column.sourceId)).toEqual([second]);
+
+    shiftArrow('ArrowUp');
+    await flush();
+    expect(app.store.state.editor.focusTable).toMatchObject({
+      columnId,
+      selectColumnIds: [columnId],
+    });
+
+    setReadonly(false);
+    shiftArrow('ArrowDown');
+    await flush();
+    expect(app.store.state.editor.focusTable).toMatchObject({
+      columnId: second,
+      selectColumnIds: [columnId, second],
+    });
+  });
+
+  it('hands undo and redo to the store, which refuses both while readonly', async () => {
+    const { app, tableId, setReadonly } = await setupReader();
+    const columnCount = () => getTable(app, tableId)?.columnIds.length;
+
+    shortcut(app, KeyBindingName.undo);
+    await flush();
+    expect(columnCount()).toBe(2);
+
+    setReadonly(false);
+    shortcut(app, KeyBindingName.undo);
+    await flush();
+    expect(columnCount()).toBe(1);
+
+    setReadonly(true);
+    shortcut(app, KeyBindingName.redo);
+    await flush();
+    expect(columnCount()).toBe(1);
+
+    setReadonly(false);
+    shortcut(app, KeyBindingName.redo);
+    await flush();
+    expect(columnCount()).toBe(2);
   });
 });

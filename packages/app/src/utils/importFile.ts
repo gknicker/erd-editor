@@ -1,5 +1,7 @@
 import { isPlainObject } from 'es-toolkit';
 
+import { sourceI18n } from '@/i18n/source';
+import type { I18n } from '@/i18n/translate';
 import type { NewSchemaEntity } from '@/services/indexeddb/modules/schema';
 import { isBackup, parseBackup } from '@/utils/backup';
 
@@ -68,15 +70,18 @@ function parseJson(text: string): unknown {
 
 /**
  * Whether JSON is a document the editor opens: the version 3 shape it saves,
- * with its doc, or the version 2 shape of .vuerd files, with canvas and table.
- * The editor's parser takes any object at all and makes an empty schema of it.
+ * with its doc or its settings, or the version 2 shape of .vuerd files, with
+ * canvas and table. The parser takes any object and makes an empty schema of it.
  */
 export function isEditorDocument(json: unknown): boolean {
   if (!isPlainObject(json)) return false;
 
-  const { version, doc, canvas, table } = json as Record<string, unknown>;
+  const { version, doc, settings, canvas, table } = json as Record<
+    string,
+    unknown
+  >;
   return version === '3.0.0'
-    ? isPlainObject(doc)
+    ? isPlainObject(doc) || isPlainObject(settings)
     : isPlainObject(canvas) && isPlainObject(table);
 }
 
@@ -128,23 +133,30 @@ export async function readImportFile(
   }
 }
 
-const plural = (count: number, noun: string) =>
-  `${count} ${noun}${count === 1 ? '' : 's'}`;
+/** The size limit as the notices name it, in MB. */
+export const MAX_IMPORT_FILE_MB = MAX_IMPORT_FILE_SIZE / 1024 / 1024;
 
 /** The one line the import notice shows, in the order things were counted. */
-export function describeImportResult(result: ImportResult) {
+export function describeImportResult(
+  result: ImportResult,
+  i18n: I18n = sourceI18n
+) {
+  const { t } = i18n;
   const parts = [
-    result.imported ? `Imported ${plural(result.imported, 'schema')}` : '',
+    result.imported ? t('import.imported', { count: result.imported }) : '',
     result.skippedFiles
-      ? `Skipped ${plural(result.skippedFiles, 'invalid file')}`
+      ? t('import.skippedInvalidFiles', { count: result.skippedFiles })
       : '',
     result.skippedSchemas
-      ? `Skipped ${plural(result.skippedSchemas, 'invalid schema')}`
+      ? t('import.skippedInvalidSchemas', { count: result.skippedSchemas })
       : '',
     result.oversizedFiles
-      ? `Skipped ${plural(result.oversizedFiles, 'file')} over ${MAX_IMPORT_FILE_SIZE / 1024 / 1024} MB`
+      ? t('import.skippedOversized', {
+          count: result.oversizedFiles,
+          size: MAX_IMPORT_FILE_MB,
+        })
       : '',
   ].filter(Boolean);
 
-  return parts.length ? parts.join(' · ') : 'Nothing to import';
+  return parts.length ? parts.join(' · ') : t('import.nothing');
 }

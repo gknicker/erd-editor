@@ -1,13 +1,23 @@
 import {
+  BracketType,
   createSchemaSQL,
   type DatabaseVendor,
   DatabaseVendorToDatabase,
+  LockSettingType,
+  SchemaSQLHeaderList,
+  SchemaSQLStatementsList,
+  settingsActions,
+  settingsActions$,
+  tableActions,
+  tableColumnActions,
+  tableGroupActions,
 } from '@dineug/erd-editor/peer.js';
-import { toJson } from '@dineug/erd-editor-schema';
+import { toDocumentJson } from '@dineug/erd-editor-schema';
 import { afterAll, describe, expect, it } from 'vite-plus/test';
 
 import { createSeededPeer, SEED } from '@/__test-utils__/seed';
 import { createWidePeer, wideTableName } from '@/__test-utils__/wide';
+import { MAX_READ_CHARS } from '@/tools/budget';
 import { ToolError, ToolErrorCode } from '@/tools/errors';
 import {
   READ_FORMATS,
@@ -55,9 +65,13 @@ describe('reading a document (AC-E12)', () => {
     expect(read('sql')).toBe(read('sql', 'MySQL'));
   });
 
-  it('gives the JSON the element’s value getter gives', () => {
-    expect(read('json')).toBe(toJson(peer.state));
+  it('gives the file form the element’s value getter gives, never the runtime value', () => {
+    expect(read('json')).toBe(toDocumentJson(peer.state));
     expect(read('json')).toBe(peer.value);
+    expect(read('json')).not.toBe(peer.runtimeValue);
+    expect(
+      JSON.parse(read('json')).collections.tableEntities[SEED.users]
+    ).not.toHaveProperty('seqColumnIds');
   });
 
   it('gives the snapshot as compact JSON', () => {
@@ -66,6 +80,35 @@ describe('reading a document (AC-E12)', () => {
     expect(snapshot).toBe(JSON.stringify(toAgentSnapshot(peer.state)));
     expect(snapshot).not.toContain('\n');
     expect(JSON.parse(snapshot).tables[0].id).toBe(SEED.users);
+  });
+});
+
+describe('the DDL of a document whose bracket type is locked', () => {
+  it('quotes names as the file saves the bracket type, not as the screen shows it', () => {
+    const other = createSeededPeer();
+    other.dispatch([
+      settingsActions.changeBracketTypeAction({ value: BracketType.backtick }),
+    ]);
+
+    expect(other.state.settings.bracketType).toBe(BracketType.backtick);
+    expect(readDocument(other.state, 'sql', 'MySQL')).toBe(
+      createSchemaSQL(peer.state, DatabaseVendorToDatabase.MySQL)
+    );
+    expect(
+      readDocument(other.state, 'sql', 'MySQL', { tableIds: [SEED.users] })
+    ).toContain('CREATE TABLE users');
+
+    other.dispatch([
+      settingsActions$.changeLockSettingsAction$(
+        LockSettingType.bracketType,
+        false
+      ),
+    ]);
+
+    expect(readDocument(other.state, 'sql', 'MySQL')).toContain(
+      'CREATE TABLE `users`'
+    );
+    other.destroy();
   });
 });
 
@@ -89,9 +132,9 @@ describe('what a read refuses', () => {
   });
 
   it('names the formats when the one asked for is unknown', () => {
-    expect(READ_FORMATS).toEqual(['snapshot', 'sql', 'json']);
+    expect(READ_FORMATS).toEqual(['snapshot', 'sql', 'json', 'scripts']);
     expect(refusal(() => read('ddl' as ReadFormat)).message).toBe(
-      'format must be one of snapshot, sql, json, got ddl'
+      'format must be one of snapshot, sql, json, scripts, got ddl'
     );
   });
 });
@@ -146,13 +189,123 @@ describe('the DDL of some tables', () => {
       refusal(() =>
         readDocument(peer.state, 'sql', undefined, { tableIds: [] })
       ).message
-    ).toBe('tableIds and tableNames name no table; pass one at least');
+    ).toBe(
+      'tableIds, tableNames and groupNames name no table; pass one at least'
+    );
     expect(
       refusal(() =>
         readDocument(peer.state, 'snapshot', undefined, { tableIds: [] })
       ).message
     ).toBe(
-      'tableIds and tableNames apply to the sql format only, not snapshot; erd_get takes them too'
+      'tableIds, tableNames and groupNames apply to the sql format only, not snapshot; erd_get takes tableIds and tableNames too'
+    );
+  });
+});
+
+describe('the DDL of some table groups', () => {
+  it('holds the tables of the groups named, in any case, joined with the tables named', () => {
+    const grouped = readDocument(peer.state, 'sql', 'MySQL', {
+      groupNames: ['ACCOUNTS'],
+    });
+
+    expect(grouped).toBe(
+      readDocument(peer.state, 'sql', 'MySQL', { tableIds: [SEED.users] })
+    );
+    expect(
+      readDocument(peer.state, 'sql', 'MySQL', {
+        groupNames: ['accounts'],
+        tableNames: ['orders'],
+        tableIds: [SEED.users],
+      })
+    ).toBe(
+      readDocument(peer.state, 'sql', 'MySQL', {
+        tableIds: [SEED.users, SEED.orders],
+      })
+    );
+  });
+
+  it('leaves the before and after scripts out, as the DDL of some tables does', () => {
+    const scripted = createNamedPeer({
+      before: 'CREATE EXTENSION IF NOT EXISTS pgcrypto;',
+    });
+    scripted.dispatch([
+      tableActions.changeTableGroupAction({ id: SEED.users, value: 'g' }),
+      tableGroupActions.addTableGroupAction({
+        id: 'g',
+        ui: { x: 0, y: 0, width: 400, height: 300, zIndex: 1 },
+      }),
+      tableGroupActions.changeTableGroupNameAction({ id: 'g', value: 'auth' }),
+    ]);
+
+    const sql = readDocument(scripted.state, 'sql', 'PostgreSQL', {
+      groupNames: ['auth'],
+    });
+    expect(sql).toContain('CREATE TABLE users');
+    expect(sql).not.toContain('pgcrypto');
+    scripted.destroy();
+  });
+
+  it('refuses a name no group has, a group with no table and a format other than sql', () => {
+    expect(
+      refusal(() =>
+        readDocument(peer.state, 'sql', undefined, {
+          groupNames: ['accounts', 'billing', 'billing'],
+        })
+      )
+    ).toEqual(
+      expect.objectContaining({
+        code: ToolErrorCode.notFound,
+        message: 'billing names no table group; erd_list lists them',
+      })
+    );
+    const emptied = createSeededPeer();
+    emptied.dispatch([
+      tableActions.changeTableGroupAction({ id: SEED.users, value: '' }),
+    ]);
+    expect(
+      refusal(() =>
+        readDocument(emptied.state, 'sql', undefined, {
+          groupNames: ['accounts'],
+          tableIds: [],
+        })
+      )
+    ).toEqual(
+      expect.objectContaining({
+        code: ToolErrorCode.invalidArgs,
+        message:
+          'accounts names a table group that holds no table; erd_set_table_group puts tables in a group',
+      })
+    );
+    emptied.dispatch([
+      tableGroupActions.addTableGroupAction({
+        id: 'billing',
+        ui: { x: 0, y: 0, width: 400, height: 300, zIndex: 1 },
+      }),
+      tableGroupActions.changeTableGroupNameAction({
+        id: 'billing',
+        value: 'billing',
+      }),
+    ]);
+    expect(
+      refusal(() =>
+        readDocument(emptied.state, 'sql', undefined, {
+          groupNames: ['accounts', 'billing', 'billing'],
+        })
+      ).message
+    ).toBe(
+      'accounts, billing name table groups that hold no table; erd_set_table_group puts tables in a group'
+    );
+    emptied.destroy();
+    expect(
+      refusal(() =>
+        readDocument(peer.state, 'json', undefined, { groupNames: ['x'] })
+      )
+    ).toEqual(
+      expect.objectContaining({
+        code: ToolErrorCode.invalidArgs,
+        message:
+          'tableIds, tableNames and groupNames apply to the sql format only, not json; erd_get takes tableIds and tableNames too',
+      })
     );
   });
 });
@@ -163,9 +316,15 @@ describe('a read too large for one answer', () => {
   afterAll(() => wide.destroy());
 
   it.each([
-    ['sql', /pass tableIds or tableNames for the tables the task needs/],
+    [
+      'sql',
+      /pass tableIds, tableNames or groupNames for the tables the task needs/,
+    ],
     ['snapshot', /find tables with erd_list \(query, namesOnly\)/],
-    ['json', /read them with erd_get, or the sql format with tableNames$/],
+    [
+      'json',
+      /tableNames; erd_list pages through the domains, terms and words after the tables, and erd_get gives them in full by domainIds, termIds and wordIds$/,
+    ],
   ] as const)(
     'is refused in the %s format with how to narrow it',
     (format, how) => {
@@ -198,5 +357,434 @@ describe('a read too large for one answer', () => {
     });
 
     expect(sql.match(/CREATE TABLE/g)).toHaveLength(2);
+  });
+});
+
+/** The seed under a database name a header can write, with the scripts given. */
+function createNamedPeer(scripts: { before?: string; after?: string } = {}) {
+  const named = createSeededPeer();
+  named.dispatch([
+    settingsActions.changeDatabaseNameAction({ value: 'shop' }),
+    ...(['before', 'after'] as const).flatMap(position => {
+      const value = scripts[position];
+      return value === undefined
+        ? []
+        : [settingsActions.changeDDLScriptAction({ position, value })];
+    }),
+  ]);
+  return named;
+}
+
+describe('the statements and header of the DDL', () => {
+  const named = createNamedPeer();
+
+  afterAll(() => named.destroy());
+
+  it('writes every pair for every vendor as the generator does', () => {
+    for (const vendor of SQL_VENDORS) {
+      const database = DatabaseVendorToDatabase[vendor as DatabaseVendor];
+      for (const statements of SchemaSQLStatementsList) {
+        for (const header of SchemaSQLHeaderList) {
+          expect(
+            readDocument(named.state, 'sql', vendor, undefined, {
+              statements,
+              header,
+            }),
+            `${vendor} ${statements} ${header}`
+          ).toBe(
+            createSchemaSQL(named.state, database, undefined, {
+              statements,
+              header,
+            })
+          );
+        }
+      }
+    }
+  });
+
+  it('writes IF NOT EXISTS and a header where the vendor has them', () => {
+    const sql = readDocument(named.state, 'sql', 'MySQL', undefined, {
+      statements: 'ifNotExists',
+      header: 'createAndUse',
+    });
+
+    expect(sql).toMatch(/^\nCREATE DATABASE IF NOT EXISTS shop;\nUSE shop;\n/);
+    expect(sql).toContain('CREATE TABLE IF NOT EXISTS users');
+    expect(
+      readDocument(named.state, 'sql', 'PostgreSQL', undefined, {
+        statements: 'recreate',
+      })
+    ).toMatch(/^\nDROP TABLE IF EXISTS /);
+  });
+
+  it('writes use for createAndUse on Oracle, no header for use on PostgreSQL and none on SQLite, as the Schema SQL tab does', () => {
+    const asked = {
+      statements: 'ifNotExists',
+      header: 'createAndUse',
+    } as const;
+
+    expect(readDocument(named.state, 'sql', 'Oracle', undefined, asked)).toBe(
+      readDocument(named.state, 'sql', 'Oracle', undefined, {
+        statements: 'create',
+        header: 'use',
+      })
+    );
+    expect(
+      readDocument(named.state, 'sql', 'PostgreSQL', undefined, {
+        header: 'use',
+      })
+    ).toBe(readDocument(named.state, 'sql', 'PostgreSQL'));
+    for (const header of ['use', 'createAndUse'] as const) {
+      expect(
+        readDocument(named.state, 'sql', 'SQLite', undefined, { header })
+      ).toBe(readDocument(named.state, 'sql', 'SQLite'));
+    }
+  });
+
+  it('writes no header while the database name is no plain identifier', () => {
+    expect(
+      readDocument(peer.state, 'sql', 'MySQL', undefined, {
+        header: 'createAndUse',
+      })
+    ).toBe(readDocument(peer.state, 'sql', 'MySQL'));
+  });
+
+  it('applies the two to the DDL of some tables too', () => {
+    const sql = readDocument(
+      named.state,
+      'sql',
+      'MySQL',
+      { tableNames: ['orders'] },
+      { statements: 'ifNotExists', header: 'use' }
+    );
+
+    expect(sql).toMatch(/^\nUSE shop;\n/);
+    expect(sql).toContain('CREATE TABLE IF NOT EXISTS orders');
+    expect(sql).not.toContain('CREATE TABLE IF NOT EXISTS users');
+  });
+
+  it('takes them for the sql format only', () => {
+    for (const format of ['json', 'snapshot'] as const) {
+      const error = refusal(() =>
+        readDocument(named.state, format, undefined, undefined, {
+          header: 'use',
+        })
+      );
+
+      expect(error.code).toBe(ToolErrorCode.invalidArgs);
+      expect(error.message).toBe(
+        `statements and header apply to the sql format only, not ${format}`
+      );
+    }
+    expect(
+      refusal(() =>
+        readDocument(named.state, 'json', undefined, undefined, {
+          statements: 'recreate',
+        })
+      ).message
+    ).toBe('statements and header apply to the sql format only, not json');
+    expect(
+      readDocument(named.state, 'json', undefined, undefined, {
+        statements: undefined,
+        header: undefined,
+      })
+    ).toBe(toDocumentJson(named.state));
+  });
+});
+
+/**
+ * The seed with logical names: users, its id and orders.note have no comment,
+ * and orders and users.name keep a comment of their own.
+ */
+function createLogicalNamePeer() {
+  const named = createSeededPeer();
+  named.dispatch([
+    tableActions.changeTableLogicalNameAction({
+      id: SEED.users,
+      value: 'Member',
+    }),
+    tableActions.changeTableLogicalNameAction({
+      id: SEED.orders,
+      value: 'Order',
+    }),
+    tableActions.changeTableCommentAction({
+      id: SEED.orders,
+      value: 'Placed orders',
+    }),
+    tableColumnActions.changeColumnLogicalNameAction({
+      tableId: SEED.users,
+      id: SEED.userId,
+      value: 'Member ID',
+    }),
+    tableColumnActions.changeColumnLogicalNameAction({
+      tableId: SEED.users,
+      id: SEED.userName,
+      value: 'Member name',
+    }),
+    tableColumnActions.changeColumnCommentAction({
+      tableId: SEED.users,
+      id: SEED.userName,
+      value: 'Shown to others',
+    }),
+    tableColumnActions.changeColumnLogicalNameAction({
+      tableId: SEED.orders,
+      id: SEED.orderNote,
+      value: "Buyer's note",
+    }),
+  ]);
+  return named;
+}
+
+describe('the logical names the DDL writes where a comment is empty', () => {
+  const named = createLogicalNamePeer();
+  const on = { logicalNameAsComment: true } as const;
+
+  afterAll(() => named.destroy());
+
+  it('writes every vendor as the generator does with the option on', () => {
+    for (const vendor of SQL_VENDORS) {
+      const database = DatabaseVendorToDatabase[vendor as DatabaseVendor];
+
+      expect(
+        readDocument(named.state, 'sql', vendor, undefined, on),
+        vendor
+      ).toBe(createSchemaSQL(named.state, database, undefined, on));
+    }
+  });
+
+  it('writes a logical name for an empty comment and keeps every other comment', () => {
+    const sql = readDocument(named.state, 'sql', 'PostgreSQL', undefined, on);
+
+    expect(sql).toContain("COMMENT ON TABLE users IS 'Member';");
+    expect(sql).toContain("COMMENT ON COLUMN users.id IS 'Member ID';");
+    expect(sql).toContain("COMMENT ON COLUMN orders.note IS 'Buyer''s note';");
+    expect(sql).toContain("COMMENT ON TABLE orders IS 'Placed orders';");
+    expect(sql).toContain("COMMENT ON COLUMN users.name IS 'Shown to others';");
+    expect(sql).not.toContain("'Order'");
+    expect(sql).not.toContain("'Member name'");
+  });
+
+  it('writes no logical name when left out or false', () => {
+    const plain = readDocument(named.state, 'sql', 'PostgreSQL');
+
+    expect(
+      readDocument(named.state, 'sql', 'PostgreSQL', undefined, {
+        logicalNameAsComment: false,
+      })
+    ).toBe(plain);
+    expect(plain).toContain("COMMENT ON TABLE orders IS 'Placed orders';");
+    expect(plain).not.toContain('Member');
+    expect(plain).not.toContain('Buyer');
+  });
+
+  it('writes them into the DDL of some tables too, beside the statements asked for', () => {
+    const sql = readDocument(
+      named.state,
+      'sql',
+      'MySQL',
+      { tableNames: ['users'] },
+      { statements: 'ifNotExists', logicalNameAsComment: true }
+    );
+
+    expect(sql).toContain('CREATE TABLE IF NOT EXISTS users');
+    expect(sql).toMatch(/id +INT +NOT NULL COMMENT 'Member ID'/);
+    expect(sql).toContain(") COMMENT 'Member';");
+    expect(sql).not.toContain('orders');
+  });
+
+  it('takes it for the sql format only, false too', () => {
+    for (const format of ['json', 'snapshot'] as const) {
+      for (const logicalNameAsComment of [true, false]) {
+        const error = refusal(() =>
+          readDocument(named.state, format, undefined, undefined, {
+            logicalNameAsComment,
+          })
+        );
+
+        expect(error.code).toBe(ToolErrorCode.invalidArgs);
+        expect(error.message).toBe(
+          `logicalNameAsComment applies to the sql format only, not ${format}`
+        );
+      }
+    }
+  });
+});
+
+describe('the before and after scripts in the DDL', () => {
+  const before = 'CREATE EXTENSION IF NOT EXISTS pgcrypto;';
+  const after = 'GRANT SELECT ON users, orders TO PUBLIC;';
+
+  it('writes them around the whole document, whatever the options', () => {
+    const scripted = createNamedPeer({ before, after });
+
+    const sql = readDocument(scripted.state, 'sql', 'PostgreSQL');
+    expect(sql).toBe(
+      createSchemaSQL(scripted.state, DatabaseVendorToDatabase.PostgreSQL)
+    );
+    expect(sql.startsWith(`\n${before}\n\nCREATE TABLE`)).toBe(true);
+    expect(sql.endsWith(`\n\n${after}\n`)).toBe(true);
+    expect(
+      readDocument(scripted.state, 'sql', 'PostgreSQL', undefined, {
+        statements: 'recreate',
+        header: 'createAndUse',
+      })
+    ).toMatch(
+      /^\nCREATE SCHEMA IF NOT EXISTS shop;\nSET search_path TO shop, public;\n\nCREATE EXTENSION IF NOT EXISTS pgcrypto;\n\nDROP TABLE IF EXISTS /
+    );
+    scripted.destroy();
+  });
+
+  it('leaves them out of the DDL of some tables', () => {
+    const scripted = createNamedPeer({ before, after });
+
+    const sql = readDocument(scripted.state, 'sql', 'PostgreSQL', {
+      tableNames: ['users'],
+    });
+    expect(sql).toContain('CREATE TABLE users');
+    expect(sql).not.toContain(before);
+    expect(sql).not.toContain(after);
+    scripted.destroy();
+  });
+
+  it('refuses a whole read the scripts make too large, which some tables still answer', () => {
+    const long = `-- ${'x'.repeat(MAX_READ_CHARS)}`;
+    const scripted = createNamedPeer({ after: long });
+
+    const error = refusal(() => readDocument(scripted.state, 'sql'));
+    expect(error.code).toBe(ToolErrorCode.tooLarge);
+    expect(error.message).toMatch(/pass tableIds, tableNames or groupNames/);
+    expect(
+      readDocument(scripted.state, 'sql', undefined, { tableNames: ['users'] })
+    ).toContain('CREATE TABLE users');
+    scripted.destroy();
+  });
+});
+
+describe('the scripts format', () => {
+  const before = 'CREATE EXTENSION IF NOT EXISTS pgcrypto;  \r\n';
+  const after = 'GRANT SELECT ON users TO PUBLIC;';
+
+  it('gives the two scripts alone, each empty while unset', () => {
+    const scripted = createNamedPeer({ after });
+
+    expect(read('scripts')).toBe('{"before":"","after":""}');
+    expect(JSON.parse(readDocument(scripted.state, 'scripts'))).toEqual({
+      before: '',
+      after,
+    });
+    scripted.destroy();
+  });
+
+  it('gives the text the document holds, which the DDL writes formatted', () => {
+    const scripted = createNamedPeer({ before, after });
+
+    expect(readDocument(scripted.state, 'scripts')).toBe(
+      JSON.stringify({ before, after })
+    );
+    expect(readDocument(scripted.state, 'sql', 'MSSQL')).toContain(
+      'CREATE EXTENSION IF NOT EXISTS pgcrypto;\nGO\n'
+    );
+    scripted.destroy();
+  });
+
+  it('answers whatever the locks, which have no part in the scripts', () => {
+    const scripted = createNamedPeer({ before });
+    const locked = readDocument(scripted.state, 'scripts');
+
+    scripted.dispatch([
+      settingsActions$.changeLockSettingsAction$(
+        LockSettingType.bracketType,
+        false
+      ),
+      settingsActions.changeBracketTypeAction({ value: BracketType.backtick }),
+    ]);
+
+    expect(readDocument(scripted.state, 'scripts')).toBe(locked);
+    scripted.destroy();
+  });
+
+  it('answers a schema the other formats refuse as too large', () => {
+    const wide = createWidePeer(400);
+    wide.dispatch([
+      settingsActions.changeDDLScriptAction({
+        position: 'after',
+        value: after,
+      }),
+    ]);
+
+    expect(refusal(() => readDocument(wide.state, 'snapshot')).code).toBe(
+      ToolErrorCode.tooLarge
+    );
+    expect(refusal(() => readDocument(wide.state, 'json')).code).toBe(
+      ToolErrorCode.tooLarge
+    );
+    expect(readDocument(wide.state, 'scripts')).toBe(
+      JSON.stringify({ before: '', after })
+    );
+    wide.destroy();
+  });
+
+  it('refuses scripts that alone pass one read, saying no read gives them in parts', () => {
+    const scripted = createNamedPeer({
+      before: 'x'.repeat(MAX_READ_CHARS / 2),
+      after: 'y'.repeat(MAX_READ_CHARS / 2),
+    });
+
+    const error = refusal(() => readDocument(scripted.state, 'scripts'));
+    expect(error.code).toBe(ToolErrorCode.tooLarge);
+    expect(error.message).toBe(
+      "this read is 40,024 characters, over the 40,000 one read returns; no read gives the scripts in parts, so ask the user to shorten them in the options of the editor's Schema SQL tab"
+    );
+    scripted.destroy();
+  });
+
+  it('refuses every argument of the sql format', () => {
+    const cases: Array<[() => string, string]> = [
+      [
+        () => readDocument(peer.state, 'scripts', 'MySQL'),
+        'vendor applies to the sql format only, not scripts',
+      ],
+      [
+        () =>
+          readDocument(peer.state, 'scripts', undefined, undefined, {
+            statements: 'recreate',
+          }),
+        'statements and header apply to the sql format only, not scripts',
+      ],
+      [
+        () =>
+          readDocument(peer.state, 'scripts', undefined, undefined, {
+            header: 'use',
+          }),
+        'statements and header apply to the sql format only, not scripts',
+      ],
+      [
+        () =>
+          readDocument(peer.state, 'scripts', undefined, undefined, {
+            logicalNameAsComment: true,
+          }),
+        'logicalNameAsComment applies to the sql format only, not scripts',
+      ],
+      [
+        () =>
+          readDocument(peer.state, 'scripts', undefined, {
+            tableIds: [SEED.users],
+          }),
+        'tableIds, tableNames and groupNames apply to the sql format only, not scripts; erd_get takes tableIds and tableNames too',
+      ],
+      [
+        () =>
+          readDocument(peer.state, 'scripts', undefined, {
+            tableNames: ['users'],
+          }),
+        'tableIds, tableNames and groupNames apply to the sql format only, not scripts; erd_get takes tableIds and tableNames too',
+      ],
+    ];
+
+    for (const [call, message] of cases) {
+      const error = refusal(call);
+      expect(error.code).toBe(ToolErrorCode.invalidArgs);
+      expect(error.message).toBe(message);
+    }
   });
 });

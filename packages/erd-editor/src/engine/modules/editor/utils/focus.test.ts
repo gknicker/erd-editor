@@ -1,18 +1,21 @@
 import { describe, expect, it } from 'vite-plus/test';
 
-import { Show } from '@/constants/schema';
+import { NameViewMode, Show } from '@/constants/schema';
 import { createEngineContext } from '@/engine/context';
 import {
   focusColumnAction,
   focusMoveTableAction,
   focusTableAction,
+  selectAction,
 } from '@/engine/modules/editor/atom.actions';
-import { FocusType, MoveKey } from '@/engine/modules/editor/state';
+import { FocusType, MoveKey, SelectType } from '@/engine/modules/editor/state';
 import {
   arrowDown,
   arrowLeft,
   arrowRight,
   arrowUp,
+  getFocusedColumnIds,
+  getRemovableColumns,
   getRemoveFirstColumnId,
   isColumns,
   isLastColumn,
@@ -20,9 +23,24 @@ import {
   isLastTable,
   isTableFocusType,
 } from '@/engine/modules/editor/utils/focus';
-import { changeShowAction } from '@/engine/modules/settings/atom.actions';
-import { addTableAction } from '@/engine/modules/table/atom.actions';
-import { addColumnAction } from '@/engine/modules/table-column/atom.actions';
+import { addMemoAction } from '@/engine/modules/memo/atom.actions';
+import {
+  changeNameViewModeAction,
+  changeShowAction,
+  changeZoomLevelAction,
+} from '@/engine/modules/settings/atom.actions';
+import {
+  addTableAction,
+  removeTableAction,
+} from '@/engine/modules/table/atom.actions';
+import {
+  addColumnAction,
+  removeColumnAction,
+} from '@/engine/modules/table-column/atom.actions';
+import {
+  addTableGroupAction,
+  removeTableGroupAction,
+} from '@/engine/modules/table-group/atom.actions';
 import { createStore, Store } from '@/engine/store';
 
 const TABLE_ID = 'table-1';
@@ -84,6 +102,20 @@ function focusMissingTable(store: Store, focusType: FocusType) {
   };
 }
 
+/** The reader's own switch of the name view, as a locked document takes it. */
+function view(
+  store: Store,
+  value: (typeof NameViewMode)[keyof typeof NameViewMode]
+) {
+  store.dispatchSync(
+    changeNameViewModeAction({
+      value,
+      shared: false,
+      editorId: store.state.editor.id,
+    })
+  );
+}
+
 function hide(store: Store, show: number) {
   store.dispatchSync(changeShowAction({ show, value: false }));
 }
@@ -96,6 +128,12 @@ describe('isTableFocusType', () => {
   it('is true only for the table focus types', () => {
     expect(isTableFocusType(FocusType.tableName)).toBe(true);
     expect(isTableFocusType(FocusType.tableComment)).toBe(true);
+  });
+
+  it('is true for the logical name a header lays out beside or for the name', () => {
+    expect(isTableFocusType(FocusType.tableLogicalName)).toBe(true);
+    expect(isTableFocusType(FocusType.columnLogicalName)).toBe(false);
+    expect(isTableFocusType(FocusType.columnDomain)).toBe(false);
   });
 
   it('is false for every column focus type', () => {
@@ -253,6 +291,182 @@ describe('getRemoveFirstColumnId', () => {
     focusColumn(store, 'c3', FocusType.columnName);
 
     expect(getRemoveFirstColumnId(store.state, ['c1', 'c2', 'c3'])).toBeNull();
+  });
+});
+
+describe('getFocusedColumnIds', () => {
+  it('is empty while no table or no column is focused', () => {
+    const store = createTestStore(['c1', 'c2']);
+    expect(getFocusedColumnIds(store.state)).toEqual([]);
+
+    focusTable(store, FocusType.tableName);
+    expect(getFocusedColumnIds(store.state)).toEqual([]);
+  });
+
+  it('is the focused column alone while it is the only one selected', () => {
+    const store = createTestStore(['c1', 'c2']);
+    focusColumn(store, 'c2', FocusType.columnDataType);
+
+    expect(getFocusedColumnIds(store.state)).toEqual(['c2']);
+  });
+
+  it('is the whole selection, in its order, once the focus is one of several', () => {
+    const store = createTestStore(['c1', 'c2', 'c3']);
+    focusColumn(store, 'c3', FocusType.columnName);
+    focusColumn(store, 'c1', FocusType.columnName, { $mod: true });
+
+    expect(getFocusedColumnIds(store.state)).toEqual(['c3', 'c1']);
+  });
+
+  it('is the focused column alone while the selection leaves it out', () => {
+    const store = createTestStore(['c1', 'c2', 'c3']);
+    focusColumn(store, 'c1', FocusType.columnName);
+    getFocus(store).selectColumnIds = ['c2', 'c3'];
+
+    expect(getFocusedColumnIds(store.state)).toEqual(['c1']);
+  });
+
+  it('leaves out a selected column taken out of the table', () => {
+    const store = createTestStore(['c1', 'c2', 'c3']);
+    focusColumn(store, 'c1', FocusType.columnName);
+    focusColumn(store, 'c2', FocusType.columnName, { $mod: true });
+    focusColumn(store, 'c3', FocusType.columnName, { $mod: true });
+
+    store.dispatchSync(removeColumnAction({ id: 'c2', tableId: TABLE_ID }));
+    expect(getFocus(store).selectColumnIds).toEqual(['c1', 'c2', 'c3']);
+    expect(getFocusedColumnIds(store.state)).toEqual(['c1', 'c3']);
+
+    store.dispatchSync(removeColumnAction({ id: 'c1', tableId: TABLE_ID }));
+    expect(getFocusedColumnIds(store.state)).toEqual(['c3']);
+  });
+
+  it('is empty while the focused table is not there', () => {
+    const store = createTestStore(['c1']);
+    focusMissingTable(store, FocusType.columnName);
+    getFocus(store).columnId = 'c1';
+    getFocus(store).selectColumnIds = ['c1'];
+
+    expect(getFocusedColumnIds(store.state)).toEqual([]);
+  });
+});
+
+describe('getRemovableColumns', () => {
+  /** Two selected columns of the focused table, which is selected alone. */
+  function createSelection() {
+    const store = createTestStore(['c1', 'c2', 'c3']);
+    store.dispatchSync(selectAction({ [TABLE_ID]: SelectType.table }));
+    focusColumn(store, 'c3', FocusType.columnName);
+    focusColumn(store, 'c1', FocusType.columnName, { $mod: true });
+    return store;
+  }
+
+  it('is the selected columns while their table is the whole selection', () => {
+    const store = createSelection();
+    const removable = getRemovableColumns(store.state);
+
+    expect(removable).toEqual({ tableId: TABLE_ID, columnIds: ['c3', 'c1'] });
+    expect(removable?.columnIds).not.toBe(getFocus(store).selectColumnIds);
+  });
+
+  it('is null while no table is focused or no column selected', () => {
+    const store = createTestStore(['c1']);
+    store.dispatchSync(selectAction({ [TABLE_ID]: SelectType.table }));
+    expect(getRemovableColumns(store.state)).toBeNull();
+
+    focusTable(store, FocusType.tableName);
+    expect(getRemovableColumns(store.state)).toBeNull();
+  });
+
+  it('is null once a memo or another table is selected beside it', () => {
+    const store = createSelection();
+    store.dispatchSync(
+      addMemoAction({ id: 'memo', ui: { x: 0, y: 0, zIndex: 3 } }),
+      selectAction({ memo: SelectType.memo })
+    );
+    expect(getRemovableColumns(store.state)).toBeNull();
+
+    const other = createSelection();
+    other.dispatchSync(
+      addTableAction({ id: 'table-2', ui: { x: 0, y: 0, zIndex: 3 } }),
+      selectAction({ 'table-2': SelectType.table })
+    );
+    expect(getRemovableColumns(other.state)).toBeNull();
+  });
+
+  it('is null once a group is selected beside it, which Delete then removes', () => {
+    const store = createSelection();
+    store.dispatchSync(
+      addTableGroupAction({
+        id: 'group',
+        ui: { x: 0, y: 0, width: 10, height: 10, zIndex: 1 },
+      }),
+      selectAction({ group: SelectType.tableGroup })
+    );
+
+    expect(getRemovableColumns(store.state)).toBeNull();
+  });
+
+  it('is null while the selection is another table than the focused one', () => {
+    const store = createSelection();
+    store.dispatchSync(
+      addTableAction({ id: 'table-2', ui: { x: 0, y: 0, zIndex: 3 } })
+    );
+    store.state.editor.selectedMap = { 'table-2': SelectType.table };
+
+    expect(getRemovableColumns(store.state)).toBeNull();
+  });
+
+  it('reads the selection over the tables and memos still in the document', () => {
+    const store = createSelection();
+    store.dispatchSync(
+      addTableAction({ id: 'table-2', ui: { x: 0, y: 0, zIndex: 3 } }),
+      selectAction({ 'table-2': SelectType.table })
+    );
+    // The bare atom a peer, an agent or the undo of an add sends, which
+    // leaves the table in the selection.
+    store.dispatchSync(removeTableAction({ id: 'table-2' }));
+
+    expect(getRemovableColumns(store.state)?.columnIds).toEqual(['c3', 'c1']);
+  });
+
+  it('reads the selection over the groups still in the document', () => {
+    const store = createSelection();
+    store.dispatchSync(
+      addTableGroupAction({
+        id: 'group',
+        ui: { x: 0, y: 0, width: 10, height: 10, zIndex: 1 },
+      }),
+      selectAction({ group: SelectType.tableGroup })
+    );
+    // The bare atom a peer, an agent or the undo of an add sends, which
+    // leaves the group in the selection.
+    store.dispatchSync(removeTableGroupAction({ id: 'group' }));
+
+    expect(store.state.editor.selectedMap.group).toBe(SelectType.tableGroup);
+    expect(getRemovableColumns(store.state)?.columnIds).toEqual(['c3', 'c1']);
+  });
+
+  it('is only the selected columns still in the table, and null once none is', () => {
+    const store = createSelection();
+
+    store.dispatchSync(removeColumnAction({ id: 'c3', tableId: TABLE_ID }));
+    expect(getFocus(store).selectColumnIds).toEqual(['c3', 'c1']);
+    expect(getRemovableColumns(store.state)).toEqual({
+      tableId: TABLE_ID,
+      columnIds: ['c1'],
+    });
+
+    store.dispatchSync(removeColumnAction({ id: 'c1', tableId: TABLE_ID }));
+    expect(getRemovableColumns(store.state)).toBeNull();
+  });
+
+  it('is null at a zoom that draws tables by their names alone', () => {
+    const store = createSelection();
+    store.dispatchSync(changeZoomLevelAction({ value: 0.7 }));
+    expect(getRemovableColumns(store.state)).toBeNull();
+
+    store.dispatchSync(changeZoomLevelAction({ value: 0.71 }));
+    expect(getRemovableColumns(store.state)?.columnIds).toEqual(['c3', 'c1']);
   });
 });
 
@@ -700,6 +914,21 @@ describe('arrowRight', () => {
     });
   });
 
+  it('takes no stop at the alternate key mark drawn after the last cell', () => {
+    const store = createTestStore(['c1', 'c2']);
+    reveal(store, Show.columnAlternateKey);
+    focusColumn(store, 'c1', FocusType.columnComment);
+
+    expect(isLastColumn(store.state)).toBe(true);
+
+    arrowRight(store.state, move(MoveKey.Tab));
+
+    expect(getFocus(store)).toMatchObject({
+      focusType: FocusType.columnName,
+      columnId: 'c2',
+    });
+  });
+
   it('wraps from the last column onto the first column of the next row', () => {
     const store = createTestStore(['c1', 'c2', 'c3']);
     focusColumn(store, 'c1', FocusType.columnComment);
@@ -811,5 +1040,141 @@ describe('focusMoveTable integration', () => {
       focusMoveTableAction({ moveKey: MoveKey.ArrowUp, shiftKey: false })
     );
     expect(getFocus(store).columnId).toBe('c1');
+  });
+});
+
+describe('the focus across the name views', () => {
+  it('walks the logical name, the name and the comment of a header in the view of both', () => {
+    const store = createTestStore(['c1']);
+    view(store, NameViewMode.both);
+    focusTable(store, FocusType.tableLogicalName);
+
+    arrowRight(store.state, move(MoveKey.ArrowRight));
+    expect(getFocus(store).focusType).toBe(FocusType.tableName);
+
+    arrowRight(store.state, move(MoveKey.ArrowRight));
+    expect(getFocus(store).focusType).toBe(FocusType.tableComment);
+    expect(isLastTable(store.state)).toBe(true);
+
+    arrowLeft(store.state, move(MoveKey.ArrowLeft));
+    arrowLeft(store.state, move(MoveKey.ArrowLeft));
+    expect(getFocus(store).focusType).toBe(FocusType.tableLogicalName);
+  });
+
+  it('starts a row of the view of both on its logical name and leaves it for the first header cell', () => {
+    const store = createTestStore(['c1', 'c2']);
+    view(store, NameViewMode.both);
+    focusTable(store, FocusType.tableLogicalName);
+
+    arrowDown(store.state, move(MoveKey.ArrowDown));
+    expect(getFocus(store)).toMatchObject({
+      focusType: FocusType.columnLogicalName,
+      columnId: 'c1',
+    });
+
+    arrowRight(store.state, move(MoveKey.ArrowRight));
+    expect(getFocus(store).focusType).toBe(FocusType.columnName);
+
+    arrowLeft(store.state, move(MoveKey.ArrowLeft));
+    arrowLeft(store.state, move(MoveKey.ArrowLeft));
+    expect(getFocus(store)).toMatchObject({
+      focusType: FocusType.tableComment,
+      columnId: null,
+    });
+
+    focusColumn(store, 'c1', FocusType.columnLogicalName);
+    arrowUp(store.state, move(MoveKey.ArrowUp));
+    expect(getFocus(store).focusType).toBe(FocusType.tableLogicalName);
+  });
+
+  it('walks the logical name and the domain in the name and type cells of the logical view', () => {
+    const store = createTestStore(['c1', 'c2']);
+    view(store, NameViewMode.logical);
+    focusTable(store, FocusType.tableLogicalName);
+
+    arrowDown(store.state, move(MoveKey.ArrowDown));
+    expect(getFocus(store).focusType).toBe(FocusType.columnLogicalName);
+
+    arrowRight(store.state, move(MoveKey.ArrowRight));
+    expect(getFocus(store).focusType).toBe(FocusType.columnDomain);
+
+    arrowDown(store.state, move(MoveKey.ArrowDown));
+    expect(getFocus(store)).toMatchObject({
+      focusType: FocusType.columnDomain,
+      columnId: 'c2',
+    });
+
+    focusColumn(store, 'c2', FocusType.columnComment);
+    arrowDown(store.state, move(MoveKey.ArrowDown));
+    expect(getFocus(store)).toMatchObject({
+      focusType: FocusType.tableLogicalName,
+      columnId: null,
+    });
+  });
+
+  it('walks the type and the domain apart while the domain shows a cell of its own', () => {
+    const store = createTestStore(['c1']);
+    reveal(store, Show.columnDomain);
+    focusColumn(store, 'c1', FocusType.columnDataType);
+
+    arrowRight(store.state, move(MoveKey.ArrowRight));
+    expect(getFocus(store).focusType).toBe(FocusType.columnDomain);
+
+    view(store, NameViewMode.logical);
+    arrowLeft(store.state, move(MoveKey.ArrowLeft));
+    expect(getFocus(store).focusType).toBe(FocusType.columnDataType);
+    arrowLeft(store.state, move(MoveKey.ArrowLeft));
+    expect(getFocus(store).focusType).toBe(FocusType.columnLogicalName);
+  });
+
+  it('walks on from the cell the view draws in place of a focus taken in another', () => {
+    const store = createTestStore(['c1']);
+    focusTable(store, FocusType.tableName);
+    // The view is set by hand, so no switch moves the focus onto its cells.
+    store.state.settings.nameViewMode = NameViewMode.logical;
+
+    arrowRight(store.state, move(MoveKey.ArrowRight));
+    expect(getFocus(store).focusType).toBe(FocusType.tableComment);
+
+    focusColumn(store, 'c1', FocusType.columnDomain);
+    store.state.settings.nameViewMode = NameViewMode.physical;
+    arrowRight(store.state, move(MoveKey.ArrowRight));
+    expect(getFocus(store).focusType).toBe(FocusType.columnNotNull);
+  });
+
+  it('lands a focus asked for by the name on the cell the view draws it in', () => {
+    const store = createTestStore(['c1']);
+    view(store, NameViewMode.logical);
+
+    focusTable(store, FocusType.tableName);
+    expect(getFocus(store).focusType).toBe(FocusType.tableLogicalName);
+
+    focusColumn(store, 'c1', FocusType.columnName);
+    expect(getFocus(store).focusType).toBe(FocusType.columnLogicalName);
+
+    focusColumn(store, 'c1', FocusType.columnDataType);
+    expect(getFocus(store).focusType).toBe(FocusType.columnDomain);
+  });
+
+  it('lands a focus on another table at the first header cell the view lays out', () => {
+    const store = createTestStore(['c1']);
+    store.dispatchSync(
+      addTableAction({ id: 'table-2', ui: { x: 0, y: 0, zIndex: 3 } })
+    );
+    view(store, NameViewMode.both);
+
+    store.dispatchSync(focusTableAction({ tableId: 'table-2' }));
+    expect(getFocus(store)).toMatchObject({
+      tableId: 'table-2',
+      focusType: FocusType.tableLogicalName,
+    });
+
+    store.dispatchSync(
+      focusTableAction({ tableId: TABLE_ID, focusType: FocusType.tableName })
+    );
+    expect(getFocus(store)).toMatchObject({
+      tableId: TABLE_ID,
+      focusType: FocusType.tableName,
+    });
   });
 });

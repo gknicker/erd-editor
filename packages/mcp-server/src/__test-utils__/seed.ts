@@ -1,5 +1,6 @@
 import {
   createPeerStore,
+  dictionaryActions,
   indexActions,
   indexColumnActions,
   memoActions,
@@ -9,9 +10,12 @@ import {
   settingsActions,
   tableActions,
   tableColumnActions,
+  tableGroupActions,
 } from '@dineug/erd-editor/peer.js';
 import type { AnyAction } from '@dineug/r-html';
 import { cloneDeep } from 'es-toolkit';
+
+import { runTool } from '@/tools/run';
 
 /** Fixed ids, so a spec names the seed's entities without reading them back. */
 export const SEED = {
@@ -28,6 +32,11 @@ export const SEED = {
   indexColumn: 'orders_note_index_column',
   userIndexColumn: 'orders_user_id_index_column',
   memo: 'memo',
+  group: 'users_group',
+  memberWord: 'word_member',
+  numberWord: 'word_number',
+  term: 'term_member_number',
+  domain: 'domain_identifier',
 } as const;
 
 const column = (
@@ -61,10 +70,76 @@ function buildValue(...actions: AnyAction[][]): string {
   }
 }
 
+/** A group named and placed, with the tables given as its members. */
+const group = (
+  id: string,
+  name: string,
+  ui: { x: number; y: number; width: number; height: number },
+  tableIds: string[]
+): AnyAction[] => [
+  tableGroupActions.addTableGroupAction({ id, ui: { ...ui, zIndex: 1 } }),
+  tableGroupActions.changeTableGroupNameAction({ id, value: name }),
+  ...tableIds.map(tableId =>
+    tableActions.changeTableGroupAction({ id: tableId, value: id })
+  ),
+];
+
 /**
- * Two related tables, an empty one, a two column index and a memo: every
- * entity an edit can name, and one relationship and index for a removal to
- * cascade into. Built through the reducers, so it is a document they accept.
+ * Two words, a term giving a domain that the key of users links, and users
+ * and its name column derived, with logical names of their own, so the
+ * dictionary tools and the derivation have rows to read.
+ */
+const dictionaries = (): AnyAction[] => [
+  dictionaryActions.addDictionaryAction({
+    kind: 'word',
+    id: SEED.memberWord,
+    values: { name: 'Member', abbreviation: 'MBR', englishName: 'Member' },
+  }),
+  dictionaryActions.addDictionaryAction({
+    kind: 'word',
+    id: SEED.numberWord,
+    values: { name: 'Number', abbreviation: 'NO', englishName: 'Number' },
+  }),
+  dictionaryActions.addDictionaryAction({
+    kind: 'domain',
+    id: SEED.domain,
+    values: { name: 'Identifier', category: 'Number', dataType: 'INT' },
+  }),
+  dictionaryActions.addDictionaryAction({
+    kind: 'term',
+    id: SEED.term,
+    values: {
+      name: 'Member Number',
+      physicalName: 'MBR_NO',
+      domainId: SEED.domain,
+    },
+  }),
+  tableColumnActions.changeColumnDomainAction({
+    tableId: SEED.users,
+    id: SEED.userId,
+    value: SEED.domain,
+  }),
+  tableActions.changeTableLogicalNameAction({
+    id: SEED.users,
+    value: 'Member',
+  }),
+  tableActions.changeTableNameDerivedAction({ id: SEED.users, value: true }),
+  tableColumnActions.changeColumnLogicalNameAction({
+    tableId: SEED.users,
+    id: SEED.userName,
+    value: 'Member Name',
+  }),
+  tableColumnActions.changeColumnNameDerivedAction({
+    tableId: SEED.users,
+    id: SEED.userName,
+    value: true,
+  }),
+];
+
+/**
+ * Two related tables, an empty one, a two column index, a memo, a group of
+ * the first table and the dictionaries above: every entity an edit can name,
+ * and one relationship and index for a removal to cascade into.
  */
 export function createSeedValue(): string {
   return buildValue(
@@ -118,13 +193,18 @@ export function createSeedValue(): string {
         id: SEED.memo,
         ui: { x: 900, y: 100, zIndex: 5 },
       }),
-    ]
+    ],
+    group(SEED.group, 'accounts', { x: 40, y: 20, width: 560, height: 300 }, [
+      SEED.users,
+    ]),
+    dictionaries()
   );
 }
 
 /**
  * A document of its own for the JSON import to replace the seed with: one
- * table, no relationship, index or memo, and a database name of its own.
+ * table in a group of its own, no relationship, index or memo, and a database
+ * name of its own.
  */
 export function createImportValue(): string {
   return buildValue(
@@ -139,7 +219,10 @@ export function createImportValue(): string {
         value: 'accounts',
       }),
     ],
-    column('accounts', 'accounts_id', 'id', 'BIGINT')
+    column('accounts', 'accounts_id', 'id', 'BIGINT'),
+    group('billing', 'billing', { x: 20, y: 0, width: 300, height: 200 }, [
+      'accounts',
+    ])
   );
 }
 
@@ -199,5 +282,55 @@ export function createPeerSession({
       agent.destroy();
       other.destroy();
     },
+  };
+}
+
+/**
+ * A seeded peer once two peers' edits crossed: one removed orders and the name
+ * column of users while the other related users to orders, indexed orders and
+ * indexed users by name, so the runtime value keeps what the file form drops.
+ */
+export function createCrossedRemovalPeer() {
+  const peer = createSeededPeer();
+  const other = createSeededPeer();
+  const fromPeer: AnyAction[][] = [];
+  const fromOther: AnyAction[][] = [];
+  peer.subscribe(actions => void fromPeer.push(actions));
+  other.subscribe(actions => void fromOther.push(actions));
+
+  runTool(peer, 'erd_remove_table', { tableId: SEED.orders });
+  runTool(peer, 'erd_remove_columns', {
+    tableId: SEED.users,
+    columnIds: [SEED.userName],
+  });
+  const [relationship] = runTool(other, 'erd_add_relationship', {
+    startTableId: SEED.users,
+    endTableId: SEED.orders,
+    relationshipType: 'ZeroN',
+  }).createdIds.slice(-1);
+  const [ordersIndex] = runTool(other, 'erd_add_index', {
+    tableId: SEED.orders,
+  }).createdIds;
+  const [usersIndex] = runTool(other, 'erd_add_index', {
+    tableId: SEED.users,
+  }).createdIds;
+  const [nameColumn] = runTool(other, 'erd_add_index_column', {
+    indexId: usersIndex,
+    columnId: SEED.userName,
+  }).createdIds;
+  const [idColumn] = runTool(other, 'erd_add_index_column', {
+    indexId: usersIndex,
+    columnId: SEED.userId,
+  }).createdIds;
+
+  const sent = fromPeer.splice(0).flat();
+  peer.receive(fromOther.splice(0).flat());
+  other.receive(sent);
+  other.destroy();
+
+  return {
+    peer,
+    orphans: { relationship, ordersIndex, nameColumn },
+    kept: { usersIndex, idColumn },
   };
 }

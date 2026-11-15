@@ -1,5 +1,4 @@
-import { difference } from 'es-toolkit';
-import { nanoid } from 'nanoid';
+import { uuid25 } from '@dineug/uuid';
 
 import { propOr } from '@/helper';
 import { type ERDEditorSchemaV2 } from '@/v2';
@@ -13,6 +12,7 @@ import { createIndexColumn } from '@/v3/parser/indexColumn.entity';
 import { createMemo } from '@/v3/parser/memo.entity';
 import { migrateScrollToOrigin } from '@/v3/parser/migrateScroll';
 import { createRelationship } from '@/v3/parser/relationship.entity';
+import { toFullColumnOrder, toLockedValues } from '@/v3/parser/settings';
 import { createTable } from '@/v3/parser/table.entity';
 import { createColumn } from '@/v3/parser/tableColumn.entity';
 
@@ -31,13 +31,9 @@ function assignCanvas(
   target: ERDEditorSchemaV3['settings'],
   source: ERDEditorSchemaV2['canvas']
 ) {
-  target.width = source.width;
-  target.height = source.height;
-  target.scrollTop = source.scrollTop;
-  target.scrollLeft = source.scrollLeft;
   target.zoomLevel = source.zoomLevel;
 
-  const { originX, originY } = migrateScrollToOrigin(target);
+  const { originX, originY } = migrateScrollToOrigin(source);
   target.originX = originX;
   target.originY = originY;
 
@@ -85,17 +81,13 @@ function assignCanvas(
   );
 
   target.relationshipDataTypeSync = source.setting.relationshipDataTypeSync;
-  target.relationshipOptimization = source.setting.relationshipOptimization;
 
-  const newColumnOrder = source.setting.columnOrder.map(
-    key => SchemaV3Constants.ColumnType[key]
-  );
+  target.columnOrder =
+    toFullColumnOrder(
+      source.setting.columnOrder.map(key => SchemaV3Constants.ColumnType[key])
+    ) ?? target.columnOrder;
 
-  if (
-    difference(SchemaV3Constants.ColumnTypeList, newColumnOrder).length === 0
-  ) {
-    target.columnOrder = newColumnOrder;
-  }
+  target.lockedValues = toLockedValues(target);
 }
 
 function assignTable(
@@ -174,7 +166,7 @@ function assignTable(
     newIndex.unique = index.unique;
 
     for (const indexColumn of index.columns) {
-      const id = nanoid();
+      const id = uuid25();
       const newIndexColumn = createIndexColumn();
 
       newIndex.indexColumnIds.push(id);

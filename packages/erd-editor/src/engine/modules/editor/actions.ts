@@ -1,13 +1,16 @@
 import { Reducer } from '@dineug/r-html';
 
 import { EngineContext } from '@/engine/context';
+import type { DictionaryKind } from '@/engine/modules/dictionary/actions';
 import { RootState } from '@/engine/state';
 import { type LWW, Point, ValuesType } from '@/internal-types';
 import { Rect } from '@/utils/dragSelect';
 
 import {
+  CenterStep,
   FocusType,
   MoveKey,
+  ScreenUnit,
   SelectType,
   SharedFocus,
   ShowMode,
@@ -33,6 +36,8 @@ export const ActionType = {
   editTableEnd: 'editor.editTableEnd',
   editMemo: 'editor.editMemo',
   editMemoEnd: 'editor.editMemoEnd',
+  editTableGroup: 'editor.editTableGroup',
+  editTableGroupEnd: 'editor.editTableGroupEnd',
   scrollMemo: 'editor.scrollMemo',
   selectAllColumn: 'editor.selectAllColumn',
   drawStartRelationship: 'editor.drawStartRelationship',
@@ -43,6 +48,7 @@ export const ActionType = {
   hoverRelationshipMap: 'editor.hoverRelationshipMap',
   changeOpenMap: 'editor.changeOpenMap',
   changeHandTool: 'editor.changeHandTool',
+  changeDrawTableGroup: 'editor.changeDrawTableGroup',
   changeZenMode: 'editor.changeZenMode',
   dragstartColumn: 'editor.dragstartColumn',
   dragendColumn: 'editor.dragendColumn',
@@ -51,7 +57,6 @@ export const ActionType = {
   sharedSelectionTracker: 'editor.sharedSelectionTracker',
   sharedDragSelectTracker: 'editor.sharedDragSelectTracker',
   dragSelectRect: 'editor.dragSelectRect',
-  validationIds: 'editor.validationIds',
   getLWW: 'editor.getLWW',
   mergeLWW: 'editor.mergeLWW',
   viewOpen: 'editor.viewOpen',
@@ -64,14 +69,26 @@ export const ActionType = {
   viewSetLayout: 'editor.viewSetLayout',
   viewChangeShowMode: 'editor.viewChangeShowMode',
   viewSetCenters: 'editor.viewSetCenters',
+  viewStepCenters: 'editor.viewStepCenters',
   changeVisualizationMode: 'editor.changeVisualizationMode',
+  endScreenSettings: 'editor.endScreenSettings',
 } as const;
 export type ActionType = ValuesType<typeof ActionType>;
+
+/**
+ * Set on the clear and the load of a schema import, and of their undo, which
+ * leave the store's words, terms and domains and their lists as they are.
+ */
+export type DictionaryLoadFlag = {
+  keepDictionaries?: boolean;
+};
 
 export type ActionMap = {
   [ActionType.changeHasHistory]: {
     hasUndo: boolean;
     hasRedo: boolean;
+    /** The dictionary sheet whose history this is, none for the document's. */
+    sheet?: DictionaryKind;
   };
   [ActionType.selectAll]: void;
   [ActionType.unselectAll]: void;
@@ -80,8 +97,8 @@ export type ActionMap = {
     width: number;
     height: number;
   };
-  [ActionType.clear]: void;
-  [ActionType.loadJson]: {
+  [ActionType.clear]: DictionaryLoadFlag | void;
+  [ActionType.loadJson]: DictionaryLoadFlag & {
     value: string;
   };
   [ActionType.initialClear]: void;
@@ -110,6 +127,10 @@ export type ActionMap = {
     id: string;
   };
   [ActionType.editMemoEnd]: void;
+  [ActionType.editTableGroup]: {
+    id: string;
+  };
+  [ActionType.editTableGroupEnd]: void;
   [ActionType.scrollMemo]: {
     id: string;
     /** How far down its body the memo is shown from, in body px. */
@@ -137,6 +158,9 @@ export type ActionMap = {
   [ActionType.changeHandTool]: {
     value: boolean;
   };
+  [ActionType.changeDrawTableGroup]: {
+    value: boolean;
+  };
   [ActionType.changeZenMode]: {
     value: boolean;
   };
@@ -161,7 +185,6 @@ export type ActionMap = {
   [ActionType.dragSelectRect]: {
     rect: Rect | null;
   };
-  [ActionType.validationIds]: void;
   [ActionType.getLWW]: void;
   [ActionType.mergeLWW]: {
     lww: LWW;
@@ -210,8 +233,15 @@ export type ActionMap = {
     tableIds: string[];
     kind?: ViewKind;
   };
+  [ActionType.viewStepCenters]: {
+    step: CenterStep;
+    kind?: ViewKind;
+  };
   [ActionType.changeVisualizationMode]: {
     value: VisualizationMode;
+  };
+  [ActionType.endScreenSettings]: {
+    units: ScreenUnit[];
   };
 };
 

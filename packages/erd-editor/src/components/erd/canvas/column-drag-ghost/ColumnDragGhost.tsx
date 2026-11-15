@@ -4,20 +4,27 @@ import { query } from '@dineug/erd-editor-schema';
 import { FC, repeat } from '@dineug/r-html';
 
 import { useAppContext } from '@/components/appContext';
-import { getColumnDragPointer } from '@/components/erd/canvas/column-drag-ghost/columnDragPointer';
+import { getColumnDragPointer } from '@/components/erd/canvas/columnDragPointer';
 import {
   SCENE_FONT_FAMILY,
   SCENE_FONT_SIZE,
   TABLE_CORNER_RADIUS,
 } from '@/components/erd/canvas/sceneTokens';
+import { blankLogicalName } from '@/components/erd/canvas/table/blankLogicalName';
 import {
+  type ColumnCellSlot,
   getColumnCellSlots,
   getColumnTextHeight,
   getColumnTextY,
 } from '@/components/erd/canvas/table/cellLayout';
+import { useI18n } from '@/components/localeContext';
 import { useThemeContext } from '@/components/themeContext';
 import { COLUMN_HEIGHT, TABLE_BORDER } from '@/constants/layout';
 import { ColumnType } from '@/constants/schema';
+import { getLiveDomainName } from '@/engine/modules/dictionary/membership';
+import { FocusType } from '@/engine/modules/editor/state';
+import type { RootState } from '@/engine/state';
+import type { I18n } from '@/i18n/translate';
 import type { Column } from '@/internal-types';
 import { getTableRect, getTableWidths } from '@/konva/scene/metrics';
 import type { Theme } from '@/themes/tokens';
@@ -27,16 +34,45 @@ const GHOST_OPACITY = 0.6;
 
 export type ColumnDragGhostProps = {};
 
-/** The text of the two cells a dragged row is told apart by, placeholder included. */
-const cellText = (theme: Theme, column: Column, columnType: number) => {
-  const [value, placeholder] =
-    columnType === ColumnType.columnName
-      ? [column.name, 'column']
-      : [column.dataType, 'dataType'];
+/**
+ * The text of the two cells a dragged row is told apart by, as its row draws
+ * them in the name view: the logical name in the name's place, the name
+ * dimmed while it is blank, and the domain's name where the type cell draws it.
+ */
+const cellText = (
+  state: RootState,
+  theme: Theme,
+  column: Column,
+  { columnType, focusType }: ColumnCellSlot,
+  i18n: Pick<I18n, 't'>
+) => {
+  if (focusType === FocusType.columnLogicalName) {
+    if (column.logicalName.trim()) {
+      return { text: column.logicalName, fill: theme.active };
+    }
+    const { standIn, key } = blankLogicalName(
+      state.settings,
+      column.name,
+      'common.placeholder.column'
+    );
+    return { text: standIn || i18n.t(key), fill: theme.placeholder };
+  }
+
+  const isName = columnType === ColumnType.columnName;
+  const value = isName
+    ? column.name
+    : (focusType === FocusType.columnDomain &&
+        getLiveDomainName(state, column.domainId)) ||
+      column.dataType;
 
   return value.trim()
     ? { text: value, fill: theme.active }
-    : { text: placeholder, fill: theme.placeholder };
+    : {
+        text: i18n.t(
+          isName ? 'common.placeholder.column' : 'common.placeholder.dataType'
+        ),
+        fill: theme.placeholder,
+      };
 };
 
 /**
@@ -47,6 +83,7 @@ const cellText = (theme: Theme, column: Column, columnType: number) => {
 const ColumnDragGhost: FC<ColumnDragGhostProps> = (props, ctx) => {
   const app = useAppContext(ctx);
   const themeRef = useThemeContext(ctx);
+  const i18n = useI18n(ctx);
 
   return () => {
     const { store } = app.value;
@@ -75,9 +112,6 @@ const ColumnDragGhost: FC<ColumnDragGhostProps> = (props, ctx) => {
         columnType === ColumnType.columnDataType
     );
     const { width } = getTableRect(store.state, table);
-    // A drag into another table sizes the ghost to that table, which can be
-    // narrower than where the row was taken, so the grab stays inside it.
-    const grabX = Math.min(pointer.grabX, width - TABLE_BORDER);
 
     // Over a drop target the real row is already under the pointer, moved
     // there by the dragover, and a ghost on top of it would draw it twice.
@@ -85,7 +119,7 @@ const ColumnDragGhost: FC<ColumnDragGhostProps> = (props, ctx) => {
       <k-group
         name="column-drag-ghost"
         kind="column-drag-ghost"
-        x={pointer.x - grabX}
+        x={pointer.x - pointer.grabX}
         y={pointer.y - pointer.grabY}
         opacity={GHOST_OPACITY}
         visible={!pointer.over}
@@ -110,9 +144,11 @@ const ColumnDragGhost: FC<ColumnDragGhostProps> = (props, ctx) => {
                 slot => slot.columnType,
                 slot => {
                   const { text, fill } = cellText(
+                    store.state,
                     theme,
                     column,
-                    slot.columnType
+                    slot,
+                    i18n.value
                   );
 
                   return (

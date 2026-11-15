@@ -31,7 +31,13 @@ describe('Toast.styles', () => {
     expect(text).toContain('border-radius: 6px');
   });
 
-  it('paints the ring in the active color over the toast border, turning while busy', () => {
+  it('spaces the ring from the text on the side the text follows it', () => {
+    const text = staticText(styles.indicator);
+    expect(text).toContain('margin-inline-end: 12px');
+    expect(text).not.toMatch(/margin-(left|right)/);
+  });
+
+  it('paints the indicator in the active color, the ring over the toast border, turning while busy', () => {
     const text = staticText(styles.indicator);
     expect(text).toContain('color: var(--active)');
     expect(text).toContain("& [data-part='track']");
@@ -40,6 +46,14 @@ describe('Toast.styles', () => {
     expect(text).toContain('transition: stroke-dashoffset');
     expect(text).toContain('&[data-busy] svg');
     expect(text).toContain('@keyframes toastSpin');
+  });
+
+  it('paints a tone in its own toast token', () => {
+    const text = staticText(styles.indicator);
+    expect(text).toContain("&[data-tone='success']");
+    expect(text).toContain('color: var(--toast-success)');
+    expect(text).toContain("&[data-tone='error']");
+    expect(text).toContain('color: var(--toast-error)');
   });
 
   it('spaces the stacked text rows apart from each other', () => {
@@ -58,10 +72,13 @@ describe('Toast.styles', () => {
     expect(styles.description.values).toContain(typography.paragraph);
   });
 
-  it('gaps the action buttons apart from the text', () => {
+  it('gaps the action buttons apart from the text, whichever way the toast reads', () => {
     const text = staticText(styles.action);
-    expect(text).toContain('margin-left: 15px');
+    expect(text).toContain('margin-inline-start: 15px');
     expect(text).toContain('& > button');
+    expect(text).toContain('margin-inline-start: 8px');
     expect(text).toContain('& > button:first-child');
+    expect(text).toContain('margin-inline-start: 0');
+    expect(text).not.toMatch(/margin-(left|right)/);
   });
 });

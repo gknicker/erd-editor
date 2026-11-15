@@ -838,9 +838,41 @@ class HubRequestHandlerTest {
     }
 
     @Test
+    fun `writes the value a page saved, never the runtime value it handed with it`() {
+        val h = harness()
+        val writer = h.openReady(A, "{}")
+        h.save(writer, "{\"stored\":1}", runtime = "{\"runtime\":1}")
+
+        assertEquals("{\"saved\":true}", h.saveDocument(A))
+        h.onRegistry { onWritten(writer.file, "{\"stored\":1}") }
+        h.save(writer, null, runtime = "{\"runtime\":2}")
+        h.ready(h.add(writer.file))
+        assertEquals("{\"saved\":true}", h.saveDocument(A))
+
+        assertEquals(listOf("{\"stored\":1}"), writer.view.writeCalls)
+    }
+
+    @Test
+    fun `writes nothing when the file holds the mirror, as after a scroll the file does not keep or an autosave`() {
+        val h = harness(PATIENT_TIMINGS)
+        val editor = h.openReady(A, "{ \"older\": \"bytes\" }")
+        h.relay(editor, add(1, "settings.scrollTo"))
+
+        val saving = h.start { save(PathParams(A), RecordingConnection()) }
+        h.save(editor, null)
+
+        assertEquals("{\"saved\":true}", saving.get().result.json())
+        h.save(editor, "{\"edited\":1}")
+        h.onRegistry { onWritten(editor.file, "{\"edited\":1}") }
+        assertEquals("{\"saved\":true}", h.saveDocument(A))
+        assertTrue(editor.view.writeCalls.isEmpty())
+    }
+
+    @Test
     fun `answers saved false, logging it, when the write leaves the file unsaved or throws`() {
         val h = harness()
         val writer = h.openReady(A, "{}")
+        h.save(writer, "{\"edited\":1}")
         val failure = IOException("EACCES")
 
         writer.view.writeResult = false
@@ -1004,6 +1036,7 @@ class HubRequestHandlerTest {
     fun `answers saved false at its bound when the write never finishes`() {
         val h = harness()
         val editor = h.openReady(A, "{}")
+        h.save(editor, "{\"edited\":1}")
         editor.view.writeGate = CompletableDeferred()
 
         val started = System.nanoTime()

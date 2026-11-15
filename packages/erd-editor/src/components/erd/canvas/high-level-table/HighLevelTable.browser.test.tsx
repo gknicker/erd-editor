@@ -1,6 +1,7 @@
 /** @jsxHost konva */
 
-import { type DOMTemplateLiterals } from '@dineug/r-html';
+import { type DOMTemplateLiterals, type FC, useProvider } from '@dineug/r-html';
+import { whenDrawn } from '@dineug/r-html-konva';
 import { Group } from 'konva/lib/Group';
 import type { Node as KonvaNode } from 'konva/lib/Node';
 import type { Path } from 'konva/lib/shapes/Path';
@@ -20,6 +21,7 @@ import {
   releasePointer,
 } from '@/__test-utils__';
 import type { AppContext } from '@/components/appContext';
+import { diffContext } from '@/components/diffContext';
 import HighLevelTable from '@/components/erd/canvas/high-level-table/HighLevelTable';
 import {
   CURSOR_INHERIT,
@@ -28,7 +30,7 @@ import {
   TABLE_INSET,
 } from '@/components/erd/canvas/sceneTokens';
 import { TABLE_BORDER } from '@/constants/layout';
-import { RelationshipType } from '@/constants/schema';
+import { NameViewMode, RelationshipType } from '@/constants/schema';
 import {
   drawStartRelationshipAction,
   sharedFocusTrackerAction,
@@ -36,8 +38,14 @@ import {
   unselectAllAction,
 } from '@/engine/modules/editor/atom.actions';
 import { FocusType, SelectType } from '@/engine/modules/editor/state';
-import { changeZoomLevelAction } from '@/engine/modules/settings/atom.actions';
-import { changeTableNameAction } from '@/engine/modules/table/atom.actions';
+import {
+  changeZoomLevelAction,
+  toNameViewModeAction,
+} from '@/engine/modules/settings/atom.actions';
+import {
+  changeTableLogicalNameAction,
+  changeTableNameAction,
+} from '@/engine/modules/table/atom.actions';
 import {
   addTableAction$,
   selectTableAction$,
@@ -45,10 +53,10 @@ import {
 import { addColumnAction$ } from '@/engine/modules/table-column/generator.actions';
 import { Tag } from '@/engine/tag';
 import type { Table as TableEntity } from '@/internal-types';
-import { whenDrawn } from '@/konva/batchDraw';
 import { getTableRect } from '@/konva/scene/metrics';
 import { renderScene } from '@/konva/scene/renderScene';
 import type { Theme } from '@/themes/tokens';
+import { Diff, type DiffMap } from '@/utils/diff/diff';
 
 type Fixture = {
   app: AppContext;
@@ -59,6 +67,14 @@ type Fixture = {
 
 const teardowns: Array<() => void> = [];
 
+type DiffSceneProps = { diffMap: DiffMap; children: DOMTemplateLiterals };
+
+/** A diff pane's scene: the provider is up before the table resolves it. */
+const DiffScene: FC<DiffSceneProps> = (props, ctx) => {
+  useProvider(ctx, diffContext, props.diffMap);
+  return () => props.children;
+};
+
 afterEach(async () => {
   releasePointer();
   teardowns.splice(0).forEach(teardown => teardown());
@@ -67,7 +83,7 @@ afterEach(async () => {
 
 async function setup(
   columns = 0,
-  props: { visible?: boolean } = {}
+  props: { visible?: boolean; diff?: (tableId: string) => DiffMap } = {}
 ): Promise<Fixture> {
   const app = createTestAppContext();
   const { store } = app;
@@ -84,10 +100,15 @@ async function setup(
   document.body.append(container);
   const theme = createTestTheme();
 
-  const scene: DOMTemplateLiterals = (
+  const layer: DOMTemplateLiterals = (
     <k-layer name="scene">
       <HighLevelTable table={table} visible={props.visible} />
     </k-layer>
+  );
+  const scene = props.diff ? (
+    <DiffScene diffMap={props.diff(tableId)}>{layer}</DiffScene>
+  ) : (
+    layer
   );
 
   const rendered = renderScene({
@@ -225,6 +246,36 @@ describe('the name a simplified table shows', () => {
     expect(name.fill()).toBe(theme.active);
   });
 
+  it('marks a comment change on the name, as the full card does with its comment hidden', async () => {
+    const { stage, theme } = await setup(0, {
+      diff: id =>
+        new Map([[id, new Map([[FocusType.tableComment, Diff.modify]])]]),
+    });
+
+    expect(named<Text>(rootOf(stage), 'high-level-table-name').fill()).toBe(
+      theme.diffModifyForeground
+    );
+  });
+
+  it('keeps a rename colour ahead of a comment change', async () => {
+    const { stage, theme } = await setup(0, {
+      diff: id =>
+        new Map([
+          [
+            id,
+            new Map([
+              [FocusType.tableName, Diff.rename],
+              [FocusType.tableComment, Diff.modify],
+            ]),
+          ],
+        ]),
+    });
+
+    expect(named<Text>(rootOf(stage), 'high-level-table-name').fill()).toBe(
+      theme.diffRenameForeground
+    );
+  });
+
   it('fills the table box inside its border and padding', async () => {
     const { app, stage, table } = await setup(2);
     const rect = getTableRect(app.store.state, table);
@@ -249,6 +300,74 @@ describe('the name a simplified table shows', () => {
     expect(await sizeAt(0.45)).toBe(HIGH_LEVEL_FONT_SIZES[2]);
     expect(await sizeAt(0.35)).toBe(HIGH_LEVEL_FONT_SIZES[3]);
     expect(await sizeAt(0.25)).toBe(HIGH_LEVEL_FONT_SIZES[4]);
+  });
+});
+
+describe('the name a simplified table shows in each name view', () => {
+  const name = (stage: Stage) =>
+    named<Text>(rootOf(stage), 'high-level-table-name');
+
+  async function setupNames(logicalName: string) {
+    const fixture = await setup();
+    const { id } = fixture.table;
+    fixture.app.store.dispatchSync(
+      changeTableNameAction({ id, value: 'member' }),
+      changeTableLogicalNameAction({ id, value: logicalName })
+    );
+    await settle();
+    return fixture;
+  }
+
+  const switchTo = async (
+    app: AppContext,
+    mode: (typeof NameViewMode)[keyof typeof NameViewMode]
+  ) => {
+    app.store.dispatchSync(toNameViewModeAction(app.store.state, mode, false));
+    await settle();
+  };
+
+  it('shows the logical name in the logical view and the name again in the physical one', async () => {
+    const { app, stage, theme } = await setupNames('Member');
+
+    expect(name(stage).text()).toBe('member');
+
+    await switchTo(app, NameViewMode.logical);
+    expect(name(stage).text()).toBe('Member');
+    expect(name(stage).fill()).toBe(theme.active);
+
+    await switchTo(app, NameViewMode.physical);
+    expect(name(stage).text()).toBe('member');
+  });
+
+  it('dims the name standing in for a blank logical name in the logical view', async () => {
+    const { app, stage, theme } = await setupNames(' ');
+
+    await switchTo(app, NameViewMode.logical);
+
+    expect(name(stage).text()).toBe('member');
+    expect(name(stage).fill()).toBe(theme.placeholder);
+  });
+
+  it('puts the name under the logical name in the view of both', async () => {
+    const { app, stage, theme } = await setupNames('Member');
+
+    await switchTo(app, NameViewMode.both);
+
+    expect(name(stage).text()).toBe('Member\nmember');
+    expect(name(stage).fill()).toBe(theme.active);
+  });
+
+  it('follows a logical name typed while the view shows it', async () => {
+    const { app, stage, table } = await setupNames('');
+
+    await switchTo(app, NameViewMode.both);
+    expect(name(stage).text()).toBe('member');
+
+    app.store.dispatchSync(
+      changeTableLogicalNameAction({ id: table.id, value: 'Member' })
+    );
+    await settle();
+    expect(name(stage).text()).toBe('Member\nmember');
   });
 });
 
@@ -351,6 +470,20 @@ describe('what a simplified table pointer start owns', () => {
       type: 'openColorPicker',
       payload: { x: 90, y: 35, color: table.ui.color },
     });
+  });
+
+  it('leaves the color picker closed on a right click of the colour edge, which the context menu owns', async () => {
+    const { app, stage } = await setup();
+    const openColorPicker = vi.fn();
+    app.emitter.on({ openColorPicker });
+
+    fireScenePointer(named(rootOf(stage), 'table-header-color'), 'click', {
+      button: 2,
+      clientX: 90,
+      clientY: 35,
+    });
+
+    expect(openColorPicker).not.toHaveBeenCalled();
   });
 
   it('selects the table on mousedown and drags it with the pointer', async () => {

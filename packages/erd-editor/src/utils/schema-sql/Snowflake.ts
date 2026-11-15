@@ -1,27 +1,39 @@
 import { query } from '@dineug/erd-editor-schema';
-import { nanoid } from 'nanoid';
-
-import { ColumnOption } from '@/constants/schema';
-import { RootState } from '@/engine/state';
-import { bHas } from '@/utils/bit';
+import { uuid25 } from '@dineug/uuid';
 
 import {
-  autoName,
+  ColumnOption,
+  Database,
+  ReferentialActionToSQL,
+} from '@/constants/schema';
+import { RootState } from '@/engine/state';
+import { Relationship } from '@/internal-types';
+import { bHas } from '@/utils/bit';
+import { autoName, getBracket, primaryKeyColumns } from '@/utils/tableName';
+
+import { SchemaSQLHeader, SchemaSQLStatements } from './options';
+import {
+  commentToWrite,
+  CreateSchemaOptions,
   FormatColumnOptions,
   FormatIndexOptions,
   formatNames,
+  formatReferentialActions,
   FormatRelationOptions,
   formatSize,
   formatSpace,
   FormatTableOptions,
-  getBracket,
-  KeyColumn,
   Name,
-  orderByNameASC,
   primaryKey,
-  primaryKeyColumns,
+  referentialActionSupport,
+  selectIndexColumns,
+  toForeignKeyPairs,
   toOrderName,
+  toSchemaEntities,
+  toStringLiteral,
 } from './utils';
+
+const ACTION_SUPPORT = referentialActionSupport(Database.Snowflake);
 
 // The double quote is Snowflake's only identifier delimiter, and a quoted name
 // is case sensitive where a bare one folds to upper case. So settings
@@ -29,37 +41,34 @@ import {
 const toBracket = (bracketType: number) =>
   getBracket(bracketType) === '' ? '' : '"';
 
-export function createSchema(state: RootState): string {
-  const {
-    doc: { tableIds, relationshipIds, indexIds },
-    collections,
-  } = state;
+export function createSchema(
+  state: RootState,
+  tableIds?: readonly string[],
+  { statements, written, logicalNameAsComment }: CreateSchemaOptions = {}
+): string {
   const fkNames: Name[] = [];
   const indexNames: Name[] = [];
   const stringBuffer: string[] = [''];
-  const tables = query(collections)
-    .collection('tableEntities')
-    .selectByIds(tableIds)
-    .sort(orderByNameASC);
-  const relationships = query(collections)
-    .collection('relationshipEntities')
-    .selectByIds(relationshipIds);
-  const indexes = query(collections)
-    .collection('indexEntities')
-    .selectByIds(indexIds);
+  const { tables, relationships, indexes } = toSchemaEntities(state, tableIds);
 
   tables.forEach(table => {
-    formatTable(state, { table, buffer: stringBuffer });
+    written?.tables.push(table);
+    formatTable(state, {
+      table,
+      buffer: stringBuffer,
+      statements,
+      logicalNameAsComment,
+    });
     stringBuffer.push('');
   });
 
   relationships.forEach(relationship => {
-    formatRelation(state, {
+    const wrote = formatRelation(state, {
       relationship,
       buffer: stringBuffer,
       fkNames,
     });
-    stringBuffer.push('');
+    if (wrote) stringBuffer.push('');
   });
 
   indexes.forEach(index => {
@@ -76,7 +85,7 @@ export function createSchema(state: RootState): string {
 
 export function formatTable(
   state: RootState,
-  { buffer, table }: FormatTableOptions
+  { buffer, table, statements, logicalNameAsComment }: FormatTableOptions
 ) {
   const {
     collections,
@@ -86,8 +95,13 @@ export function formatTable(
   const columns = query(collections)
     .collection('tableColumnEntities')
     .selectByIds(table.columnIds);
+  // Snowflake replaces a table in one statement, so recreate needs no DROP.
+  const create =
+    statements === SchemaSQLStatements.recreate
+      ? 'CREATE OR REPLACE TABLE'
+      : 'CREATE TABLE';
 
-  buffer.push(`CREATE TABLE ${bracket}${table.name}${bracket}`);
+  buffer.push(`${create} ${bracket}${table.name}${bracket}`);
   buffer.push(`(`);
   const pk = primaryKey(columns);
   const spaceSize = formatSize(columns);
@@ -98,6 +112,7 @@ export function formatTable(
       isComma: pk || columns.length !== i + 1,
       spaceSize,
       buffer,
+      logicalNameAsComment,
     });
   });
 
@@ -111,17 +126,24 @@ export function formatTable(
     );
   }
 
-  if (table.comment.trim() === '') {
+  const comment = commentToWrite(table, logicalNameAsComment);
+  if (comment === '') {
     buffer.push(`);`);
   } else {
     buffer.push(`)`);
-    buffer.push(`COMMENT = '${table.comment}';`);
+    buffer.push(`COMMENT = ${toStringLiteral(comment)};`);
   }
 }
 
 function formatColumn(
   { settings: { bracketType } }: RootState,
-  { buffer, column, isComma, spaceSize }: FormatColumnOptions
+  {
+    buffer,
+    column,
+    isComma,
+    spaceSize,
+    logicalNameAsComment,
+  }: FormatColumnOptions
 ) {
   const bracket = toBracket(bracketType);
   const stringBuffer: string[] = [];
@@ -154,60 +176,79 @@ function formatColumn(
   } else if (column.default.trim() !== '') {
     stringBuffer.push(`DEFAULT ${column.default}`);
   }
-  if (column.comment.trim() !== '') {
-    stringBuffer.push(`COMMENT '${column.comment}'`);
+  const comment = commentToWrite(column, logicalNameAsComment);
+  if (comment !== '') {
+    stringBuffer.push(`COMMENT ${toStringLiteral(comment)}`);
   }
 
   buffer.push(stringBuffer.join(' ').trimEnd() + `${isComma ? ',' : ''}`);
 }
 
 function formatRelation(
-  { collections, settings: { bracketType } }: RootState,
+  state: RootState,
   { buffer, relationship, fkNames }: FormatRelationOptions
-) {
+): boolean {
+  const {
+    settings: { bracketType },
+  } = state;
+  const columns = toForeignKeyPairs(state, relationship);
+  if (!columns) return false;
+
+  const { startTable, endTable } = columns;
   const bracket = toBracket(bracketType);
-  const tableCollection = query(collections).collection('tableEntities');
-  const columnCollection = query(collections).collection('tableColumnEntities');
-  const startTable = tableCollection.selectById(relationship.start.tableId);
-  const endTable = tableCollection.selectById(relationship.end.tableId);
-
-  if (startTable && endTable) {
-    buffer.push(`ALTER TABLE ${bracket}${endTable.name}${bracket}`);
-
-    let fkName = `FK_${startTable.name}_TO_${endTable.name}`;
-    fkName = autoName(fkNames, '', fkName);
-    fkNames.push({
-      id: nanoid(),
-      name: fkName,
-    });
-
-    buffer.push(`  ADD CONSTRAINT ${bracket}${fkName}${bracket}`);
-
-    const columns: KeyColumn = {
-      start: [],
-      end: [],
-    };
-    relationship.end.columnIds.forEach(columnId => {
-      const column = columnCollection.selectById(columnId);
-      if (column) {
-        columns.end.push(column);
-      }
-    });
-    relationship.start.columnIds.forEach(columnId => {
-      const column = columnCollection.selectById(columnId);
-      if (column) {
-        columns.start.push(column);
-      }
-    });
-
-    buffer.push(`    FOREIGN KEY (${formatNames(columns.end, bracket)})`);
+  const leftOut = leftOutActions(relationship);
+  if (leftOut.length !== 0) {
     buffer.push(
-      `    REFERENCES ${bracket}${startTable.name}${bracket} (${formatNames(
-        columns.start,
-        bracket
-      )});`
+      `-- Snowflake creates no foreign key with a referential action other than NO ACTION, so ${leftOut.join(' and ')} ${leftOut.length === 1 ? 'is' : 'are'} left out.`
     );
   }
+  buffer.push(`ALTER TABLE ${bracket}${endTable.name}${bracket}`);
+
+  let fkName = `FK_${startTable.name}_TO_${endTable.name}`;
+  fkName = autoName(fkNames, '', fkName);
+  fkNames.push({
+    id: uuid25(),
+    name: fkName,
+  });
+
+  buffer.push(`  ADD CONSTRAINT ${bracket}${fkName}${bracket}`);
+
+  buffer.push(`    FOREIGN KEY (${formatNames(columns.end, bracket)})`);
+  buffer.push(
+    `    REFERENCES ${bracket}${startTable.name}${bracket} (${formatNames(
+      columns.start,
+      bracket
+    )})`,
+    ...formatReferentialActions(relationship, ACTION_SUPPORT).map(
+      clause => `    ${clause}`
+    )
+  );
+  buffer[buffer.length - 1] += ';';
+  return true;
+}
+
+// The clauses a relationship sets that the DDL leaves out, ON DELETE first,
+// for the comment above its foreign key.
+function leftOutActions({
+  onDelete,
+  onUpdate,
+}: Pick<Relationship, 'onDelete' | 'onUpdate'>): string[] {
+  const clauses: string[] = [];
+
+  if (
+    ReferentialActionToSQL[onDelete] &&
+    !ACTION_SUPPORT.onDelete.includes(onDelete)
+  ) {
+    clauses.push(`ON DELETE ${ReferentialActionToSQL[onDelete]}`);
+  }
+  if (
+    ReferentialActionToSQL[onUpdate] &&
+    !ACTION_SUPPORT.onUpdate.includes(onUpdate)
+  ) {
+    clauses.push(`ON UPDATE ${ReferentialActionToSQL[onUpdate]}`);
+  }
+
+  return clauses;
 }
 
 export function formatIndex(
@@ -220,16 +261,8 @@ export function formatIndex(
     .selectById(index.tableId);
   if (!table) return;
 
-  const indexColumns = query(collections)
-    .collection('indexColumnEntities')
-    .selectByIds(index.indexColumnIds);
-  const columns = indexColumns
-    .map(indexColumn =>
-      query(collections)
-        .collection('tableColumnEntities')
-        .selectById(indexColumn.columnId)
-    )
-    .filter(column => column !== undefined);
+  const indexColumns = selectIndexColumns(collections, table, index);
+  const columns = indexColumns.map(({ column }) => column);
 
   if (columns.length === 0) return;
 
@@ -238,7 +271,7 @@ export function formatIndex(
     indexName = `IDX_${table.name}`;
     indexName = autoName(indexNames, '', indexName);
     indexNames.push({
-      id: nanoid(),
+      id: uuid25(),
       name: indexName,
     });
   }
@@ -256,19 +289,11 @@ export function formatIndex(
     return;
   }
 
-  const sortedNames = indexColumns
-    .map(indexColumn => {
-      const column = query(collections)
-        .collection('tableColumnEntities')
-        .selectById(indexColumn.columnId);
-      if (!column) return null;
-      return {
-        name: `${bracket}${column.name}${bracket} ${toOrderName(
-          indexColumn.orderType
-        )}`,
-      };
-    })
-    .filter(columnName => columnName !== null);
+  const sortedNames = indexColumns.map(({ indexColumn, column }) => ({
+    name: `${bracket}${column.name}${bracket} ${toOrderName(
+      indexColumn.orderType
+    )}`,
+  }));
 
   // There is no CREATE INDEX in Snowflake. The index is emitted as the
   // clustering it maps onto, commented out: CLUSTER BY takes one key set per
@@ -282,4 +307,24 @@ export function formatIndex(
       bracket
     )});`
   );
+}
+
+/** USE SCHEMA, after CREATE SCHEMA IF NOT EXISTS for createAndUse. */
+export function formatHeader(
+  { settings: { bracketType } }: RootState,
+  header: Exclude<SchemaSQLHeader, 'none'>,
+  name: string
+): string {
+  const bracket = toBracket(bracketType);
+  const schema = `${bracket}${name}${bracket}`;
+  const use = `USE SCHEMA ${schema};`;
+
+  return header === SchemaSQLHeader.createAndUse
+    ? `CREATE SCHEMA IF NOT EXISTS ${schema};\n${use}`
+    : use;
+}
+
+/** Nothing: recreate writes CREATE OR REPLACE TABLE instead. */
+export function formatDropBlock(): string {
+  return '';
 }

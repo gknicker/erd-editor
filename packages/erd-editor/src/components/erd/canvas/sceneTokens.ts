@@ -8,7 +8,8 @@ import {
   TABLE_BORDER,
   TABLE_PADDING,
 } from '@/constants/layout';
-import { isMouseEvent } from '@/utils/domEvent';
+import { isMainButtonPress, isMouseEvent } from '@/utils/domEvent';
+import { holdStageCursor, setStageCursor } from '@/utils/stageCursor';
 
 /** A pointer event as konva hands it to a listener bound on a scene node. */
 export type SceneMouseEvent = KonvaEventObject<MouseEvent>;
@@ -16,6 +17,20 @@ export type SceneMouseEvent = KonvaEventObject<MouseEvent>;
 export type SceneTouchEvent = KonvaEventObject<TouchEvent>;
 
 export type ScenePointerEvent = SceneMouseEvent | SceneTouchEvent;
+
+/**
+ * The click listener of a scene button, which acts on the main button alone:
+ * konva makes a click of any button's press and lift, and a right click is the
+ * context menu's. A Mac control click is the main button, so it still acts.
+ *
+ * @example
+ * on:click={mainButtonClick(handleRemove)}
+ */
+export const mainButtonClick =
+  (click: (event: SceneMouseEvent) => void) =>
+  (event: SceneMouseEvent): void => {
+    if (isMainButtonPress(event.evt)) click(event);
+  };
 
 /**
  * The face utils/text.ts measures a string with. Drawing in anything else would
@@ -102,11 +117,20 @@ export const TABLE_INSET = TABLE_BORDER + TABLE_PADDING;
 /** The radius Table.styles rounds a table box with. */
 export const TABLE_CORNER_RADIUS = 6;
 
+/** How much of the column drag handle shows while the pointer is off it. */
+export const COLUMN_DRAG_HANDLE_REST_OPACITY = 0.5;
+
+/** The corner the column drag handle's button is rounded by. */
+export const COLUMN_DRAG_HANDLE_RADIUS = 4;
+
 /** The 1.5px underline EditInput draws for a focused, edited or shared cell. */
 export const FOCUS_BORDER_HEIGHT = 1.5;
 
 /** What the ring outside a table box costs, as outline and box-shadow both do. */
 export const RING_WIDTH = 1;
+
+/** The outline a diff pane draws round an entity added, removed or only moved. */
+export const DIFF_OUTLINE_WIDTH = 2;
 
 /**
  * The drop shadow a view card sits on, deeper than any a document box casts.
@@ -154,6 +178,27 @@ export const VIEW_CARD_GLOW_BLUR = 14;
 
 export const VIEW_CARD_GLOW_OPACITY = 0.55;
 
+/**
+ * How much of its color a table group's body shows, the canvas and the
+ * connectors over it reading through.
+ */
+export const TABLE_GROUP_FILL_OPACITY = 0.12;
+
+/** The radius a table group's box is rounded with, a table's own. */
+export const TABLE_GROUP_CORNER_RADIUS = 6;
+
+/** The room a table group's name keeps from each end of its title bar, the name editor's too. */
+export const TABLE_GROUP_TITLE_PADDING = 8;
+
+/** The weight a table group's name is drawn and edited at, a heading over the tables' own names. */
+export const TABLE_GROUP_TITLE_FONT_WEIGHT = 'bold';
+
+/**
+ * The line a table drag outlines the group its drop would join with, twice
+ * the box's own line so it reads apart from the selection.
+ */
+export const TABLE_GROUP_DROP_WIDTH = 2;
+
 /** The side of the square viewBox every icon is authored in. */
 export const ICON_VIEW_SIZE = Number(ICON_VIEW_BOX.split(' ')[2]);
 
@@ -195,16 +240,14 @@ export function documentCardShadow(
 /** The hand a clickable scene node asks for, as the dom scene spelt it in css. */
 export const CURSOR_POINTER = 'pointer';
 
+/** The open hand the column drag handle asks for under the pointer. */
+export const CURSOR_GRAB = 'grab';
+
 /** The beam a textarea carried on its own, which a drawn body has to ask for. */
 export const CURSOR_TEXT = 'text';
 
 /** What a node hands back on the way out, leaving the container its own cursor. */
 export const CURSOR_INHERIT = '';
-
-/** The last cursor a hover asked for under a held gesture, noted and not shown. */
-type SceneCursorHold = { requested: string };
-
-const sceneCursorHolds = new WeakMap<HTMLElement, SceneCursorHold>();
 
 const sceneContainerOf = (event: ScenePointerEvent) =>
   event.target?.getStage()?.container();
@@ -219,11 +262,35 @@ const sceneContainerOf = (event: ScenePointerEvent) =>
  */
 export function setSceneCursor(event: ScenePointerEvent, cursor: string): void {
   const container = sceneContainerOf(event);
-  if (!container) return;
+  if (container) setStageCursor(container, cursor);
+}
 
-  const hold = sceneCursorHolds.get(container);
-  if (hold) hold.requested = cursor;
-  else container.style.cursor = cursor;
+/**
+ * The cursors one scene component asks for, so a node unmounted from under the pointer, which konva
+ * sends no leave for, hands the container back the cursor it took: release writes CURSOR_INHERIT
+ * once, unless the last cursor the component asked for already was.
+ *
+ * @example
+ * const cursor = createSceneCursorScope();
+ * onUnmounted(cursor.release);
+ */
+export function createSceneCursorScope() {
+  let container: HTMLElement | null = null;
+  let current = CURSOR_INHERIT;
+
+  return {
+    set(event: ScenePointerEvent, cursor: string) {
+      container = sceneContainerOf(event) ?? container;
+      current = cursor;
+      if (container) setStageCursor(container, cursor);
+    },
+    release() {
+      if (container && current !== CURSOR_INHERIT) {
+        setStageCursor(container, CURSOR_INHERIT);
+      }
+      current = CURSOR_INHERIT;
+    },
+  };
 }
 
 /**
@@ -241,18 +308,5 @@ export function holdSceneCursor(
   const container = sceneContainerOf(event);
   if (!container || !isMouseEvent(event.evt)) return noop;
 
-  // A press inside another one starts from what that one noted, because the
-  // container shows only the cursor the earlier press is holding it on.
-  const hold: SceneCursorHold = {
-    requested:
-      sceneCursorHolds.get(container)?.requested ?? container.style.cursor,
-  };
-  sceneCursorHolds.set(container, hold);
-  container.style.cursor = cursor;
-
-  return () => {
-    if (sceneCursorHolds.get(container) !== hold) return;
-    sceneCursorHolds.delete(container);
-    container.style.cursor = hold.requested;
-  };
+  return holdStageCursor(container, cursor);
 }

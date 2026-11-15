@@ -1,6 +1,6 @@
 import { DocumentInfo } from '@dineug/erd-editor-agent-hub';
 import { Schema } from 'effect';
-import { McpSchema, Tool, Toolkit } from 'effect/unstable/ai';
+import { McpSchema, Tool, Toolkit } from 'effect/ai';
 
 import { BATCH_TOOL, MAX_OPERATIONS, OPERATION_NAME } from '@/tools/batch';
 import { BATCH_FIELD_COPY, describeArg, describeTool } from '@/tools/copy';
@@ -14,6 +14,7 @@ export const SESSION_TOOL_NAMES = Object.freeze([
   'erd_read',
   'erd_list',
   'erd_get',
+  'erd_list_checks',
   'erd_save',
   'erd_undo',
   'erd_redo',
@@ -73,6 +74,7 @@ export const SaveResult = Schema.Struct({
 export const UndoResult = Schema.Struct({
   tool: Schema.Literals(['erd_undo', 'erd_redo']),
   mode: Mode,
+  saved: Schema.optionalKey(Schema.Boolean),
   toolName: Schema.NullOr(Schema.String),
   entries: Schema.Int,
   skipped: Schema.optionalKey(Schema.Array(Schema.String)),
@@ -87,6 +89,7 @@ const Mismatch = Schema.Struct({
 export const EditResult = Schema.Struct({
   tool: Schema.String,
   mode: Mode,
+  saved: Schema.optionalKey(Schema.Boolean),
   createdIds: Schema.Array(Schema.String),
   batches: Schema.Int,
   historyEntries: Schema.Int,
@@ -99,6 +102,7 @@ export const EditResult = Schema.Struct({
 export const BatchResult = Schema.Struct({
   tool: Schema.Literal(BATCH_TOOL),
   mode: Mode,
+  saved: Schema.optionalKey(Schema.Boolean),
   createdIds: Schema.Array(Schema.String),
   operations: Schema.Array(
     Schema.Struct({

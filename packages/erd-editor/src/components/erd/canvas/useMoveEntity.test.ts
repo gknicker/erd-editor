@@ -3,28 +3,48 @@ import { afterEach, beforeEach, describe, expect, it } from 'vite-plus/test';
 
 import {
   createTestAppContext,
+  createTouch,
   flush,
   mountAndFlush,
   Mounted,
   movePointer,
   releasePointer,
 } from '@/__test-utils__/index';
-import { AppContext } from '@/components/appContext';
-import { isEntityDragActive } from '@/components/erd/canvas/entityDrag';
+import { seedMapTable } from '@/__test-utils__/mapColumnsSeed';
+import { AppContext, useAppContext } from '@/components/appContext';
+import {
+  hasEntityDragTravelled,
+  isEntityDragActive,
+} from '@/components/erd/canvas/entityDrag';
 import type { ScenePointerEvent } from '@/components/erd/canvas/sceneTokens';
 import { useMoveEntity } from '@/components/erd/canvas/useMoveEntity';
+import {
+  type SceneInteraction,
+  sceneInteractionContext,
+} from '@/components/sceneInteractionContext';
 import {
   sceneSourceContext,
   useSceneSource,
 } from '@/components/sceneSourceContext';
-import { selectAction } from '@/engine/modules/editor/atom.actions';
+import { CLICK_DRAG_MIN_MOVE } from '@/constants/layout';
+import { RelationshipType } from '@/constants/schema';
+import {
+  drawStartAddRelationshipAction,
+  drawStartRelationshipAction,
+  selectAction,
+} from '@/engine/modules/editor/atom.actions';
 import { SelectType, ViewKind } from '@/engine/modules/editor/state';
 import {
   viewChangeZoomLevelAction,
   viewOpenAction,
   viewSetLayoutAction,
 } from '@/engine/modules/editor/view.actions';
-import { addTableAction } from '@/engine/modules/table/atom.actions';
+import {
+  addTableAction,
+  changeTableGroupAction,
+  moveToTableAction,
+} from '@/engine/modules/table/atom.actions';
+import { addTableGroupAction } from '@/engine/modules/table-group/atom.actions';
 import { useUnmounted } from '@/hooks/useUnmounted';
 import { getContentRect } from '@/konva/scene/contentBounds';
 import {
@@ -51,6 +71,45 @@ const Probe: FC<{}> = (props, ctx) => {
 /** A view scene root the way an overlay mounts one: a wrapper of its own, the provider inside. */
 const ViewScope: FC<{ children: any }> = (props, ctx) => {
   const provider = useProvider(ctx, sceneSourceContext, 'flow');
+  const { addUnsubscribe } = useUnmounted();
+  addUnsubscribe(() => provider.destroy());
+
+  return () => html`${props.children}`;
+};
+
+/** A read-only scene root: a wrapper of its own, the read mode provided inside. */
+const ReadScope: FC<{ children: any }> = (props, ctx) => {
+  const provider = useProvider(ctx, sceneInteractionContext, 'read');
+  const { addUnsubscribe } = useUnmounted();
+  addUnsubscribe(() => provider.destroy());
+
+  return () => html`${props.children}`;
+};
+
+/** An editor's scene root, whose mode reads its store's readonly flag, as the ERD tab's does. */
+const EditorScope: FC<{ children: any }> = (props, ctx) => {
+  const app = useAppContext(ctx);
+  const provider = useProvider(
+    ctx,
+    sceneInteractionContext,
+    (): SceneInteraction => (app.value.store.getReadonly() ? 'read' : 'edit')
+  );
+  const { addUnsubscribe } = useUnmounted();
+  addUnsubscribe(() => provider.destroy());
+
+  return () => html`${props.children}`;
+};
+
+/** The mode a turning root reads, which a spec changes while a gesture runs. */
+const turning = { mode: 'edit' as SceneInteraction };
+
+/** A scene root whose mode turns under a press, its store left writable. */
+const TurningScope: FC<{ children: any }> = (props, ctx) => {
+  const provider = useProvider(
+    ctx,
+    sceneInteractionContext,
+    (): SceneInteraction => turning.mode
+  );
   const { addUnsubscribe } = useUnmounted();
   addUnsubscribe(() => provider.destroy());
 
@@ -275,6 +334,65 @@ describe('useMoveEntity', () => {
     expect(pointOf('t1')).toEqual(before);
   });
 
+  /**
+   * A peer can put a table in a selected group, or take one out, while the
+   * drag runs: the drag carries the tables its first step did, so its buffered
+   * steps sum under one table list, here, on every peer and in the undo.
+   */
+  it('carries the tables its first step carried to the drop, a table joining a selected group midway left standing', async () => {
+    app.store.dispatchSync(
+      addTableGroupAction({
+        id: 'g1',
+        ui: { x: 800, y: 100, width: 600, height: 400, zIndex: 1 },
+      }),
+      addTableAction({ id: 't2', ui: { x: 900, y: 200, zIndex: 3 } }),
+      addTableAction({ id: 't3', ui: { x: 300, y: 700, zIndex: 4 } }),
+      changeTableGroupAction({ id: 't2', value: 'g1' }),
+      selectAction({ t1: SelectType.table, g1: SelectType.tableGroup })
+    );
+    const before = { t1: pointOf('t1'), t2: pointOf('t2'), t3: pointOf('t3') };
+
+    api.onMoveStart(press());
+    movePointer(100, 0);
+    await flush();
+    app.store.dispatchSync(changeTableGroupAction({ id: 't3', value: 'g1' }));
+    movePointer(160, 0);
+    await flush();
+
+    expect(pointOf('t1').x).toBe(before.t1.x + 160);
+    expect(pointOf('t2').x).toBe(before.t2.x + 160);
+    expect(pointOf('t3')).toEqual(before.t3);
+  });
+
+  it('judges the drop of a drag past the click distance alone, a tremor of the hand putting no table in a group', async () => {
+    app.store.dispatchSync(
+      addTableGroupAction({
+        id: 'g1',
+        ui: { x: 0, y: 0, width: 1200, height: 900, zIndex: 1 },
+      })
+    );
+
+    api.onMoveStart(press());
+    movePointer(CLICK_DRAG_MIN_MOVE - 2, 1);
+    await flush();
+    expect(isEntityDragActive(app.store.state)).toBe(true);
+    expect(hasEntityDragTravelled(app.store.state)).toBe(false);
+    releasePointer();
+    await flush();
+
+    expect(app.store.state.collections.tableEntities.t1.groupId).toBe('');
+
+    api.onMoveStart(press());
+    movePointer(CLICK_DRAG_MIN_MOVE, 0);
+    await flush();
+    expect(hasEntityDragTravelled(app.store.state)).toBe(true);
+    releasePointer();
+    await flush();
+
+    expect(app.store.state.collections.tableEntities.t1.groupId).toBe('g1');
+    expect(hasEntityDragTravelled(app.store.state)).toBe(false);
+  });
+
   it('leaves an entity the selection never held where it stands', async () => {
     app.store.dispatchSync(
       addTableAction({ id: 't2', ui: { x: 900, y: 200, zIndex: 3 } })
@@ -314,5 +432,200 @@ describe('useMoveEntity', () => {
     expect(selectedIds()).toEqual(['t2']);
     expect(isEntityDragActive(app.store.state)).toBe(false);
     expect(isViewFrozen(app.store.state)).toBe(false);
+  });
+});
+
+describe('useMoveEntity - a scene that reads', () => {
+  const mountRead = async () => {
+    mounted?.unmount();
+    mounted = await mountAndFlush(
+      html`<div><${ReadScope} .children=${html`<${Probe} />`} /></div>`,
+      app
+    );
+  };
+
+  it('selects nothing, so no selection outline is drawn', async () => {
+    app.store.dispatchSync(
+      addTableAction({ id: 't2', ui: { x: 900, y: 200, zIndex: 3 } }),
+      selectAction({ t2: SelectType.table })
+    );
+    await mountRead();
+
+    api.onMoveStart(press());
+    await flush();
+
+    expect(selectedIds()).toEqual(['t2']);
+  });
+
+  it('neither lifts the entity nor holds the view, and the pointer moves nothing', async () => {
+    await mountRead();
+    const before = pointOf('t1');
+
+    api.onMoveStart(press());
+    movePointer(120, 60);
+    await flush();
+
+    expect(isEntityDragActive(app.store.state)).toBe(false);
+    expect(isViewFrozen(app.store.state)).toBe(false);
+    expect(pointOf('t1')).toEqual(before);
+  });
+
+  it('starts no duplicate on an Alt press', async () => {
+    await mountRead();
+    const evt = new MouseEvent('mousedown', {
+      bubbles: true,
+      cancelable: true,
+      button: 0,
+      altKey: true,
+    });
+    window.dispatchEvent(evt);
+
+    api.onMoveStart({ target: sceneNode(), evt } as ScenePointerEvent);
+    await flush();
+
+    expect(evt.defaultPrevented).toBe(false);
+    expect(selectedIds()).toEqual([]);
+  });
+
+  /** A readonly store seeded before it turned readonly, which would refuse the table itself. */
+  const readonlyApp = () => {
+    let readonly = false;
+    const next = createTestAppContext({ getReadonly: () => readonly });
+    next.store.dispatchSync(
+      addTableAction({ id: 't1', ui: { x: 300, y: 200, zIndex: 2 } })
+    );
+    readonly = true;
+    return next;
+  };
+
+  it('selects and lifts nothing in a readonly editor, whose root reads its store', async () => {
+    mounted?.unmount();
+    app = readonlyApp();
+    mounted = await mountAndFlush(
+      html`<div><${EditorScope} .children=${html`<${Probe} />`} /></div>`,
+      app
+    );
+
+    api.onMoveStart(press());
+    await flush();
+
+    expect(selectedIds()).toEqual([]);
+    expect(isEntityDragActive(app.store.state)).toBe(false);
+  });
+
+  it('leaves a readonly store under edit selecting on a press, as a diff pane does', async () => {
+    mounted?.unmount();
+    app = readonlyApp();
+    mounted = await mountAndFlush(html`<${Probe} />`, app);
+
+    api.onMoveStart(press());
+    await flush();
+
+    expect(selectedIds()).toEqual(['t1']);
+    expect(isEntityDragActive(app.store.state)).toBe(true);
+  });
+});
+
+describe('useMoveEntity - a scene that turns to read under a drag', () => {
+  /** A group round the table, which a drop past the click distance would put it in. */
+  const mountTurning = async () => {
+    turning.mode = 'edit';
+    app.store.dispatchSync(
+      addTableGroupAction({
+        id: 'g1',
+        ui: { x: 0, y: 0, width: 1200, height: 900, zIndex: 1 },
+      })
+    );
+    mounted?.unmount();
+    mounted = await mountAndFlush(
+      html`<div><${TurningScope} .children=${html`<${Probe} />`} /></div>`,
+      app
+    );
+  };
+
+  afterEach(() => {
+    turning.mode = 'edit';
+  });
+
+  it('ends the drag at its next step, which moves nothing and drops nothing into a group', async () => {
+    await mountTurning();
+    const before = pointOf('t1');
+
+    api.onMoveStart(press());
+    movePointer(40, 0);
+    await flush();
+    expect(pointOf('t1').x).toBe(before.x + 40);
+
+    turning.mode = 'read';
+    movePointer(400, 0);
+    await flush();
+
+    expect(isEntityDragActive(app.store.state)).toBe(false);
+    expect(isViewFrozen(app.store.state)).toBe(false);
+    expect(pointOf('t1').x).toBe(before.x + 40);
+
+    releasePointer();
+    await flush();
+    expect(app.store.state.collections.tableEntities.t1.groupId).toBe('');
+  });
+
+  it('drops nothing into a group for a release that comes once read, with no step between', async () => {
+    await mountTurning();
+
+    api.onMoveStart(press());
+    movePointer(40, 0);
+    await flush();
+    turning.mode = 'read';
+    releasePointer();
+    await flush();
+
+    expect(isEntityDragActive(app.store.state)).toBe(false);
+    expect(app.store.state.collections.tableEntities.t1.groupId).toBe('');
+  });
+
+  it('still drops into the group a drag that stays under edit', async () => {
+    await mountTurning();
+
+    api.onMoveStart(press());
+    movePointer(40, 0);
+    await flush();
+    releasePointer();
+    await flush();
+
+    expect(app.store.state.collections.tableEntities.t1.groupId).toBe('g1');
+  });
+});
+
+describe('useMoveEntity - a tap while a relationship is drawn', () => {
+  afterEach(() => {
+    window.dispatchEvent(createTouch('touchend'));
+  });
+
+  it('ends the draw on the tapped table at once with new key columns, as a press does', async () => {
+    seedMapTable(app.store, 'users', 'users', [
+      { id: 'users.id', name: 'id', primaryKey: true },
+    ]);
+    app.store.dispatchSync(
+      moveToTableAction({ id: 'users', x: 0, y: 600 }),
+      drawStartRelationshipAction({ relationshipType: RelationshipType.ZeroN }),
+      drawStartAddRelationshipAction({ tableId: 'users' })
+    );
+
+    const evt = createTouch('touchstart');
+    window.dispatchEvent(evt);
+    api.onMoveStart({
+      target: sceneNode(),
+      evt,
+    } as unknown as ScenePointerEvent);
+    await flush();
+
+    const { doc, collections, editor } = app.store.state;
+    expect(doc.relationshipIds).toHaveLength(1);
+    const [relationshipId] = doc.relationshipIds;
+    const { end } = collections.relationshipEntities[relationshipId];
+    expect(end.tableId).toBe('t1');
+    expect(end.columnIds).toEqual(collections.tableEntities.t1.columnIds);
+    expect(end.columnIds).toHaveLength(1);
+    expect(editor.drawRelationship).toBeNull();
   });
 });

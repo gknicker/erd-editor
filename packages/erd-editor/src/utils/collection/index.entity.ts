@@ -1,19 +1,17 @@
-import merge from 'deepmerge';
-import { nanoid } from 'nanoid';
+import { uuid25 } from '@dineug/uuid';
 
 import { DeepPartial, Index } from '@/internal-types';
-import { getDefaultEntityMeta } from '@/utils';
+import { deepMerge } from '@/utils/deepMerge';
 
 export const createIndex = (value?: DeepPartial<Index>): Index =>
-  merge(
+  deepMerge<Index>(
     {
-      id: nanoid(),
+      id: uuid25(),
       name: '',
       tableId: '',
       indexColumnIds: [],
       seqIndexColumnIds: [],
       unique: false,
-      meta: getDefaultEntityMeta(),
     },
-    (value as Index) ?? {}
+    value ?? {}
   );

@@ -5,6 +5,8 @@ import { OrderType, OrderTypeList } from '@/v3/schema/indexColumn.entity';
 import {
   Direction,
   DirectionList,
+  ReferentialAction,
+  ReferentialActionList,
   RelationshipType,
   RelationshipTypeList,
   StartRelationshipType,
@@ -23,11 +25,18 @@ import {
   ColumnTypeList,
   Database,
   DatabaseList,
+  DDLScriptPosition,
+  DDLScriptPositionList,
+  InvertedLockSettings,
   Language,
   LanguageList,
+  LockSettingFields,
+  LockSettingType,
+  LockSettingTypeList,
   NameCase,
   NameCaseList,
-  SaveSettingType,
+  NameViewMode,
+  NameViewModeList,
   Show,
 } from '@/v3/schema/settings';
 import { ColumnOption, ColumnUIKey } from '@/v3/schema/tableColumn.entity';
@@ -51,17 +60,26 @@ describe('v3/schema/index', () => {
           'ColumnUIKey',
           'Database',
           'DatabaseList',
+          'DDLScriptPosition',
+          'DDLScriptPositionList',
           'Direction',
           'DirectionList',
+          'InvertedLockSettings',
           'Language',
           'LanguageList',
+          'LockSettingFields',
+          'LockSettingType',
+          'LockSettingTypeList',
           'NameCase',
           'NameCaseList',
+          'NameViewMode',
+          'NameViewModeList',
           'OrderType',
           'OrderTypeList',
+          'ReferentialAction',
+          'ReferentialActionList',
           'RelationshipType',
           'RelationshipTypeList',
-          'SaveSettingType',
           'Show',
           'StartRelationshipType',
           'StartRelationshipTypeList',
@@ -91,13 +109,37 @@ describe('v3/schema/index', () => {
       expect(SchemaV3Constants.StartRelationshipTypeList).toBe(
         StartRelationshipTypeList
       );
+      expect(SchemaV3Constants.ReferentialAction).toBe(ReferentialAction);
+      expect(SchemaV3Constants.ReferentialActionList).toBe(
+        ReferentialActionList
+      );
       expect(SchemaV3Constants.Direction).toBe(Direction);
       expect(SchemaV3Constants.DirectionList).toBe(DirectionList);
       expect(SchemaV3Constants.ColumnOption).toBe(ColumnOption);
       expect(SchemaV3Constants.ColumnUIKey).toBe(ColumnUIKey);
       expect(SchemaV3Constants.OrderType).toBe(OrderType);
       expect(SchemaV3Constants.OrderTypeList).toBe(OrderTypeList);
-      expect(SchemaV3Constants.SaveSettingType).toBe(SaveSettingType);
+      expect(SchemaV3Constants.LockSettingType).toBe(LockSettingType);
+      expect(SchemaV3Constants.LockSettingTypeList).toBe(LockSettingTypeList);
+      expect(SchemaV3Constants.LockSettingFields).toBe(LockSettingFields);
+      expect(SchemaV3Constants.DDLScriptPosition).toBe(DDLScriptPosition);
+      expect(SchemaV3Constants.DDLScriptPositionList).toBe(
+        DDLScriptPositionList
+      );
+      expect(SchemaV3Constants.NameViewMode).toBe(NameViewMode);
+      expect(SchemaV3Constants.NameViewModeList).toBe(NameViewModeList);
+      expect(SchemaV3Constants.InvertedLockSettings).toBe(InvertedLockSettings);
+    });
+
+    it('names the two script positions by themselves', () => {
+      expect(SchemaV3Constants.DDLScriptPosition).toEqual({
+        before: 'before',
+        after: 'after',
+      });
+      expect(SchemaV3Constants.DDLScriptPositionList).toEqual([
+        'before',
+        'after',
+      ]);
     });
 
     it('carries the canvas boundary scalars by value', () => {
@@ -113,7 +155,8 @@ describe('v3/schema/index', () => {
       expect(SchemaV3Constants).not.toHaveProperty('Doc');
       expect(SchemaV3Constants).not.toHaveProperty('Table');
       expect(SchemaV3Constants).not.toHaveProperty('Memo');
-      expect(Object.keys(SchemaV3Constants)).toHaveLength(28);
+      expect(SchemaV3Constants).not.toHaveProperty('TableGroup');
+      expect(Object.keys(SchemaV3Constants)).toHaveLength(37);
     });
   });
 
@@ -124,10 +167,6 @@ describe('v3/schema/index', () => {
           'https://raw.githubusercontent.com/dineug/erd-editor/main/json-schema/schema.json',
         version: '3.0.0',
         settings: {
-          width: CANVAS_SIZE_MAX,
-          height: CANVAS_SIZE_MAX,
-          scrollTop: 0,
-          scrollLeft: 0,
           originX: 0,
           originY: 0,
           zoomLevel: CANVAS_ZOOM_MIN,
@@ -140,34 +179,53 @@ describe('v3/schema/index', () => {
           columnNameCase: NameCase.camelCase,
           bracketType: BracketType.doubleQuote,
           relationshipDataTypeSync: true,
-          relationshipOptimization: false,
           columnOrder: [...ColumnTypeList],
           maxWidthComment: -1,
-          ignoreSaveSettings: 0,
+          lockSettings: LockSettingType.viewport,
+          lockedValues: {
+            originX: 0,
+            originY: 0,
+            zoomLevel: CANVAS_ZOOM_MIN,
+            canvasType: CanvasType.ERD,
+            language: Language.Java,
+            tableNameCase: NameCase.pascalCase,
+            columnNameCase: NameCase.camelCase,
+            bracketType: BracketType.doubleQuote,
+            nameViewMode: NameViewMode.physical,
+          },
+          ddlScripts: { before: '', after: '' },
+          nameViewMode: NameViewMode.physical,
         },
         doc: {
           tableIds: ['table-1'],
           relationshipIds: [],
           indexIds: [],
           memoIds: [],
+          tableGroupIds: ['group-1'],
+          wordIds: ['word-1'],
+          termIds: [],
+          domainIds: [],
         },
         collections: {
           tableEntities: {
             'table-1': {
               id: 'table-1',
               name: 'actor',
+              logicalName: '',
               comment: '',
               columnIds: [],
               seqColumnIds: [],
+              groupId: 'group-1',
+              nameDerived: false,
               ui: {
                 x: 0,
                 y: 0,
                 zIndex: 2,
                 widthName: 60,
+                widthLogicalName: 60,
                 widthComment: 60,
                 color: '',
               },
-              meta: { updateAt: 0, createAt: 0 },
             },
           },
           tableColumnEntities: {},
@@ -175,21 +233,52 @@ describe('v3/schema/index', () => {
           indexEntities: {},
           indexColumnEntities: {},
           memoEntities: {},
+          tableGroupEntities: {
+            'group-1': {
+              id: 'group-1',
+              name: 'billing',
+              color: '#0090ff',
+              ui: { x: -40, y: -40, width: 400, height: 300, zIndex: 1 },
+            },
+          },
+          wordEntities: {
+            'word-1': {
+              id: 'word-1',
+              name: '회원',
+              abbreviation: 'MBR',
+              englishName: 'member',
+              description: '',
+              synonyms: '',
+              forbiddenWords: '',
+              order: 'a0',
+            },
+          },
+          termEntities: {},
+          domainEntities: {},
         },
       };
 
       expect(schema.version).toBe('3.0.0');
       expect(schema.$schema).toMatch(/json-schema\/schema\.json$/);
       expect(Object.keys(schema.collections).sort()).toEqual([
+        'domainEntities',
         'indexColumnEntities',
         'indexEntities',
         'memoEntities',
         'relationshipEntities',
         'tableColumnEntities',
         'tableEntities',
+        'tableGroupEntities',
+        'termEntities',
+        'wordEntities',
       ]);
       expect(
         schema.doc.tableIds.every(id => id in schema.collections.tableEntities)
+      ).toBe(true);
+      expect(
+        schema.doc.tableGroupIds.includes(
+          schema.collections.tableEntities['table-1'].groupId
+        )
       ).toBe(true);
       expect(schema.collections.tableEntities['table-1'].name).toBe('actor');
     });

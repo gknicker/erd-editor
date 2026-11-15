@@ -2,14 +2,18 @@
 // project, where a Stage can be built and its nodes counted.
 
 import { html } from '@dineug/r-html';
+import type { Text } from 'konva/lib/shapes/Text';
 import type { Stage } from 'konva/lib/Stage';
 import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
 
 import {
   createTestAppContext,
+  createTestI18n,
   flush,
   mountAndFlush,
   Mounted,
+  provideI18n,
+  pseudoMessages,
 } from '@/__test-utils__/index';
 import { AppContext } from '@/components/appContext';
 import {
@@ -21,9 +25,19 @@ import TimeTravel from '@/components/erd/time-travel/TimeTravel';
 import * as styles from '@/components/erd/time-travel/TimeTravel.styles';
 import * as buttonStyles from '@/components/primitives/button/Button.styles';
 import * as sliderStyles from '@/components/primitives/slider/Slider.styles';
+import { NameViewMode } from '@/constants/schema';
 import { createHistory, History, HistoryOptions } from '@/engine/history';
 import { changeViewportAction } from '@/engine/modules/editor/atom.actions';
-import { addTableAction } from '@/engine/modules/table/atom.actions';
+import {
+  changeZoomLevelAction,
+  scrollToAction,
+  toNameViewModeAction,
+} from '@/engine/modules/settings/atom.actions';
+import {
+  addTableAction,
+  changeTableLogicalNameAction,
+  changeTableNameAction,
+} from '@/engine/modules/table/atom.actions';
 import { KeyBindingName } from '@/utils/keyboard-shortcut';
 
 let mounted: Mounted | null = null;
@@ -70,11 +84,16 @@ const addTable = (id: string) =>
 type Setup = {
   tableIds?: string[];
   viewport?: { width: number; height: number };
+  view?: { originX: number; originY: number; zoomLevel: number };
+  /** Edits the origin store makes before the preview opens. */
+  prepare?: (app: AppContext) => void;
 };
 
 async function setup({
   tableIds = ['t1', 't2'],
   viewport = { width: 1000, height: 800 },
+  view,
+  prepare,
 }: Setup = {}) {
   const histories: History[] = [];
   const originApp: AppContext = createTestAppContext({
@@ -86,6 +105,14 @@ async function setup({
   for (const id of tableIds) {
     originApp.store.dispatchSync(addTable(id));
   }
+  if (view) {
+    const { originX, originY, zoomLevel } = view;
+    originApp.store.dispatchSync(
+      scrollToAction({ originX, originY }),
+      changeZoomLevelAction({ value: zoomLevel })
+    );
+  }
+  prepare?.(originApp);
   await flush();
 
   const onChange = vi.fn();
@@ -244,6 +271,48 @@ describe('TimeTravel', () => {
       expect(parseFloat(viewport.style.height)).toBeCloseTo(handle.height, 3);
     });
 
+    it('opens on the scroll and zoom the reader left a new document at, which its locked file leaves out', async () => {
+      const { originApp } = await setup({
+        tableIds: ['t1'],
+        view: { originX: 120, originY: 80, zoomLevel: 1.5 },
+      });
+      expect(originApp.store.state.settings.lockSettings).toBe(63);
+
+      const stages: Record<string, Stage> = Reflect.get(
+        globalThis,
+        '__erdStages'
+      );
+      const [table] = stages.canvas.find('.table');
+
+      expect(table.getAbsoluteScale().x).toBeCloseTo(1.5, 5);
+      expect(table.getAbsolutePosition().x).toBeCloseTo(120, 5);
+      expect(table.getAbsolutePosition().y).toBeCloseTo(80, 5);
+    });
+
+    it("opens in the reader's name view, which a locked file leaves out", async () => {
+      const { originApp } = await setup({
+        tableIds: ['t1'],
+        prepare: app =>
+          app.store.dispatchSync(
+            changeTableNameAction({ id: 't1', value: 'member' }),
+            changeTableLogicalNameAction({ id: 't1', value: 'Member' }),
+            toNameViewModeAction(app.store.state, NameViewMode.logical, false)
+          ),
+      });
+      expect(originApp.store.state.settings.lockSettings).toBe(63);
+
+      const stages: Record<string, Stage> = Reflect.get(
+        globalThis,
+        '__erdStages'
+      );
+      const texts = stages.canvas
+        .find<Text>('.cell-text')
+        .map(text => text.text());
+
+      expect(texts).toContain('Member');
+      expect(texts).not.toContain('member');
+    });
+
     it('follows later viewport changes on the origin store', async () => {
       const { originApp } = await setup({
         viewport: { width: 1000, height: 800 },
@@ -271,6 +340,39 @@ describe('TimeTravel', () => {
       ) as HTMLElement;
       // cursor 1 of min -1 / max 1 is the far right of the track
       expect(range.style.right).toBe('0%');
+    });
+  });
+
+  describe('in the language the editor shows', () => {
+    it('offers Apply and Cancel in that language', async () => {
+      const provider = provideI18n(
+        document.body,
+        createTestI18n('es-ES', pseudoMessages('es'))
+      );
+
+      try {
+        await setup();
+
+        expect(buttons().map(button => button.textContent?.trim())).toEqual([
+          'es:Apply',
+          'es:Cancel',
+        ]);
+      } finally {
+        provider.destroy();
+      }
+    });
+
+    it('keeps the preview and the slider bar left to right whatever the editor reads in', async () => {
+      await setup();
+
+      expect(
+        container()
+          .querySelector(`.${String(styles.root)}`)
+          ?.getAttribute('dir')
+      ).toBe('ltr');
+      expect(
+        container().querySelector('.time-travel-slider')?.getAttribute('dir')
+      ).toBe('ltr');
     });
   });
 

@@ -5,6 +5,7 @@ import {
   ColumnOption,
   ColumnUIKey,
   OrderType,
+  ReferentialAction,
   RelationshipType,
 } from '@/constants/schema';
 import { ChangeActionTypes, SharedActionTypes } from '@/engine/action-types';
@@ -36,7 +37,10 @@ const ALLOWED_ACTION_TYPES = [
   'column.changeComment',
   'column.changeDataType',
   'column.changeDefault',
+  'column.changeDomain',
+  'column.changeLogicalName',
   'column.changeName',
+  'column.changeNameDerived',
   'column.changeNotNull',
   'column.changePrimaryKey',
   'column.changeUnique',
@@ -50,7 +54,9 @@ const ALLOWED_ACTION_TYPES = [
   'relationship.add',
   'table.add',
   'table.changeComment',
+  'table.changeLogicalName',
   'table.changeName',
+  'table.changeNameDerived',
 ];
 
 /**
@@ -187,6 +193,8 @@ const createColourfulBatch = () => {
     tables: [
       createClipboardTable('t1', {
         columnIds: ['c1', 'c2'],
+        logicalName: 'Member',
+        nameDerived: true,
         ui: {
           x: 100,
           y: 200,
@@ -203,7 +211,10 @@ const createColourfulBatch = () => {
           ColumnOption.primaryKey |
           ColumnOption.notNull |
           ColumnOption.unique |
-          ColumnOption.autoIncrement,
+          ColumnOption.autoIncrement |
+          ColumnOption.nameDerived,
+        logicalName: 'Member number',
+        domainId: 'd1',
       }),
       createClipboardColumn('c2', 't1'),
     ],
@@ -333,7 +344,12 @@ describe('toCreateEntityActions', () => {
   it('returns nothing for an empty input', () => {
     const result = toCreateEntityActions(createInput(), createPlacement([]));
 
-    expect(result).toEqual({ actions: [], tableIds: [], memoIds: [] });
+    expect(result).toEqual({
+      actions: [],
+      tableIds: [],
+      memoIds: [],
+      tableGroupIds: [],
+    });
   });
 
   it('emits the table actions in add / name / comment order', () => {
@@ -453,7 +469,8 @@ describe('toCreateEntityActions', () => {
     );
 
     // The clipboard payload does carry ui.keys, so this is what keeps the
-    // foreign key badge on a copy coming from addColumnForeignKeyHook alone.
+    // foreign key badge on a copy stamped by validationForeignKeyHook alone,
+    // reading the relationships the document holds.
     const [add] = filterActions(actions, 'column.add');
 
     expect(add.payload).toEqual({ id: add.payload.id, tableId: tableIds[0] });
@@ -656,6 +673,28 @@ describe('toCreateEntityActions — relationships', () => {
     expect(
       findAction(actions, 'relationship.add')?.payload.relationshipType
     ).toBe(RelationshipType.OneN);
+  });
+
+  it('copies the referential actions, and none from an older copy', () => {
+    const { actions } = toCreateEntityActions(
+      {
+        ...twoTables(),
+        relationships: [
+          createClipboardRelationship({
+            onDelete: ReferentialAction.cascade,
+            onUpdate: ReferentialAction.setNull,
+          }),
+          createClipboardRelationship(),
+        ],
+      },
+      bothPlaced()
+    );
+    const [withActions, older] = filterActions(actions, 'relationship.add');
+
+    expect(withActions.payload.onDelete).toBe(ReferentialAction.cascade);
+    expect(withActions.payload.onUpdate).toBe(ReferentialAction.setNull);
+    expect(older.payload.onDelete).toBeUndefined();
+    expect(older.payload.onUpdate).toBeUndefined();
   });
 
   it('keeps a composite relationship paired and in order', () => {
@@ -928,6 +967,81 @@ describe('toCreateEntityActions — indexes', () => {
   });
 });
 
+describe('toCreateEntityActions — table groups', () => {
+  const groupInput = (name = 'billing') =>
+    createInput({
+      tables: [createClipboardTable('t1'), createClipboardTable('t2')],
+      tableGroups: [
+        {
+          sourceId: 'g1',
+          name,
+          color: '#0090ff',
+          tableIds: ['t1', 't2', 'gone'],
+          ui: { x: -10, y: -20, width: 600, height: 400, zIndex: 7 },
+        },
+      ],
+    });
+
+  it('adds each group under a new id, color and rect in the add, after the tables', () => {
+    const { actions, tableGroupIds } = toCreateEntityActions(
+      groupInput(),
+      createPlacement([
+        ['t1', {}],
+        ['t2', {}],
+      ])
+    );
+
+    expect(tableGroupIds).toHaveLength(1);
+    expect(tableGroupIds[0]).not.toBe('g1');
+    expect(findAction(actions, 'tableGroup.add')?.payload).toEqual({
+      id: tableGroupIds[0],
+      color: '#0090ff',
+      ui: { x: -10, y: -20, width: 600, height: 400, zIndex: 7 },
+    });
+    expect(findAction(actions, 'tableGroup.changeName')?.payload).toEqual({
+      id: tableGroupIds[0],
+      value: 'billing',
+    });
+    expect(toTypes(actions).indexOf('tableGroup.add')).toBeGreaterThan(
+      toTypes(actions).lastIndexOf('table.changeComment')
+    );
+  });
+
+  it('puts each new table the group held in the new group, and no table it did not bring', () => {
+    const { actions, tableIds, tableGroupIds } = toCreateEntityActions(
+      groupInput(),
+      createPlacement([['t2', {}]])
+    );
+
+    expect(filterActions(actions, 'table.changeGroup')).toEqual([
+      {
+        type: 'table.changeGroup',
+        payload: { id: tableIds[0], value: tableGroupIds[0] },
+      },
+    ]);
+  });
+
+  it('sends a group name only when it holds one, under valuesOnly', () => {
+    const { actions } = toCreateEntityActions(
+      groupInput(''),
+      createPlacement([]),
+      { valuesOnly: true }
+    );
+
+    expect(toTypes(actions)).toEqual(['tableGroup.add']);
+  });
+
+  it('brings no group for an input without one, as a paste or a duplicate', () => {
+    const { actions, tableGroupIds } = toCreateEntityActions(
+      createInput({ tables: [createClipboardTable('t1')] }),
+      createPlacement([['t1', {}]])
+    );
+
+    expect(tableGroupIds).toEqual([]);
+    expect(toTypes(actions)).not.toContain('table.changeGroup');
+  });
+});
+
 describe('toCreateEntityActions — the graph as a whole', () => {
   const graphInput = () =>
     createInput({
@@ -1016,5 +1130,147 @@ describe('toCreateEntityActions — the graph as a whole', () => {
 
     expect(types.filter(type => type.startsWith('relationship'))).toEqual([]);
     expect(types.filter(type => type.startsWith('index'))).toEqual([]);
+  });
+});
+
+describe('toCreateEntityActions — values only', () => {
+  const blankInput = () =>
+    createInput({
+      tables: [
+        createClipboardTable('t1', {
+          columnIds: ['c1'],
+          name: '',
+          comment: '',
+        }),
+      ],
+      columns: [
+        createClipboardColumn('c1', 't1', {
+          name: '',
+          comment: '',
+          dataType: '',
+          default: '',
+          options: 0,
+        }),
+      ],
+      memos: [createClipboardMemo('m1', { value: '' })],
+      indexes: [
+        createClipboardIndex('t1', {
+          name: '',
+          unique: false,
+          indexColumns: [{ columnId: 'c1', orderType: OrderType.ASC }],
+        }),
+      ],
+    });
+
+  const placed = () =>
+    createPlacement([
+      ['t1', {}],
+      ['m1', {}],
+    ]);
+
+  it('sends no field that holds what a new entity starts with', () => {
+    const { actions } = toCreateEntityActions(blankInput(), placed(), {
+      valuesOnly: true,
+    });
+
+    expect(toTypes(actions)).toEqual([
+      'table.add',
+      'column.add',
+      'index.add',
+      'indexColumn.add',
+      'memo.add',
+    ]);
+  });
+
+  it('still sends every field that holds something else', () => {
+    const { actions } = toCreateEntityActions(
+      createInput({
+        tables: [
+          createClipboardTable('t1', {
+            columnIds: ['c1'],
+            logicalName: 'Member',
+            nameDerived: true,
+          }),
+        ],
+        columns: [
+          createClipboardColumn('c1', 't1', {
+            options:
+              ColumnOption.primaryKey |
+              ColumnOption.notNull |
+              ColumnOption.unique |
+              ColumnOption.autoIncrement |
+              ColumnOption.nameDerived,
+            logicalName: 'Member number',
+            domainId: 'd1',
+          }),
+        ],
+        memos: [createClipboardMemo('m1')],
+        indexes: [
+          createClipboardIndex('t1', {
+            name: 'idx',
+            unique: true,
+            indexColumns: [{ columnId: 'c1', orderType: OrderType.DESC }],
+          }),
+        ],
+      }),
+      placed(),
+      { valuesOnly: true }
+    );
+
+    expect(new Set(toTypes(actions))).toEqual(
+      new Set(
+        ALLOWED_ACTION_TYPES.filter(type => !type.startsWith('relationship'))
+      )
+    );
+  });
+
+  it('sends every field but an unset logical name, domain link and derived flag by default, as a paste does', () => {
+    const { actions } = toCreateEntityActions(blankInput(), placed());
+
+    expect(toTypes(actions)).toHaveLength(19);
+  });
+
+  it('sends a logical name, a domain link and a derived flag only when set, by default too', () => {
+    const DICTIONARY_FIELDS = [
+      'table.changeLogicalName',
+      'table.changeNameDerived',
+      'column.changeLogicalName',
+      'column.changeDomain',
+      'column.changeNameDerived',
+    ];
+    const input = blankInput();
+    input.tables[0] = {
+      ...input.tables[0],
+      logicalName: 'Member',
+      nameDerived: true,
+    };
+    input.columns[0] = {
+      ...input.columns[0],
+      logicalName: 'Member number',
+      domainId: 'd1',
+      options: ColumnOption.nameDerived,
+    };
+
+    const blank = toCreateEntityActions(blankInput(), placed()).actions;
+    const { actions, tableIds } = toCreateEntityActions(input, placed());
+    const [columnAdd] = filterActions(actions, 'column.add');
+
+    expect(
+      toTypes(blank).filter(type => DICTIONARY_FIELDS.includes(type))
+    ).toEqual([]);
+    expect(
+      actions
+        .filter(({ type }) => DICTIONARY_FIELDS.includes(type))
+        .map(({ type, payload }) => [type, payload])
+    ).toEqual([
+      ['table.changeLogicalName', { id: tableIds[0], value: 'Member' }],
+      ['table.changeNameDerived', { id: tableIds[0], value: true }],
+      [
+        'column.changeLogicalName',
+        { ...columnAdd.payload, value: 'Member number' },
+      ],
+      ['column.changeDomain', { ...columnAdd.payload, value: 'd1' }],
+      ['column.changeNameDerived', { ...columnAdd.payload, value: true }],
+    ]);
   });
 });

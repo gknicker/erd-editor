@@ -14,7 +14,7 @@ const entries = Object.entries(ThemeConfig);
 describe('ThemeConfig', () => {
   it('declares exactly one mapping per theme token', () => {
     expect(Object.keys(ThemeConfig).sort()).toEqual([...ThemeTokens].sort());
-    expect(entries).toHaveLength(72);
+    expect(entries).toHaveLength(98);
   });
 
   it('keeps placeholder on an alpha scale, which CodeBlock paints its selection band from', () => {
@@ -61,15 +61,23 @@ describe('ThemeConfig', () => {
   it('resolves every custom reference against a real radix palette in both appearances', () => {
     const customs = entries.filter(([, value]) => value.startsWith('custom-'));
     expect(customs.map(([key]) => key)).toEqual([
+      'toastSuccess',
+      'toastError',
+      'findReplaceError',
+      'mapColumnsError',
+      'schemaSqlWarningBackground',
+      'schemaSqlWarningForeground',
       'keyPK',
       'keyFK',
       'keyPFK',
-      'diffInsertBackground',
-      'diffDeleteBackground',
-      'diffCrossBackground',
+      'dictionaryErrorForeground',
+      'dictionaryErrorBackground',
+      'dictionaryWarningForeground',
+      'dictionaryWarningBackground',
       'diffInsertForeground',
       'diffDeleteForeground',
-      'diffCrossForeground',
+      'diffModifyForeground',
+      'diffRenameForeground',
     ]);
 
     customs.forEach(([key, value]) => {
@@ -118,6 +126,13 @@ describe('ThemeConfig', () => {
     });
   });
 
+  it('draws the column drag handle as the table body at rest and the header step under the pointer', () => {
+    expect(ThemeConfig.columnHandleBackground).toBe('gray-2');
+    expect(ThemeConfig.columnHandleBorder).toBe('gray-6');
+    expect(ThemeConfig.columnHandleHoverBackground).toBe('gray-5');
+    expect(ThemeConfig.columnHandleHoverBorder).toBe('gray-7');
+  });
+
   it('uses the alpha gray scale for the scrollbar track and the placeholder', () => {
     expect(ThemeConfig.scrollbarTrack).toBe('grayA-3');
     expect(ThemeConfig.placeholder).toBe('grayA-10');
@@ -129,6 +144,12 @@ describe('ThemeConfig', () => {
     expect(ThemeConfig.visualizationLink).toBe('gray-7');
     expect(ThemeConfig.visualizationColumn).toBe('gray-8');
     expect(ThemeConfig.visualizationRelationship).toBe('gray-8');
+  });
+
+  it('paints a group with no color on its own bar, body and frame steps', () => {
+    expect(ThemeConfig.tableGroupHeaderBackground).toBe('gray-7');
+    expect(ThemeConfig.tableGroupBackground).toBe('grayA-4');
+    expect(ThemeConfig.tableGroupBorder).toBe('gray-7');
   });
 
   it('gives memo and table the same background/border/select treatment', () => {
@@ -146,25 +167,40 @@ describe('ThemeConfig', () => {
     ).toBe(3);
   });
 
-  it('pairs each diff background at step 4 with a foreground at step 11', () => {
-    expect(ThemeConfig.diffInsertBackground).toBe('custom-green--4');
-    expect(ThemeConfig.diffDeleteBackground).toBe('custom-red--4');
-    expect(ThemeConfig.diffCrossBackground).toBe('custom-blue--4');
+  it('marks a done toast green and a failed one red, on the text step 11', () => {
+    expect(ThemeConfig.toastSuccess).toBe('custom-green--11');
+    expect(ThemeConfig.toastError).toBe('custom-red--11');
+  });
+
+  it('gives each panel its own error color, red text on red step 4 for the Schema SQL warning', () => {
+    expect(ThemeConfig.findReplaceError).toBe('custom-red--11');
+    expect(ThemeConfig.mapColumnsError).toBe('custom-red--11');
+    expect(ThemeConfig.schemaSqlWarningBackground).toBe('custom-red--4');
+    expect(ThemeConfig.schemaSqlWarningForeground).toBe('custom-red--11');
+  });
+
+  it('gives each kind of change a step 11 colour: added green, removed red, changed amber, renamed blue', () => {
     expect(ThemeConfig.diffInsertForeground).toBe('custom-green--11');
     expect(ThemeConfig.diffDeleteForeground).toBe('custom-red--11');
-    expect(ThemeConfig.diffCrossForeground).toBe('custom-blue--11');
+    expect(ThemeConfig.diffModifyForeground).toBe('custom-amber--11');
+    expect(ThemeConfig.diffRenameForeground).toBe('custom-blue--11');
   });
 });
 
 describe('LightThemeConfig', () => {
-  it('overrides the boxes and their shadows, the minimap edge, the keys and the visualization strokes only', () => {
+  it('overrides the boxes and their shadows, the column drag handle, the group bar and frame, the minimap edge, the keys, the visualization strokes, the two dictionary marks, the dictionary sheet and the darker amber of a change only', () => {
     expect(LightThemeConfig).toEqual({
       tableBackground: 'override-#ffffff',
       tableBorder: 'gray-8',
+      columnHandleBackground: 'override-#ffffff',
+      columnHandleBorder: 'gray-8',
+      columnHandleHoverBorder: 'gray-8',
       memoBackground: 'override-#ffffff',
       memoBorder: 'gray-8',
       tableShadow: 'override-rgba(0, 0, 0, 0.18)',
       memoShadow: 'override-rgba(0, 0, 0, 0.18)',
+      tableGroupHeaderBackground: 'gray-8',
+      tableGroupBorder: 'gray-8',
       minimapBorder: 'gray-7',
       keyPK: 'custom-amber--11',
       keyFK: 'custom-ruby--11',
@@ -172,6 +208,12 @@ describe('LightThemeConfig', () => {
       visualizationLink: 'gray-8',
       visualizationColumn: 'gray-9',
       visualizationRelationship: 'gray-9',
+      dictionaryErrorForeground: 'override-#b1252a',
+      dictionaryWarningForeground: 'override-#835103',
+      dictionaryBackground: 'override-#ffffff',
+      dictionaryHeaderBackground: 'gray-4',
+      dictionaryGridLine: 'gray-8',
+      diffModifyForeground: 'override-#895503',
     });
   });
 
@@ -186,5 +228,41 @@ describe('LightThemeConfig', () => {
   it('spells its white as the hex the scene mixes a view tint against', () => {
     // mixColor reads hex only, so a named colour would snap a tint instead of fading it
     expect(LightThemeConfig.tableBackground).toMatch(/^override-#[0-9a-f]{6}$/);
+  });
+});
+
+describe('the dictionary part', () => {
+  it('writes an error in red and a warning in amber, the text at step 11 over its step 4 fill', () => {
+    expect(ThemeConfig.dictionaryErrorForeground).toBe('custom-red--11');
+    expect(ThemeConfig.dictionaryErrorBackground).toBe('custom-red--4');
+    expect(ThemeConfig.dictionaryWarningForeground).toBe('custom-amber--11');
+    expect(ThemeConfig.dictionaryWarningBackground).toBe('custom-amber--4');
+  });
+
+  it('takes a darker red and amber text of its own in light, over the same fills', () => {
+    expect(LightThemeConfig.dictionaryErrorForeground).toBe('override-#b1252a');
+    expect(LightThemeConfig.dictionaryWarningForeground).toBe(
+      'override-#835103'
+    );
+    expect(LightThemeConfig.dictionaryWarningForeground).not.toBe(
+      LightThemeConfig.diffModifyForeground
+    );
+    expect(LightThemeConfig.dictionaryErrorBackground).toBeUndefined();
+    expect(LightThemeConfig.dictionaryWarningBackground).toBeUndefined();
+  });
+
+  it('draws the Dictionary tab sheet on tokens of its own, at the steps of a table body, header, edge and selected row', () => {
+    expect(ThemeConfig.dictionaryBackground).toBe('gray-2');
+    expect(ThemeConfig.dictionaryHeaderBackground).toBe('gray-5');
+    expect(ThemeConfig.dictionaryGridLine).toBe('gray-6');
+    expect(ThemeConfig.dictionaryHeaderSelect).toBe('accent-3');
+  });
+
+  it('turns the sheet white with gray-8 lines and a gray-4 band in light, and keeps accent-3 under a neutral accent', () => {
+    expect(LightThemeConfig.dictionaryBackground).toBe('override-#ffffff');
+    expect(LightThemeConfig.dictionaryHeaderBackground).toBe('gray-4');
+    expect(LightThemeConfig.dictionaryGridLine).toBe('gray-8');
+    expect(LightThemeConfig.dictionaryHeaderSelect).toBeUndefined();
+    expect(NeutralAccentThemeConfig.dictionaryHeaderSelect).toBeUndefined();
   });
 });

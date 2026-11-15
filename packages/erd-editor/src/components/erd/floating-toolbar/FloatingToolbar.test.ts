@@ -1,18 +1,27 @@
-import { html } from '@dineug/r-html';
+import { html, observable } from '@dineug/r-html';
 import { afterEach, describe, expect, it } from 'vite-plus/test';
 
 import {
   createTestAppContext,
+  createTestI18n,
   flush,
   mountAndFlush,
   Mounted,
+  provideI18n,
+  pseudoMessages,
 } from '@/__test-utils__/index';
 import { AppContext } from '@/components/appContext';
 import FloatingToolbar from '@/components/erd/floating-toolbar/FloatingToolbar';
 import * as styles from '@/components/erd/floating-toolbar/FloatingToolbar.styles';
-import { RelationshipType } from '@/constants/schema';
+import {
+  LockSettingType,
+  NameViewMode,
+  RelationshipType,
+  Show,
+} from '@/constants/schema';
 import { ZOOM_STEP } from '@/constants/zoom';
 import {
+  changeDrawTableGroupAction,
   changeHandToolAction,
   changeViewportAction,
   drawStartRelationshipAction,
@@ -22,9 +31,16 @@ import {
   viewChangeZoomLevelAction,
   viewOpenAction,
 } from '@/engine/modules/editor/view.actions';
-import { scrollToAction } from '@/engine/modules/settings/atom.actions';
+import {
+  changeNameViewModeAction,
+  changeShowAction,
+  scrollToAction,
+} from '@/engine/modules/settings/atom.actions';
+import { changeLockSettingsAction$ } from '@/engine/modules/settings/generator.actions';
 import { addTableAction } from '@/engine/modules/table/atom.actions';
+import { createI18n } from '@/i18n/translate';
 import { getSceneTransform, toScenePoint } from '@/konva/scene/viewport';
+import { KeyBindingName } from '@/utils/keyboard-shortcut';
 
 let mounted: Mounted | null = null;
 
@@ -35,11 +51,71 @@ afterEach(() => {
 
 async function setup(app: AppContext = createTestAppContext()) {
   mounted = await mountAndFlush(html`<${FloatingToolbar} />`, app);
-  const root = mounted.container.querySelector(
-    '.floating-toolbar'
-  ) as HTMLDivElement;
+  const root = barOf();
 
   return { app, root };
+}
+
+const barOf = () =>
+  mounted!.container.querySelector('.floating-toolbar') as HTMLDivElement;
+
+/** The bar left to right: each control by its title less its chord, each divider a bar. */
+const rowOf = (root: HTMLElement) =>
+  Array.from(root.children, child =>
+    child.classList.contains(String(styles.divider))
+      ? '|'
+      : child.getAttribute('title')?.replace(/ \(.*\)$/, '')
+  );
+
+const WRITABLE_ROW = [
+  'Hand',
+  'Select',
+  '|',
+  'New Table',
+  'New Memo',
+  'New Table Group',
+  '|',
+  'Zoom out',
+  'Reset zoom',
+  'Zoom in',
+  '|',
+  'Zero One',
+  'Zero N',
+  'One Only',
+  'One N',
+  '|',
+  'Name View',
+  '|',
+  'Zen Mode',
+  '|',
+  'Go to content',
+];
+
+const READONLY_ROW = [
+  'Zoom out',
+  'Reset zoom',
+  'Zoom in',
+  '|',
+  'Name View',
+  '|',
+  'Zen Mode',
+  '|',
+  'Go to content',
+];
+
+/**
+ * An app whose one table lies off the screen, so the bar carries its compass
+ * too, seeded while writable and readonly from then on as the flags say.
+ */
+function createAppAwayFromContent(readonly = false) {
+  const flags = observable({ readonly: false });
+  const app = createTestAppContext({ getReadonly: () => flags.readonly });
+  app.store.dispatchSync(
+    addTableAction({ id: 'users', ui: { x: 0, y: 0, zIndex: 2 } }),
+    scrollToAction({ originX: -5_000, originY: -4_000 })
+  );
+  flags.readonly = readonly;
+  return { app, flags };
 }
 
 const menus = (root: HTMLElement) =>
@@ -47,6 +123,11 @@ const menus = (root: HTMLElement) =>
 
 const byTitle = (root: HTMLElement, name: string) =>
   root.querySelector<HTMLElement>(`[title^="${name}"]`)!;
+
+const addButton = (
+  root: HTMLElement,
+  kind: 'add-table' | 'add-memo' | 'add-table-group'
+) => root.querySelector<HTMLElement>(`.${kind}`);
 
 const zoom = (root: HTMLElement) =>
   root.querySelector<HTMLElement>(`.${String(styles.readout)}`)?.textContent;
@@ -59,13 +140,35 @@ const click = (el: Element) =>
 
 const isActive = (el: Element) => el.className.includes('active');
 
+const nameViewTrigger = (root: HTMLElement) =>
+  root.querySelector<HTMLElement>('.name-view-trigger')!;
+
+/** The view the trigger names: the one of its three stacked names not hidden. */
+const shownNameView = (root: HTMLElement) =>
+  Array.from(nameViewTrigger(root).querySelectorAll('span'))
+    .filter(span => span.getAttribute('aria-hidden') === 'false')
+    .map(span => span.textContent);
+
+const nameViewMenu = () =>
+  mounted!.container.querySelector<HTMLElement>(
+    '.name-view-menu .context-menu-content'
+  );
+
+const nameViewRows = () =>
+  Array.from(
+    nameViewMenu()?.querySelectorAll<HTMLElement>(':scope > [data-id]') ?? []
+  );
+
 describe('FloatingToolbar', () => {
-  it('draws the two tools, the zoom, the four notations and zen mode, in that order', async () => {
+  it('draws the two tools, the three adds, the zoom, the four notations and zen mode, in that order', async () => {
     const { root } = await setup();
 
     expect(menus(root).map(menu => menu.getAttribute('title'))).toEqual([
       'Hand (Space)',
       'Select (Space)',
+      expect.stringMatching(/^New Table \(/),
+      expect.stringMatching(/^New Memo \(/),
+      expect.stringMatching(/^New Table Group \(/),
       expect.stringMatching(/^Zoom out/),
       expect.stringMatching(/^Zoom in/),
       expect.stringMatching(/^Zero One \(/),
@@ -107,6 +210,122 @@ describe('FloatingToolbar', () => {
     await flush();
 
     expect(app.store.state.editor.handTool).toBe(false);
+  });
+
+  it('marks neither tool while a table group draw is armed, and Select ends the draw', async () => {
+    const { app, root } = await setup();
+    app.store.dispatchSync(changeDrawTableGroupAction({ value: true }));
+    await flush();
+
+    expect(isActive(byTitle(root, 'Hand'))).toBe(false);
+    expect(isActive(byTitle(root, 'Select'))).toBe(false);
+
+    click(byTitle(root, 'Select'));
+    await flush();
+
+    expect(app.store.state.editor.drawTableGroup).toBe(false);
+    expect(app.store.state.editor.handTool).toBe(false);
+    expect(isActive(byTitle(root, 'Select'))).toBe(true);
+  });
+
+  it('adds a table and a memo from their buttons, each named with its chord', async () => {
+    const { app, root } = await setup();
+
+    expect(addButton(root, 'add-table')?.title).toMatch(/^New Table \(.*N\)$/);
+    expect(addButton(root, 'add-memo')?.title).toMatch(/^New Memo \(.*M\)$/);
+
+    click(addButton(root, 'add-table')!);
+    click(addButton(root, 'add-memo')!);
+    await flush();
+
+    expect(app.store.state.doc.tableIds).toHaveLength(1);
+    expect(app.store.state.doc.memoIds).toHaveLength(1);
+  });
+
+  it('arms the table group draw, marks it, and disarms it on a second press', async () => {
+    const { app, root } = await setup();
+    const button = addButton(root, 'add-table-group')!;
+    app.store.dispatchSync(changeHandToolAction({ value: true }));
+    await flush();
+
+    expect(button.title).toMatch(/^New Table Group \(.*G\)$/);
+
+    click(button);
+    await flush();
+
+    expect(app.store.state.editor.drawTableGroup).toBe(true);
+    expect(app.store.state.editor.handTool).toBe(false);
+    expect(app.store.state.doc.tableGroupIds).toEqual([]);
+    expect(isActive(button)).toBe(true);
+    expect(isActive(byTitle(root, 'Select'))).toBe(false);
+
+    click(button);
+    await flush();
+
+    expect(app.store.state.editor.drawTableGroup).toBe(false);
+    expect(isActive(button)).toBe(false);
+    expect(isActive(byTitle(root, 'Select'))).toBe(true);
+  });
+
+  it('stands every control of a writable editor in its group, a divider between each', async () => {
+    const { root } = await setup(createAppAwayFromContent().app);
+
+    expect(rowOf(root)).toEqual(WRITABLE_ROW);
+  });
+
+  it('keeps only the zoom, the name view, zen mode and the compass in a readonly editor', async () => {
+    const { root } = await setup(createAppAwayFromContent(true).app);
+
+    expect(rowOf(root)).toEqual(READONLY_ROW);
+    expect(addButton(root, 'add-table')).toBeNull();
+    expect(addButton(root, 'add-memo')).toBeNull();
+    expect(addButton(root, 'add-table-group')).toBeNull();
+    expect(byTitle(root, 'Hand')).toBeNull();
+    expect(byTitle(root, 'Select')).toBeNull();
+    expect(byTitle(root, 'Zero One')).toBeNull();
+  });
+
+  it('draws the other row set as the editor turns readonly and back, on the bar it mounted', async () => {
+    const { app, flags } = createAppAwayFromContent();
+    const { root } = await setup(app);
+    expect(rowOf(root)).toEqual(WRITABLE_ROW);
+
+    flags.readonly = true;
+    await flush();
+
+    expect(barOf()).toBe(root);
+    expect(rowOf(root)).toEqual(READONLY_ROW);
+
+    flags.readonly = false;
+    await flush();
+
+    expect(barOf()).toBe(root);
+    expect(rowOf(root)).toEqual(WRITABLE_ROW);
+    click(byTitle(root, 'Hand'));
+    await flush();
+    expect(app.store.state.editor.handTool).toBe(true);
+  });
+
+  it('offers no New Memo while memos are hidden, nor New Table Group while groups are', async () => {
+    const { app, root } = await setup();
+
+    app.store.dispatchSync(
+      changeShowAction({ show: Show.hideMemo, value: true })
+    );
+    await flush();
+
+    expect(addButton(root, 'add-table')).toBeTruthy();
+    expect(addButton(root, 'add-memo')).toBeNull();
+    expect(addButton(root, 'add-table-group')).toBeTruthy();
+
+    app.store.dispatchSync(
+      changeShowAction({ show: Show.hideMemo, value: false }),
+      changeShowAction({ show: Show.hideTableGroup, value: true })
+    );
+    await flush();
+
+    expect(addButton(root, 'add-memo')).toBeTruthy();
+    expect(addButton(root, 'add-table-group')).toBeNull();
   });
 
   it('arms a notation, marks it, and puts the pointer back in hand for it', async () => {
@@ -278,6 +497,140 @@ describe('FloatingToolbar', () => {
     await flush();
 
     expect(compass(root)).toBeNull();
+  });
+
+  it('lists the three name views over the bar, the one in force checked, and switches to the one picked', async () => {
+    const { app, root } = await setup();
+    const trigger = nameViewTrigger(root);
+
+    expect(trigger.getAttribute('title')).toBe('Name View');
+    expect(shownNameView(root)).toEqual(['Physical Names']);
+    expect(nameViewMenu()).toBeNull();
+
+    click(trigger);
+    await flush();
+    expect(isActive(trigger)).toBe(true);
+    expect(nameViewRows().map(row => row.textContent?.trim())).toEqual([
+      'Physical Names',
+      'Logical Names',
+      'Both Names',
+    ]);
+    expect(
+      nameViewRows().map(row => row.querySelector('svg') !== null)
+    ).toEqual([true, false, false]);
+
+    click(nameViewRows()[2]);
+    await flush();
+    expect(app.store.state.settings.nameViewMode).toBe(NameViewMode.both);
+    expect(nameViewMenu()).toBeNull();
+    expect(shownNameView(root)).toEqual(['Both Names']);
+  });
+
+  it('shuts the name view list on a second press, a press elsewhere and Escape', async () => {
+    const { app, root } = await setup();
+    const trigger = nameViewTrigger(root);
+
+    click(trigger);
+    await flush();
+    click(trigger);
+    await flush();
+    expect(nameViewMenu()).toBeNull();
+
+    click(trigger);
+    await flush();
+    root.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+    await flush();
+    expect(nameViewMenu()).toBeNull();
+
+    click(trigger);
+    await flush();
+    nameViewMenu()!.dispatchEvent(
+      new MouseEvent('mousedown', { bubbles: true })
+    );
+    await flush();
+    expect(nameViewMenu()).not.toBeNull();
+    app.shortcut$.next({
+      type: KeyBindingName.stop,
+      event: new KeyboardEvent('keydown'),
+    });
+    await flush();
+    expect(nameViewMenu()).toBeNull();
+  });
+
+  it("offers the name view in a readonly editor too, which switches the reader's own view", async () => {
+    let readonly = false;
+    const app = createTestAppContext({ getReadonly: () => readonly });
+    // With the lock off a writer's switch is the document's; a reader's is not.
+    app.store.dispatchSync(
+      changeLockSettingsAction$(LockSettingType.unlockNameViewMode, false)
+    );
+    readonly = true;
+    const { root } = await setup(app);
+    const switches: unknown[] = [];
+    app.store.subscribe(actions => {
+      for (const { type, payload } of actions) {
+        if (type === changeNameViewModeAction.type) switches.push(payload);
+      }
+    });
+
+    click(nameViewTrigger(root));
+    await flush();
+    click(nameViewRows()[2]);
+    await flush();
+
+    expect(switches).toEqual([
+      {
+        value: NameViewMode.both,
+        shared: false,
+        editorId: app.store.state.editor.id,
+      },
+    ]);
+    expect(app.store.state.settings.nameViewMode).toBe(NameViewMode.both);
+  });
+
+  it('stands left to right in every language, as the canvas under it does', async () => {
+    const { root } = await setup();
+
+    expect(root.getAttribute('dir')).toBe('ltr');
+  });
+
+  it('names every button and the compass in the language the element shows, following a switch', async () => {
+    const i18n = createTestI18n('en');
+    const provider = provideI18n(document.body, i18n);
+
+    try {
+      const app = createTestAppContext();
+      app.store.dispatchSync(
+        addTableAction({ id: 'users', ui: { x: 0, y: 0, zIndex: 2 } }),
+        scrollToAction({ originX: -5_000, originY: -4_000 })
+      );
+      const { root } = await setup(app);
+      expect(compass(root)?.title).toBe('Go to content');
+
+      Object.assign(i18n, createI18n('ko-KR', pseudoMessages('ko')));
+      await flush();
+
+      expect(menus(root).map(menu => menu.getAttribute('title'))).toEqual([
+        'ko:Hand (Space)',
+        'ko:Select (Space)',
+        expect.stringMatching(/^ko:New Table \(/),
+        expect.stringMatching(/^ko:New Memo \(/),
+        expect.stringMatching(/^ko:New Table Group \(/),
+        expect.stringMatching(/^ko:Zoom out \(/),
+        expect.stringMatching(/^ko:Zoom in \(/),
+        expect.stringMatching(/^ko:Zero One \(/),
+        expect.stringMatching(/^ko:Zero N \(/),
+        expect.stringMatching(/^ko:One Only \(/),
+        expect.stringMatching(/^ko:One N \(/),
+        expect.stringMatching(/^ko:Zen Mode \(/),
+      ]);
+      expect(
+        root.querySelector(`.${String(styles.readout)}`)?.getAttribute('title')
+      ).toMatch(/^ko:Reset zoom \(/);
+      expect(compass(root)?.title).toBe('ko:Go to content');
+    } finally {
+      provider.destroy();
+    }
   });
 
   it('toggles zen mode, and says which of the two icons it is showing', async () => {

@@ -2,15 +2,14 @@ import { describe, expect, it } from 'vite-plus/test';
 
 import * as styles from '@/components/toolbar/Toolbar.styles';
 import { TOOLBAR_HEIGHT } from '@/constants/layout';
-import { typography } from '@/styles/typography.styles';
 
 describe('Toolbar.styles', () => {
   it('compiles every export to a distinct non empty class identifier', () => {
     const identifiers = [
       String(styles.root),
+      String(styles.databaseName),
       String(styles.vertical),
       String(styles.menu),
-      String(styles.tableCount),
     ];
 
     for (const identifier of identifiers) {
@@ -42,8 +41,30 @@ describe('Toolbar.styles', () => {
     expect(source).toContain('background-color: var(--toolbar-background)');
   });
 
-  it('spaces the text inputs through a child selector', () => {
-    expect(styles.root.strings.join('')).toContain('& > input');
+  it('spaces the text inputs through a child selector, on the side a line ends', () => {
+    const source = styles.root.strings.join('');
+
+    expect(source).toContain('& > input');
+    expect(source).toContain('margin-inline-end: 15px');
+    expect(source).not.toContain('margin-right');
+  });
+
+  it("spaces a readonly editor's database name as the field, cutting a long one short", () => {
+    const source = styles.databaseName.strings.join('');
+
+    expect(source).toContain('font: -moz-field');
+    expect(source).toContain('font: -webkit-small-control');
+    expect(source).toContain('font-family: var(--text-font-family)');
+    expect(source.indexOf('font: -moz-field')).toBeLessThan(
+      source.indexOf('font: -webkit-small-control')
+    );
+    expect(source).toContain('flex-shrink: 0');
+    expect(source).toContain('margin-inline-end: 15px');
+    expect(source).toContain('overflow: hidden');
+    expect(source).toContain('text-overflow: ellipsis');
+    expect(source).toContain('color: var(--active)');
+    expect(source).toContain('&[data-empty]');
+    expect(source).toContain('color: var(--placeholder)');
   });
 
   it('renders the vertical rule as a fixed width spacer', () => {
@@ -80,12 +101,15 @@ describe('Toolbar.styles', () => {
     expect(source).toContain('&.undo-redo.active');
   });
 
-  it('pushes the table count to the end of the bar with paragraph type', () => {
-    const source = styles.tableCount.strings.join('');
+  it('dims a disabled menu item as Find and Replace dims its own, hovered or not', () => {
+    const source = styles.menu.strings.join('');
+    const disabled = source.slice(source.indexOf('&.disabled'));
 
-    expect(source).toContain('margin-left: auto');
-    expect(source).toContain('align-self: center');
-    expect(source).toContain('white-space: nowrap');
-    expect(styles.tableCount.values).toEqual([typography.paragraph]);
+    expect(source.indexOf('&.disabled')).toBeGreaterThan(
+      source.indexOf('&:hover')
+    );
+    expect(disabled).toContain('cursor: not-allowed');
+    expect(disabled).toContain('color: var(--foreground)');
+    expect(disabled).toContain('opacity: 0.4');
   });
 });

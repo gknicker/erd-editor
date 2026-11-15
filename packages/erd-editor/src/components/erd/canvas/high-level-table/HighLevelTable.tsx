@@ -1,13 +1,15 @@
 /** @jsxHost konva */
 
 import { FC } from '@dineug/r-html';
-import { isEmpty } from 'es-toolkit/compat';
 
 import { useAppContext } from '@/components/appContext';
+import { useDiffMap } from '@/components/diffContext';
+import { diffOutlineRect } from '@/components/erd/canvas/DiffOutline.template';
 import {
   CURSOR_INHERIT,
   CURSOR_POINTER,
   HIGH_LEVEL_FONT_SIZES,
+  mainButtonClick,
   RING_WIDTH,
   SCENE_FONT_FAMILY,
   type SceneMouseEvent,
@@ -20,12 +22,17 @@ import { getColorEdgePath } from '@/components/erd/canvas/table/colorEdge';
 import { useMoveTable } from '@/components/erd/canvas/table/useMoveTable';
 import { useSharedFocusTable } from '@/components/erd/canvas/table/useSharedFocusTable';
 import { useSharedSelectEntity } from '@/components/erd/canvas/useSharedSelectEntity';
+import { useI18n } from '@/components/localeContext';
+import { useSceneInteraction } from '@/components/sceneInteractionContext';
 import { useSceneSource } from '@/components/sceneSourceContext';
 import { useThemeContext } from '@/components/themeContext';
 import { TABLE_BORDER } from '@/constants/layout';
+import { FocusType } from '@/engine/modules/editor/state';
+import { toNameLabel } from '@/engine/modules/editor/utils/nameView';
 import { Table } from '@/internal-types';
 import { getTableRect } from '@/konva/scene/metrics';
 import { getSceneTransform } from '@/konva/scene/viewport';
+import { diffOutline, diffTextColor } from '@/utils/diff/diff';
 import { openColorPickerAction } from '@/utils/emitter';
 
 export type HighLevelTableProps = {
@@ -49,10 +56,20 @@ const nameFontSize = (zoomLevel: number) => {
   return HIGH_LEVEL_FONT_SIZES[4];
 };
 
+/**
+ * The text the card draws in the name view: the name it leads with, and in
+ * the view of both the name after the logical name on a line of its own.
+ */
+const nameText = ({ text, after }: { text: string; after: string }) =>
+  after ? `${text}\n${after}` : text;
+
 const HighLevelTable: FC<HighLevelTableProps> = (props, ctx) => {
   const app = useAppContext(ctx);
   const themeRef = useThemeContext(ctx);
+  const i18n = useI18n(ctx);
   const sourceRef = useSceneSource(ctx);
+  const interaction = useSceneInteraction(ctx);
+  const diffMapRef = useDiffMap(ctx);
   const { sharedFocusTableColor } = useSharedFocusTable(ctx, props.table.id);
   const { sharedSelectColor } = useSharedSelectEntity(ctx, props.table.id);
   const { onMoveStart } = useMoveTable(ctx, props, sourceRef);
@@ -92,10 +109,14 @@ const HighLevelTable: FC<HighLevelTableProps> = (props, ctx) => {
     const rect = getTableRect(store.state, table, source);
     const { zoomLevel } = getSceneTransform(store.state, source);
 
-    const isEmptyName = isEmpty(table.name.trim());
+    const label = toNameLabel(store.state.settings, table);
+    const isEmptyName = !label.text.trim();
     const sharedFocus = sharedFocusTableColor();
     const sharedSelected = sharedSelectColor();
     const ringColor = sharedFocus ?? sharedSelected;
+    // Zoomed out, a table in a diff pane is marked as the full card is, a
+    // comment change on its name, since this card draws no comment.
+    const diffPaths = diffMapRef.value?.get(table.id);
 
     return (
       <k-group
@@ -134,14 +155,25 @@ const HighLevelTable: FC<HighLevelTableProps> = (props, ctx) => {
             strokeWidth={RING_WIDTH}
           />
         ) : null}
+        {diffOutlineRect({
+          name: 'table-diff-outline',
+          stroke: diffOutline(theme, diffPaths),
+          width: rect.width,
+          height: rect.height,
+          cornerRadius: TABLE_CORNER_RADIUS,
+        })}
         <k-text
           name="high-level-table-name"
           x={TABLE_BORDER}
           y={TABLE_INSET}
           width={rect.width - TABLE_BORDER * 2}
           height={rect.height - TABLE_INSET * 2}
-          text={isEmptyName ? 'unnamed' : table.name}
-          fill={isEmptyName ? theme.placeholder : theme.active}
+          text={isEmptyName ? i18n.value.t('common.unnamed') : nameText(label)}
+          fill={
+            diffTextColor(theme, diffPaths, FocusType.tableName) ??
+            diffTextColor(theme, diffPaths, FocusType.tableComment) ??
+            (isEmptyName || label.standIn ? theme.placeholder : theme.active)
+          }
           fontFamily={SCENE_FONT_FAMILY}
           fontSize={nameFontSize(zoomLevel)}
           fontStyle="bold"
@@ -154,7 +186,8 @@ const HighLevelTable: FC<HighLevelTableProps> = (props, ctx) => {
           kind="table-header-color"
           data={getColorEdgePath(rect.height)}
           fill={table.ui.color}
-          on:click={handleOpenColorPicker}
+          listening={interaction() !== 'read'}
+          on:click={mainButtonClick(handleOpenColorPicker)}
           on:mouseenter={(event: SceneMouseEvent) => {
             setSceneCursor(event, CURSOR_POINTER);
           }}

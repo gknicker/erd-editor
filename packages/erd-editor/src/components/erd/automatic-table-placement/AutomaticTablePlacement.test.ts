@@ -1,5 +1,5 @@
 import { toJson } from '@dineug/erd-editor-schema';
-import { createRef, DOMTemplateLiterals, html } from '@dineug/r-html';
+import { createRef, DOMTemplateLiterals, html, render } from '@dineug/r-html';
 import {
   afterEach,
   beforeEach,
@@ -11,12 +11,16 @@ import {
 
 import {
   createTestAppContext,
+  createTestI18n,
   flush,
   mount,
   Mounted,
+  provideI18n,
+  pseudoMessages,
 } from '@/__test-utils__/index';
 import { AppContext } from '@/components/appContext';
 import AutomaticTablePlacement, {
+  placementDescription,
   TablePoint,
 } from '@/components/erd/automatic-table-placement/AutomaticTablePlacement';
 import * as styles from '@/components/erd/automatic-table-placement/AutomaticTablePlacement.styles';
@@ -30,24 +34,32 @@ import {
 import * as buttonStyles from '@/components/primitives/button/Button.styles';
 import { MINIMAP_MARGIN } from '@/constants/layout';
 import { Open } from '@/constants/open';
+import { NameViewMode } from '@/constants/schema';
 import { changeViewportAction } from '@/engine/modules/editor/atom.actions';
 import { initialLoadJsonAction$ } from '@/engine/modules/editor/generator.actions';
 import { addRelationshipAction } from '@/engine/modules/relationship/atom.actions';
 import {
   changeZoomLevelAction,
   scrollToAction,
+  toNameViewModeAction,
 } from '@/engine/modules/settings/atom.actions';
 import {
   addTableAction,
+  changeTableGroupAction,
+  changeTableLogicalNameAction,
   changeTableNameAction,
 } from '@/engine/modules/table/atom.actions';
+import { addTableGroupAction } from '@/engine/modules/table-group/atom.actions';
+import { createI18n, type I18n } from '@/i18n/translate';
 import { getContentRect } from '@/konva/scene/contentBounds';
 import { previewZoomLevel } from '@/konva/scene/fitZoom';
-import type { Rect } from '@/konva/scene/metrics';
+import { getTableRect, type Rect } from '@/konva/scene/metrics';
 import { KeyBindingName } from '@/utils/keyboard-shortcut';
 
 const hoisted = vi.hoisted(() => ({
   simulations: [] as any[],
+  /** The preview state each simulation was built over. */
+  states: [] as any[],
   throwOnCreate: false,
 }));
 
@@ -72,6 +84,7 @@ vi.mock(
         const simulation = actual.createAutomaticTablePlacement(state);
         simulation.stop();
         hoisted.simulations.push(simulation);
+        hoisted.states.push(state);
         return simulation;
       },
     };
@@ -188,6 +201,28 @@ async function renderToast(toast: Toast) {
   return toastContainer.container;
 }
 
+const cleanups: Array<() => void> = [];
+
+/** A captured toast rendered under a language, as the toast stack renders it. */
+async function renderToastIn(toast: Toast, i18n: I18n) {
+  const container = document.createElement('div');
+  document.body.append(container);
+  const provider = provideI18n(container, i18n);
+  render(container, toast.message);
+  await flush();
+  cleanups.push(() => {
+    render(container, null);
+    provider.destroy();
+    container.remove();
+  });
+  return container;
+}
+
+const buttonTexts = (container: HTMLElement) =>
+  Array.from(container.querySelectorAll('button')).map(el =>
+    el.textContent?.trim()
+  );
+
 function clickButton(container: HTMLElement, text: string) {
   const button = Array.from(container.querySelectorAll('button')).find(
     el => el.textContent?.trim() === text
@@ -200,10 +235,12 @@ function clickButton(container: HTMLElement, text: string) {
 
 beforeEach(() => {
   hoisted.simulations.length = 0;
+  hoisted.states.length = 0;
   hoisted.throwOnCreate = false;
 });
 
 afterEach(() => {
+  cleanups.splice(0).forEach(cleanup => cleanup());
   contexts.splice(0).forEach(app => app.store.destroy());
   toastContainer?.unmount();
   toastContainer = null;
@@ -303,6 +340,27 @@ describe('AutomaticTablePlacement', () => {
       expect(centerOf(visible).y).toBeCloseTo(centerOf(content).y, 6);
     });
 
+    it("places the tables at the widths the reader's name view gives them, which the file leaves out", async () => {
+      const app = createOrigin();
+      addTable(app, 't1', 'users');
+      app.store.dispatchSync(
+        changeTableLogicalNameAction({
+          id: 't1',
+          value: 'Every account that signs in',
+        }),
+        toNameViewModeAction(app.store.state, NameViewMode.logical, false)
+      );
+      expect(app.store.state.settings.lockSettings).toBe(63);
+
+      await open(app, vi.fn());
+      const [placed] = hoisted.states;
+      const widthOf = (state: any) =>
+        getTableRect(state, state.collections.tableEntities.t1).width;
+
+      expect(placed.settings.nameViewMode).toBe(NameViewMode.logical);
+      expect(widthOf(placed)).toBe(widthOf(app.store.state));
+    });
+
     it('mirrors the origin viewport into the preview store', async () => {
       const app = createOrigin();
       addTable(app, 't1', 'users', { x: 0, y: 0 });
@@ -349,7 +407,7 @@ describe('AutomaticTablePlacement', () => {
       expect(toasts[0].close).toBeInstanceOf(Promise);
 
       const container = await renderToast(toasts[0]);
-      expect(container.textContent).toContain('Placing tables… 0%');
+      expect(container.textContent).toContain('Placing tables 0%');
       expect(
         Array.from(container.querySelectorAll('button')).map(el =>
           el.textContent?.trim()
@@ -464,6 +522,56 @@ describe('AutomaticTablePlacement', () => {
       expect(onChange).not.toHaveBeenCalled();
     });
 
+    it("draws a group's box where its members go in the preview, the document's own group untouched", async () => {
+      const app = createOrigin();
+      addTable(app, 't1', 'users', { x: 10, y: 20 });
+      addTable(app, 't2', 'posts', { x: 410, y: 20 });
+      app.store.dispatchSync(
+        addTableGroupAction({
+          id: 'g1',
+          ui: { x: -14, y: -32, width: 900, height: 300, zIndex: 1 },
+        }),
+        changeTableGroupAction({ id: 't1', value: 'g1' }),
+        changeTableGroupAction({ id: 't2', value: 'g1' })
+      );
+      const toasts = listenToasts(app);
+      const onChange = vi.fn();
+
+      await open(app, onChange);
+      const simulation = hoisted.simulations[0];
+      const [node] = simulation.nodes();
+      node.x = 2_000;
+      node.y = 1_000;
+      simulation.on('tick').call(simulation);
+
+      const left = 2_000 - node.width / 2;
+      const top = 1_000 - node.height / 2;
+      expect(node.group.ui).toMatchObject({
+        x: left,
+        y: top,
+        width: node.width,
+        height: node.height,
+      });
+      expect(node.group).not.toBe(
+        app.store.state.collections.tableGroupEntities['g1']
+      );
+      expect(
+        app.store.state.collections.tableGroupEntities['g1'].ui
+      ).toMatchObject({ x: -14, y: -32, width: 900, height: 300 });
+
+      clickButton(await renderToast(toasts[0]), 'Apply');
+
+      const [t1, t2] = node.members.map(({ dx, dy }: any) => ({
+        x: left + dx,
+        y: top + dy,
+      }));
+      expect(onChange.mock.calls[0][0]).toEqual([
+        { id: 't1', ...t1 },
+        { id: 't2', ...t2 },
+      ]);
+      expect(t2.x - t1.x).toBeCloseTo(400, 6);
+    });
+
     it('reports the positions when the simulation settles on its own', async () => {
       const app = createOrigin();
       addTable(app, 't1', 'users');
@@ -534,6 +642,35 @@ describe('AutomaticTablePlacement', () => {
       expect(viewport.isConnected).toBe(false);
       expect(viewport.style.width).toBe(before);
     });
+
+    // An overlay taken away by anything but its own toast, the editor turning
+    // readonly among them, presses no Cancel, so the unmount ends the run.
+    it('ends its run once unmounted, its toast down, and reports nothing when the simulation settles', async () => {
+      const app = createOrigin();
+      addTable(app, 't1', 'users');
+      const toasts = listenToasts(app);
+      const onChange = vi.fn();
+
+      await open(app, onChange);
+      const simulation = hoisted.simulations[0];
+      const stop = vi.spyOn(simulation, 'stop');
+      let closed = false;
+      toasts[0].close?.then(() => {
+        closed = true;
+      });
+
+      mounted?.unmount();
+      mounted = null;
+      await flush();
+
+      expect(stop).toHaveBeenCalled();
+      expect(closed).toBe(true);
+      simulation.on('end').call(simulation);
+      expect(onChange).not.toHaveBeenCalled();
+      expect(
+        app.store.state.editor.openMap[Open.automaticTablePlacement]
+      ).toBeUndefined();
+    });
   });
 
   describe('when the simulation cannot be built', () => {
@@ -574,6 +711,59 @@ describe('AutomaticTablePlacement', () => {
       expect(app.store.state.editor.openMap[Open.automaticTablePlacement]).toBe(
         false
       );
+    });
+  });
+
+  describe('in the language the editor shows', () => {
+    it('says no tables were found in that language', async () => {
+      const app = createOrigin();
+      const toasts = listenToasts(app);
+
+      await open(app, vi.fn());
+
+      const container = await renderToastIn(
+        toasts[0],
+        createTestI18n('ja-JP', pseudoMessages('ja'))
+      );
+      expect(container.textContent?.trim()).toBe('ja:No tables to place');
+    });
+
+    it('follows the placement and offers Apply and Cancel in that language', async () => {
+      const app = createOrigin();
+      addTable(app, 't1', 'users');
+      const toasts = listenToasts(app);
+      await open(app, vi.fn());
+      const i18n = createTestI18n('ja-JP', pseudoMessages('ja'));
+
+      const container = await renderToastIn(toasts[0], i18n);
+
+      expect(container.textContent).toContain('ja:Placing tables 0%');
+      expect(buttonTexts(container)).toEqual(['ja:Apply', 'ja:Cancel']);
+
+      Object.assign(i18n, createI18n('he-IL', pseudoMessages('he')));
+      await flush();
+
+      expect(container.textContent).toContain(
+        'he:Placing tables \u20680\u2069%'
+      );
+      expect(buttonTexts(container)).toEqual(['he:Apply', 'he:Cancel']);
+    });
+
+    it('words the progress in English when it is given no language', () => {
+      expect(placementDescription({ progress: 0.426 })).toBe(
+        'Placing tables 43%'
+      );
+    });
+
+    it('keeps the preview left to right whatever the editor reads in', async () => {
+      const app = createOrigin();
+      addTable(app, 't1', 'users');
+
+      const { container } = await open(app, vi.fn());
+
+      expect(
+        container.querySelector(`.${styles.root}`)?.getAttribute('dir')
+      ).toBe('ltr');
     });
   });
 });

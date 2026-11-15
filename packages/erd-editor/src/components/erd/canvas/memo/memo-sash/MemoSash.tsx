@@ -1,14 +1,15 @@
 /** @jsxHost konva */
 
-import { FC } from '@dineug/r-html';
+import { FC, onUnmounted } from '@dineug/r-html';
+import type { Subscription } from 'rxjs';
 
 import { useAppContext } from '@/components/appContext';
 import {
+  createSceneCursorScope,
   CURSOR_INHERIT,
   HIT_FILL,
   holdSceneCursor,
   type ScenePointerEvent,
-  setSceneCursor,
 } from '@/components/erd/canvas/sceneTokens';
 import {
   MEMO_BORDER,
@@ -18,9 +19,14 @@ import {
 } from '@/constants/layout';
 import { resizeMemoAction } from '@/engine/modules/memo/atom.actions';
 import type { Memo, ValuesType } from '@/internal-types';
-import { isMouseEvent, isMultiTouch } from '@/utils/domEvent';
+import {
+  isMainButtonPress,
+  isMouseEvent,
+  isMultiTouch,
+} from '@/utils/domEvent';
 import { DirectionName } from '@/utils/draw-relationship';
 import { drag$, DragMove } from '@/utils/globalEventObservable';
+import { isMemoShown } from '@/utils/memo';
 
 export type MemoSashProps = {
   memo: Memo;
@@ -130,6 +136,15 @@ const pointerOf = (event: ScenePointerEvent) =>
 
 const MemoSash: FC<MemoSashProps> = (props, ctx) => {
   const app = useAppContext(ctx);
+  // A sash unmounted under the pointer sends no leave to hand its cursor back.
+  const cursor = createSceneCursorScope();
+  // A sash the scene takes away mid drag, as a turn to readonly does, ends the
+  // drag, which writes nothing more and lets go of the cursor it held.
+  let gesture: Subscription | null = null;
+  onUnmounted(() => {
+    gesture?.unsubscribe();
+    cursor.release();
+  });
 
   let clientX = 0;
   let clientY = 0;
@@ -242,15 +257,29 @@ const MemoSash: FC<MemoSashProps> = (props, ctx) => {
     event: ScenePointerEvent,
     position: MemoSashPosition
   ) => {
-    if (isMultiTouch(event.evt)) return;
+    // An edge is part of the memo, which only the main button carries: a right
+    // press opens the context menu over a box that stays where it stands.
+    if (!isMainButtonPress(event.evt) || isMultiTouch(event.evt)) return;
 
     const pointer = pointerOf(event);
     clientX = pointer.x;
     clientY = pointer.y;
+    gesture?.unsubscribe();
     // The pointer outruns the thin hit area and the minimum stops the edge
     // under it, so the stage's own hover would hand the cursor away mid drag.
     const release = holdSceneCursor(event, CURSORS[position]);
-    drag$.subscribe(dragMove => handleMove(dragMove, position)).add(release);
+    const subscription = drag$.subscribe(dragMove => {
+      // A memo hidden or removed mid drag, here or by a peer, takes no more of
+      // it: no reader could see the box it would write.
+      const { state } = app.value.store;
+      if (!isMemoShown(state) || !state.doc.memoIds.includes(props.memo.id)) {
+        subscription.unsubscribe();
+        return;
+      }
+      handleMove(dragMove, position);
+    });
+    subscription.add(release);
+    gesture = subscription;
   };
 
   return () => {
@@ -277,10 +306,10 @@ const MemoSash: FC<MemoSashProps> = (props, ctx) => {
               handleMoveStart(event, sash.position);
             }}
             on:mouseenter={(event: ScenePointerEvent) => {
-              setSceneCursor(event, CURSORS[sash.position]);
+              cursor.set(event, CURSORS[sash.position]);
             }}
             on:mouseleave={(event: ScenePointerEvent) => {
-              setSceneCursor(event, CURSOR_INHERIT);
+              cursor.set(event, CURSOR_INHERIT);
             }}
           />
         ))}

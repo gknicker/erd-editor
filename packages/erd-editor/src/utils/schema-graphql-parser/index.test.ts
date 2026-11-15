@@ -112,51 +112,27 @@ describe('schemaGraphQLParserToSchemaJson', () => {
 });
 
 describe('schemaGraphQLParserToSchemaJson canvas size', () => {
-  const createTypes = (count: number) =>
-    Array.from({ length: count }, (_, i) => `type T${i} { id: ID! }`).join(
-      '\n'
-    );
+  it('writes none, the sort reading its width off the tables', () => {
+    const { settings } = parse('type T { id: ID! }');
 
-  it('clamps a small schema up to the canvas minimum', () => {
-    const schema = parse(createTypes(2));
-
-    expect(schema.settings.width).toBe(2000);
-    expect(schema.settings.height).toBe(2000);
-  });
-
-  it('scales with the table count between the bounds', () => {
-    const schema = parse(createTypes(25));
-
-    expect(schema.doc.tableIds).toHaveLength(25);
-    expect(schema.settings.width).toBe(2500);
-    expect(schema.settings.height).toBe(2500);
-  });
-
-  it('clamps a large schema down to the canvas maximum', () => {
-    const schema = parse(createTypes(205));
-
-    expect(schema.doc.tableIds).toHaveLength(205);
-    expect(schema.settings.width).toBe(20000);
-    expect(schema.settings.height).toBe(20000);
+    expect(settings).not.toHaveProperty('width');
+    expect(settings).not.toHaveProperty('height');
   });
 });
 
 describe('schemaGraphQLParserToSchemaJson prepare', () => {
-  it('hands prepare the sized-but-empty schema and keeps its settings', () => {
-    const seen: Array<{ width: number; tableIds: number }> = [];
+  it('hands prepare the empty schema and keeps its settings', () => {
+    const seen: number[] = [];
     const schema = parse('type User { id: ID! }', draft => {
-      seen.push({
-        width: draft.settings.width,
-        tableIds: draft.doc.tableIds.length,
-      });
+      seen.push(draft.doc.tableIds.length);
       draft.settings.database = Database.Oracle;
-      draft.settings.scrollTop = 42;
+      draft.settings.databaseName = 'shop';
       return draft;
     });
 
-    expect(seen).toEqual([{ width: 2000, tableIds: 0 }]);
+    expect(seen).toEqual([0]);
     expect(schema.settings.database).toBe(Database.Oracle);
-    expect(schema.settings.scrollTop).toBe(42);
+    expect(schema.settings.databaseName).toBe('shop');
     expect(schema.doc.tableIds).toHaveLength(1);
   });
 
@@ -215,7 +191,7 @@ describe('schemaGraphQLParserToSchemaJson custom scalars per dialect', () => {
       at: 'DATETIME',
       payload: 'JSON',
       counter: 'BIGINT',
-      amount: 'DECIMAL',
+      amount: 'DECIMAL(38,18)',
       day: 'DATE',
       clock: 'TIME',
     },
@@ -224,7 +200,7 @@ describe('schemaGraphQLParserToSchemaJson custom scalars per dialect', () => {
       at: 'datetime2',
       payload: 'json',
       counter: 'bigint',
-      amount: 'decimal',
+      amount: 'decimal(38,18)',
       day: 'date',
       clock: 'time',
     },
@@ -233,7 +209,7 @@ describe('schemaGraphQLParserToSchemaJson custom scalars per dialect', () => {
       at: 'DATETIME',
       payload: 'JSON',
       counter: 'BIGINT',
-      amount: 'DECIMAL',
+      amount: 'DECIMAL(38,18)',
       day: 'DATE',
       clock: 'TIME',
     },
@@ -242,7 +218,7 @@ describe('schemaGraphQLParserToSchemaJson custom scalars per dialect', () => {
       at: 'TIMESTAMP',
       payload: 'JSON',
       counter: 'NUMBER(19)',
-      amount: 'DECIMAL',
+      amount: 'DECIMAL(38,18)',
       day: 'DATE',
       clock: 'VARCHAR2(255)',
     },
@@ -269,7 +245,7 @@ describe('schemaGraphQLParserToSchemaJson custom scalars per dialect', () => {
       at: 'TIMESTAMP',
       payload: 'VARIANT',
       counter: 'BIGINT',
-      amount: 'DECIMAL',
+      amount: 'DECIMAL(38,18)',
       day: 'DATE',
       clock: 'STRING',
     },
@@ -278,7 +254,7 @@ describe('schemaGraphQLParserToSchemaJson custom scalars per dialect', () => {
       at: 'TIMESTAMP_NTZ',
       payload: 'VARIANT',
       counter: 'BIGINT',
-      amount: 'DECIMAL',
+      amount: 'DECIMAL(38,18)',
       day: 'DATE',
       clock: 'TIME',
     },

@@ -1,10 +1,11 @@
 import {
   type GeneratorAction,
+  ReferentialAction,
   relationshipActions,
   relationshipActions$,
   RelationshipType,
 } from '@dineug/erd-editor/peer.js';
-import { nanoid } from 'nanoid';
+import { uuid25 } from '@dineug/uuid';
 
 import type { ActionTool, ToolArg } from '@/tools/registry';
 
@@ -20,6 +21,27 @@ const RELATIONSHIP_TYPE: ToolArg = {
   required: true,
 };
 
+const referentialActionArg = (
+  name: 'onDelete' | 'onUpdate',
+  required = true
+): ToolArg => ({
+  name,
+  kind: { type: 'enum', values: ReferentialAction },
+  required,
+});
+
+/** A new relationship's actions, optional: left out, each is none. */
+const NEW_REFERENTIAL_ACTIONS: readonly ToolArg[] = [
+  referentialActionArg('onDelete', false),
+  referentialActionArg('onUpdate', false),
+];
+
+/** The actions a call passed; one left out stays off the relationship.add payload. */
+const referentialActionsOf = ({ onDelete, onUpdate }: Record<string, any>) => ({
+  ...(onDelete === undefined ? {} : { onDelete }),
+  ...(onUpdate === undefined ? {} : { onUpdate }),
+});
+
 const tableArg = (name: string): ToolArg => ({
   name,
   kind: { type: 'entityId', entity: 'table' },
@@ -33,17 +55,20 @@ const columnsArg = (name: string, parentArg: string): ToolArg => ({
 });
 
 /** The id is drawn as the call runs, so each call relates under a new one. */
-const linkColumnsAction$ = ({
-  startTableId,
-  startColumnIds,
-  endTableId,
-  endColumnIds,
-  relationshipType,
-}: Record<string, any>): GeneratorAction =>
+const linkColumnsAction$ = (values: Record<string, any>): GeneratorAction =>
   function* () {
-    yield relationshipActions.addRelationshipAction({
-      id: nanoid(),
+    const {
+      startTableId,
+      startColumnIds,
+      endTableId,
+      endColumnIds,
       relationshipType,
+    } = values;
+
+    yield relationshipActions.addRelationshipAction({
+      id: uuid25(),
+      relationshipType,
+      ...referentialActionsOf(values),
       start: { tableId: startTableId, columnIds: startColumnIds },
       end: { tableId: endTableId, columnIds: endColumnIds },
     });
@@ -61,6 +86,8 @@ export const relationshipTools: readonly ActionTool[] = [
       'column.changeDataType',
       'column.changeDefault',
       'column.changeComment',
+      'column.changeLogicalName',
+      'column.changeDomain',
       'relationship.add',
     ],
     undoable: true,
@@ -72,12 +99,18 @@ export const relationshipTools: readonly ActionTool[] = [
       'tables[startTableId].columns',
       'tables[endTableId].columns',
     ],
-    args: [tableArg('startTableId'), tableArg('endTableId'), RELATIONSHIP_TYPE],
-    toActions: ({ startTableId, endTableId, relationshipType }) => [
+    args: [
+      tableArg('startTableId'),
+      tableArg('endTableId'),
+      RELATIONSHIP_TYPE,
+      ...NEW_REFERENTIAL_ACTIONS,
+    ],
+    toActions: values => [
       relationshipActions$.addRelationshipAction$(
-        startTableId,
-        endTableId,
-        relationshipType
+        values.startTableId,
+        values.endTableId,
+        values.relationshipType,
+        referentialActionsOf(values)
       ),
     ],
   },
@@ -98,6 +131,7 @@ export const relationshipTools: readonly ActionTool[] = [
       tableArg('endTableId'),
       columnsArg('endColumnIds', 'endTableId'),
       RELATIONSHIP_TYPE,
+      ...NEW_REFERENTIAL_ACTIONS,
     ],
     refine: ({ startColumnIds, endColumnIds }) =>
       startColumnIds.length === endColumnIds.length
@@ -137,6 +171,44 @@ export const relationshipTools: readonly ActionTool[] = [
       relationshipActions.changeRelationshipTypeAction({
         id: relationshipId,
         value: relationshipType,
+      }),
+    ],
+  },
+  {
+    name: 'erd_change_relationship_on_delete',
+    kind: 'atom',
+    atomReason:
+      'The relationship module has no generator that changes a referential action; the context menu dispatches this atom itself.',
+    actionTypes: ['relationship.changeOnDelete'],
+    undoable: true,
+    stream: false,
+    expectedBatches: 1,
+    expectedHistory: 1,
+    snapshotPaths: ['relationships[relationshipId].onDelete'],
+    args: [RELATIONSHIP_ID, referentialActionArg('onDelete')],
+    toActions: ({ relationshipId, onDelete }) => [
+      relationshipActions.changeRelationshipOnDeleteAction({
+        id: relationshipId,
+        value: onDelete,
+      }),
+    ],
+  },
+  {
+    name: 'erd_change_relationship_on_update',
+    kind: 'atom',
+    atomReason:
+      'The relationship module has no generator that changes a referential action; the context menu dispatches this atom itself.',
+    actionTypes: ['relationship.changeOnUpdate'],
+    undoable: true,
+    stream: false,
+    expectedBatches: 1,
+    expectedHistory: 1,
+    snapshotPaths: ['relationships[relationshipId].onUpdate'],
+    args: [RELATIONSHIP_ID, referentialActionArg('onUpdate')],
+    toActions: ({ relationshipId, onUpdate }) => [
+      relationshipActions.changeRelationshipOnUpdateAction({
+        id: relationshipId,
+        value: onUpdate,
       }),
     ],
   },

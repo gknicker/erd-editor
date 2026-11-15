@@ -1,17 +1,29 @@
-import { html } from '@dineug/r-html';
+import { html, observable } from '@dineug/r-html';
 import { get } from 'es-toolkit/compat';
 import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
 
+import { iconNameOf } from '@/__test-utils__/icon';
 import {
   createTestAppContext,
+  createTestI18n,
   flush,
   mountAndFlush,
   Mounted,
+  provideI18n,
+  pseudoMessages,
 } from '@/__test-utils__/index';
+import {
+  measureRoot,
+  PICKER_INSET,
+} from '@/components/erd-editor/viewportLayout';
+import { openExplorer } from '@/components/explorer/explorerCommands';
+import { explorerViewOf } from '@/components/explorer/explorerView';
 import ThemeBuilder from '@/components/theme-builder/ThemeBuilder';
 import * as styles from '@/components/theme-builder/ThemeBuilder.styles';
+import { EXPLORER_WIDTH } from '@/constants/layout';
 import { Open } from '@/constants/open';
 import { changeOpenMapAction } from '@/engine/modules/editor/atom.actions';
+import { createI18n } from '@/i18n/translate';
 import {
   AccentColor,
   AccentColorList,
@@ -19,9 +31,11 @@ import {
   GrayColor,
   GrayColorList,
   Palette,
+  SYSTEM_APPEARANCE,
   ThemeOptions,
 } from '@/themes/radix-ui-theme';
 import { openThemeBuilderAction } from '@/utils/emitter';
+import { InternalEventType } from '@/utils/internalEvents';
 import { KeyBindingName } from '@/utils/keyboard-shortcut';
 
 let mounted: Mounted | null = null;
@@ -66,7 +80,9 @@ const byStyle = (className: string) =>
 const palettes = () => byStyle(String(styles.palette));
 const swatches = (index: number) =>
   Array.from(palettes()[index].querySelectorAll<HTMLElement>('span'));
-const appearanceButtons = () => byStyle(String(styles.lightDarkButton));
+const appearanceButtons = () => byStyle(String(styles.appearanceButton));
+const appearanceButton = (label: string) =>
+  appearanceButtons().find(el => el.textContent === label)!;
 
 /** Normalizes a CSS color the way the DOM would after assignment. */
 const asCssColor = (value: string) => {
@@ -175,32 +191,88 @@ describe('ThemeBuilder', () => {
       ]);
     });
 
-    it('renders the light and dark buttons with their icons and labels', async () => {
+    it('renders the system, light and dark buttons in that order, with their icons', async () => {
       await setup();
-      const [light, dark] = appearanceButtons();
+      const buttons = appearanceButtons();
 
-      expect(appearanceButtons()).toHaveLength(2);
-      expect(light.textContent).toContain('Light');
-      expect(dark.textContent).toContain('Dark');
-      expect(light.querySelector('.icon svg')).toBeTruthy();
-      expect(dark.querySelector('.icon svg')).toBeTruthy();
-      expect(byStyle(String(styles.vertical))).toHaveLength(2);
+      expect(buttons.map(el => el.textContent)).toEqual([
+        'System',
+        'Light',
+        'Dark',
+      ]);
+      buttons.forEach(el => expect(el.querySelector('.icon svg')).toBeTruthy());
+      expect(byStyle(String(styles.vertical))).toHaveLength(3);
     });
 
-    it('selects the dark button for a dark appearance', async () => {
-      await setup({ theme: { appearance: Appearance.dark } });
-      const [light, dark] = appearanceButtons();
+    it('reads its words in the language shown, following a switch, and keeps the swatch keys', async () => {
+      const i18n = createTestI18n('en');
+      const provider = provideI18n(document.body, i18n);
 
-      expect(light.classList.contains('selected')).toBe(false);
-      expect(dark.classList.contains('selected')).toBe(true);
+      try {
+        await setup();
+        Object.assign(i18n, createI18n('ko-KR', pseudoMessages('ko')));
+        await flush();
+
+        expect(byStyle(String(styles.title))[0].textContent).toBe('ko:Theme');
+        expect(
+          byStyle(String(styles.subTitle)).map(el => el.textContent)
+        ).toEqual(['ko:Accent color', 'ko:Gray color', 'ko:Appearance']);
+        expect(appearanceButtons().map(el => el.textContent)).toEqual([
+          'ko:System',
+          'ko:Light',
+          'ko:Dark',
+        ]);
+        expect(swatches(0).map(el => el.getAttribute('title'))).toEqual(
+          AccentColorList
+        );
+      } finally {
+        provider.destroy();
+      }
     });
 
-    it('selects the light button for a light appearance', async () => {
-      await setup({ theme: { appearance: Appearance.light } });
-      const [light, dark] = appearanceButtons();
+    it('draws a distinct icon on each appearance button', async () => {
+      await setup();
+      const icons = appearanceButtons().map(
+        el => el.querySelector('.icon svg')!.innerHTML
+      );
 
-      expect(light.classList.contains('selected')).toBe(true);
-      expect(dark.classList.contains('selected')).toBe(false);
+      expect(new Set(icons).size).toBe(3);
+    });
+
+    it.each([
+      [Appearance.light, 'Light'],
+      [Appearance.dark, 'Dark'],
+      [SYSTEM_APPEARANCE, 'System'],
+    ] as const)(
+      'selects only the button of the %s appearance',
+      async (appearance, label) => {
+        await setup({ theme: { appearance } });
+        const selected = appearanceButtons().filter(el =>
+          el.classList.contains('selected')
+        );
+
+        expect(selected.map(el => el.textContent)).toEqual([label]);
+      }
+    );
+
+    it('moves the selection when the host changes the appearance', async () => {
+      const app = createTestAppContext();
+      app.store.dispatchSync(
+        changeOpenMapAction({ [Open.themeBuilder]: true })
+      );
+      const theme = observable<ThemeOptions>({ ...defaultTheme });
+      mounted = await mountAndFlush(
+        html`<${ThemeBuilder} theme=${theme} />`,
+        app
+      );
+
+      theme.appearance = SYSTEM_APPEARANCE;
+      await flush();
+
+      const selected = appearanceButtons().filter(el =>
+        el.classList.contains('selected')
+      );
+      expect(selected.map(el => el.textContent)).toEqual(['System']);
     });
   });
 
@@ -236,7 +308,7 @@ describe('ThemeBuilder', () => {
       const setThemeOptions = vi.fn();
       app.emitter.on({ setThemeOptions });
 
-      appearanceButtons()[0].click();
+      appearanceButton('Light').click();
 
       expect(setThemeOptions.mock.calls[0][0].payload).toEqual({
         appearance: Appearance.light,
@@ -248,17 +320,29 @@ describe('ThemeBuilder', () => {
       const setThemeOptions = vi.fn();
       app.emitter.on({ setThemeOptions });
 
-      appearanceButtons()[1].click();
+      appearanceButton('Dark').click();
 
       expect(setThemeOptions.mock.calls[0][0].payload).toEqual({
         appearance: Appearance.dark,
       });
     });
 
+    it('emits the system appearance when the system button is clicked', async () => {
+      const { app } = await setup({ theme: { appearance: Appearance.dark } });
+      const setThemeOptions = vi.fn();
+      app.emitter.on({ setThemeOptions });
+
+      appearanceButton('System').click();
+
+      expect(setThemeOptions.mock.calls[0][0].payload).toEqual({
+        appearance: SYSTEM_APPEARANCE,
+      });
+    });
+
     it('leaves the store untouched when only a theme option changes', async () => {
       const { app } = await setup();
 
-      appearanceButtons()[0].click();
+      appearanceButton('Light').click();
       await flush();
 
       expect(app.store.state.editor.openMap[Open.themeBuilder]).toBe(true);
@@ -266,6 +350,49 @@ describe('ThemeBuilder', () => {
   });
 
   describe('shortcut handling', () => {
+    it('closes on its close button, named for the stop key, handing the keyboard back', async () => {
+      const { app } = await setup();
+      const focus = vi.fn();
+      document.body.addEventListener(InternalEventType.focus, focus);
+      const close = root().querySelector<HTMLButtonElement>(
+        '.theme-builder-close'
+      )!;
+
+      expect(close.getAttribute('aria-label')).toBe('Close');
+      expect(close.getAttribute('title')).toBe('Close (ESC)');
+      expect(iconNameOf(close)).toBe('x');
+
+      close.click();
+      await flush();
+      document.body.removeEventListener(InternalEventType.focus, focus);
+
+      expect(app.store.state.editor.openMap[Open.themeBuilder]).toBe(false);
+      expect(focus).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps Space and Enter on its close button from the editor, Escape going on', async () => {
+      await setup();
+      const close = root().querySelector<HTMLButtonElement>(
+        '.theme-builder-close'
+      )!;
+      const reached: string[] = [];
+      const listen = (event: KeyboardEvent) => reached.push(event.key);
+      mounted!.container.addEventListener('keydown', listen);
+
+      for (const init of [
+        { key: ' ', code: 'Space' },
+        { key: 'Enter', code: 'Enter' },
+        { key: 'Escape', code: 'Escape' },
+      ]) {
+        close.dispatchEvent(
+          new KeyboardEvent('keydown', { ...init, bubbles: true })
+        );
+      }
+      mounted!.container.removeEventListener('keydown', listen);
+
+      expect(reached).toEqual(['Escape']);
+    });
+
     it('closes the panel on the stop shortcut', async () => {
       const { app } = await setup();
 
@@ -306,6 +433,34 @@ describe('ThemeBuilder', () => {
       expect(app.store.state.editor.openMap[Open.themeBuilder]).toBe(true);
       expect(app.store.state.editor.openMap[Open.tableProperties]).toBe(false);
       expect(root()).toBeTruthy();
+    });
+
+    it('closes the locale picker as it opens, the two panels standing in one place', async () => {
+      const { app } = await setup({ open: false });
+      app.store.dispatchSync(
+        changeOpenMapAction({ [Open.localePicker]: true })
+      );
+
+      app.emitter.emit(openThemeBuilderAction());
+      await flush();
+
+      expect(app.store.state.editor.openMap[Open.themeBuilder]).toBe(true);
+      expect(app.store.state.editor.openMap[Open.localePicker]).toBe(false);
+    });
+
+    it('leaves the Explorer open as it opens, beside the canvas it narrows', async () => {
+      const { app } = await setup({ open: false });
+      measureRoot(app.store, { width: 1200, height: 800 });
+      openExplorer(app.store);
+
+      app.emitter.emit(openThemeBuilderAction());
+      await flush();
+
+      expect(app.store.state.editor.openMap[Open.themeBuilder]).toBe(true);
+      expect(explorerViewOf(app.store).open).toBe(true);
+      expect(root().style.insetInlineStart).toBe(
+        `${PICKER_INSET + EXPLORER_WIDTH}px`
+      );
     });
 
     it('closes the panel and leaves table properties alone', async () => {

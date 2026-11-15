@@ -2,9 +2,14 @@ import { query } from '@dineug/erd-editor-schema';
 import { createRef, FC, onUpdated, ref, repeat } from '@dineug/r-html';
 
 import { useAppContext } from '@/components/appContext';
+import { useI18n } from '@/components/localeContext';
 import Icon from '@/components/primitives/icon/Icon';
 import ColumnOption from '@/components/table-view/column/column-option/ColumnOption';
 import { OrderType } from '@/constants/schema';
+import {
+  nameLabelText,
+  toNameLabel,
+} from '@/engine/modules/editor/utils/nameView';
 import {
   changeIndexColumnOrderTypeAction$,
   moveIndexColumnAction$,
@@ -20,10 +25,18 @@ import * as styles from './IndexesColumn.styles';
 
 export type IndexesColumnProps = {
   index: Index;
+  /**
+   * The alternate key the index is, 1 for AK1, whose marks each row then
+   * carries as the diagram draws them; 0 or left out while it is none.
+   */
+  alternateKey?: number;
+  /** The editor's readonly mode: the rows neither drag nor flip their sort order. */
+  readonly?: boolean;
 };
 
 const IndexesColumn: FC<IndexesColumnProps> = (props, ctx) => {
   const app = useAppContext(ctx);
+  const i18n = useI18n(ctx);
   const root = createRef<HTMLDivElement>();
   // The held row is left out: it snaps to its slot on each move, and only the
   // row it pushes aside slides, so the list never paints out of order.
@@ -34,11 +47,13 @@ const IndexesColumn: FC<IndexesColumnProps> = (props, ctx) => {
   );
 
   const toOrderTitle = (orderType: number) => {
+    const { t } = i18n.value;
+
     switch (orderType) {
       case OrderType.ASC:
-        return 'Ascending';
+        return t('tableProperties.ascending');
       case OrderType.DESC:
-        return 'Descending';
+        return t('tableProperties.descending');
       default:
         return '';
     }
@@ -81,6 +96,8 @@ const IndexesColumn: FC<IndexesColumnProps> = (props, ctx) => {
   };
 
   const handleChangeOrderType = (indexColumn: IndexColumn) => {
+    if (props.readonly) return;
+
     const { store } = app.value;
     store.dispatch(
       attachChangeOnlyTag$(changeIndexColumnOrderTypeAction$(indexColumn.id))
@@ -91,21 +108,36 @@ const IndexesColumn: FC<IndexesColumnProps> = (props, ctx) => {
 
   return () => {
     const { store } = app.value;
-    const { collections } = store.state;
+    const { collections, settings } = store.state;
+    const { alternateKey = 0, readonly } = props;
 
-    const indexColumns = query(collections)
+    const table = query(collections)
+      .collection('tableEntities')
+      .selectById(props.index.tableId);
+    const tableColumnIds = new Set(table?.columnIds ?? []);
+    const indexColumnEntities = query(collections)
       .collection('indexColumnEntities')
-      .selectByIds(props.index.indexColumnIds)
-      .map(indexColumn => ({
+      .selectByIds(props.index.indexColumnIds);
+    // Numbered as getAlternateKeyMarks numbers them: by key order, a column
+    // the table no longer has left out, so each row reads as the canvas does.
+    const keyedIds = indexColumnEntities
+      .filter(indexColumn => tableColumnIds.has(indexColumn.columnId))
+      .map(indexColumn => indexColumn.id);
+    const indexColumns = indexColumnEntities.map(indexColumn => {
+      const position = keyedIds.indexOf(indexColumn.id) + 1;
+
+      return {
         ...indexColumn,
         column: query(collections)
           .collection('tableColumnEntities')
           .selectById(indexColumn.columnId),
-      }));
+        mark: alternateKey && position ? `AK${alternateKey}.${position}` : '',
+      };
+    });
 
     return (
       <div
-        class={styles.root}
+        class={['scrollbar', styles.root]}
         use:ref={ref(root)}
         on:dragenter={onPrevent}
         on:dragover={onPrevent}
@@ -116,24 +148,40 @@ const IndexesColumn: FC<IndexesColumnProps> = (props, ctx) => {
           indexColumn => (
             <div
               class={styles.row}
-              draggable="true"
+              bool:data-readonly={readonly}
+              draggable={readonly ? 'false' : 'true'}
               data-id={indexColumn.id}
-              on:dragstart={handleDragstart}
+              on:dragstart={readonly ? null : handleDragstart}
             >
-              <Icon class={'column-col'} name="grip-vertical" size={14} />
+              {readonly ? (
+                <div class={['column-col', styles.gripSlot]}></div>
+              ) : (
+                <Icon
+                  class={['column-col', styles.grip]}
+                  name="grip-vertical"
+                  size={14}
+                />
+              )}
               <div
                 class="column-col"
                 on:click={() => handleChangeOrderType(indexColumn)}
               >
                 <ColumnOption
-                  class={styles.orderType}
+                  class={readonly ? null : styles.orderType}
                   checked={true}
                   width={40}
                   text={toOrderName(indexColumn.orderType)}
                   title={toOrderTitle(indexColumn.orderType)}
                 />
               </div>
-              <div class="column-col">{indexColumn.column?.name}</div>
+              <div class="column-col">
+                {indexColumn.column
+                  ? nameLabelText(toNameLabel(settings, indexColumn.column))
+                  : ''}
+              </div>
+              {indexColumn.mark ? (
+                <span class={styles.mark}>{indexColumn.mark}</span>
+              ) : null}
             </div>
           )
         )}

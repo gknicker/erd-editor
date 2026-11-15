@@ -77,6 +77,57 @@ describe('ToastContainer', () => {
     expect(toasts[1].textContent).toContain('second');
   });
 
+  it('lets a toast opened under a key take the place of the one up under it', async () => {
+    mounted = await mountAndFlush(html`<${ToastContainer} />`);
+    const first = createDeferred();
+    const other = createDeferred();
+    const again = createDeferred();
+
+    mounted.app.emitter.emit(
+      openToastAction({
+        key: 'copied',
+        message: html`copied 1`,
+        close: first.promise,
+      })
+    );
+    mounted.app.emitter.emit(
+      openToastAction({ message: html`unkeyed`, close: other.promise })
+    );
+    mounted.app.emitter.emit(
+      openToastAction({
+        key: 'copied',
+        message: html`copied 2`,
+        close: again.promise,
+      })
+    );
+    await flush();
+
+    expect(getToasts(mounted).map(toast => toast.textContent?.trim())).toEqual([
+      'unkeyed',
+      'copied 2',
+    ]);
+
+    // The toast it replaced closing late takes nothing else down with it.
+    first.resolve();
+    await flush();
+
+    expect(getToasts(mounted)).toHaveLength(2);
+  });
+
+  it('keeps every toast opened without a key', async () => {
+    mounted = await mountAndFlush(html`<${ToastContainer} />`);
+    const close = createDeferred();
+
+    for (let i = 0; i < 2; i++) {
+      mounted.app.emitter.emit(
+        openToastAction({ message: html`same`, close: close.promise })
+      );
+    }
+    await flush();
+
+    expect(getToasts(mounted)).toHaveLength(2);
+  });
+
   it('removes only the toast whose close promise settles', async () => {
     mounted = await mountAndFlush(html`<${ToastContainer} />`);
     const first = createDeferred();
@@ -119,6 +170,21 @@ describe('ToastContainer', () => {
     expect(getToasts(mounted)).toHaveLength(1);
 
     await vi.advanceTimersByTimeAsync(1);
+    await flush();
+    expect(getToasts(mounted)).toHaveLength(0);
+  });
+
+  it('auto closes a toast whose close is given as undefined, as a status toast sends it', async () => {
+    vi.useFakeTimers();
+    mounted = await mountAndFlush(html`<${ToastContainer} />`);
+
+    mounted.app.emitter.emit(
+      openToastAction({ message: html`status`, close: undefined })
+    );
+    await flush();
+    expect(getToasts(mounted)).toHaveLength(1);
+
+    await vi.advanceTimersByTimeAsync(5000);
     await flush();
     expect(getToasts(mounted)).toHaveLength(0);
   });

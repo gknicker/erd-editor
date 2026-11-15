@@ -5,6 +5,8 @@ import * as styles from './Switch.styles';
 export type SwitchProps = {
   size?: '1' | '2' | '3';
   value: boolean;
+  /** Shows the value and takes no press, as a field a reader may not change does. */
+  disabled?: boolean;
   onChange: (value: boolean) => void;
 };
 
@@ -20,8 +22,12 @@ const Switch: FC<SwitchProps> = (props, ctx) => {
         Reflect.get(styles, `size${props.size ?? '2'}`),
       ]}
       type="button"
+      prop:dir="ltr"
+      role="switch"
+      aria-checked={props.value ? 'true' : 'false'}
       data-checked={props.value}
-      on:click={handleChange}
+      bool:disabled={props.disabled}
+      on:click={props.disabled ? null : handleChange}
     >
       <span class={styles.switchThumb} bool:data-checked={props.value}></span>
     </button>

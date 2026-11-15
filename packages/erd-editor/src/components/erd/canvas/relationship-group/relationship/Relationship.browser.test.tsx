@@ -4,7 +4,8 @@
 // order, the paint a stylesheet selector used to give it, and the hit band the
 // svg path was, which the last block drives at four zooms through konva itself.
 
-import { type DOMTemplateLiterals } from '@dineug/r-html';
+import { type DOMTemplateLiterals, type FC, useProvider } from '@dineug/r-html';
+import { whenDrawn } from '@dineug/r-html-konva';
 import type { Container } from 'konva/lib/Container';
 import type { Node as KonvaNode } from 'konva/lib/Node';
 import type { Stage } from 'konva/lib/Stage';
@@ -18,22 +19,37 @@ import {
   whenPainted,
 } from '@/__test-utils__';
 import { type AppContext } from '@/components/appContext';
+import { diffContext } from '@/components/diffContext';
 import Relationship from '@/components/erd/canvas/relationship-group/relationship/Relationship';
+import {
+  clearRelationshipHighlight,
+  setRelationshipHighlight,
+} from '@/components/erd/relationshipHighlight';
 import {
   RELATIONSHIP_HIT_STROKE_WIDTH,
   RELATIONSHIP_STROKE_WIDTH,
 } from '@/constants/layout';
 import {
   Direction,
+  ReferentialAction,
   RelationshipType,
+  Show,
   StartRelationshipType,
 } from '@/constants/schema';
 import { hoverRelationshipMapAction } from '@/engine/modules/editor/atom.actions';
+import {
+  addRelationshipAction,
+  changeRelationshipOnDeleteAction,
+} from '@/engine/modules/relationship/atom.actions';
+import { changeShowAction } from '@/engine/modules/settings/atom.actions';
+import { addTableAction } from '@/engine/modules/table/atom.actions';
 import { Point, Relationship as RelationshipType_ } from '@/internal-types';
-import { whenDrawn } from '@/konva/batchDraw';
 import { renderScene } from '@/konva/scene/renderScene';
 import { createRelationship } from '@/utils/collection/relationship.entity';
+import { Diff, type DiffMap, ENTITY_PATH } from '@/utils/diff/diff';
 import { CIRCLE_RADIUS } from '@/utils/draw-relationship';
+import { ROUTE_CORNER_SEGMENTS } from '@/utils/draw-relationship/corner';
+import { LOOP_SEGMENTS } from '@/utils/draw-relationship/loop';
 import {
   getRelationshipPath,
   toPathD,
@@ -86,9 +102,42 @@ const sceneOf = (
   </k-layer>
 );
 
+type DiffSceneProps = {
+  relationship: RelationshipType_;
+  strokeWidth: number;
+  diffMap: DiffMap;
+};
+
+/** A diff pane's scene: the provider is up before the connector resolves it. */
+const DiffScene: FC<DiffSceneProps> = (props, ctx) => {
+  useProvider(ctx, diffContext, props.diffMap);
+
+  return () => (
+    <k-layer name="scene">
+      <Relationship
+        relationship={props.relationship}
+        strokeWidth={props.strokeWidth}
+      />
+    </k-layer>
+  );
+};
+
+const diffSceneOf = (
+  relationship: RelationshipType_,
+  strokeWidth: number,
+  diffMap: DiffMap
+): DOMTemplateLiterals => (
+  <DiffScene
+    relationship={relationship}
+    strokeWidth={strokeWidth}
+    diffMap={diffMap}
+  />
+);
+
 async function mountRelationship(
   relationship: RelationshipType_,
-  strokeWidth = RELATIONSHIP_STROKE_WIDTH
+  strokeWidth = RELATIONSHIP_STROKE_WIDTH,
+  diffMap?: DiffMap
 ): Promise<Mounted> {
   const container = document.createElement('div');
   document.body.append(container);
@@ -96,7 +145,9 @@ async function mountRelationship(
   const rendered = renderScene({
     app,
     container,
-    scene: sceneOf(relationship, strokeWidth),
+    scene: diffMap
+      ? diffSceneOf(relationship, strokeWidth, diffMap)
+      : sceneOf(relationship, strokeWidth),
     width: 800,
     height: 600,
     theme: THEME,
@@ -181,8 +232,8 @@ describe('Relationship as konva nodes', () => {
     const expected = getRelationshipPath(relationship).path.path.d();
     const { group } = await mountRelationship(relationship);
 
-    // Three runs, and a cut either side of both corners between them.
-    expect(expected).toHaveLength(5);
+    // Three runs, and the chords of a rounded corner between each two.
+    expect(expected).toHaveLength(3 + 2 * ROUTE_CORNER_SEGMENTS);
 
     const route = childNamed(group, 'relationship-route');
     expect(route.getAttr('data')).toBe(toPathD(expected));
@@ -191,7 +242,7 @@ describe('Relationship as konva nodes', () => {
     expect(route.getAttr('fill')).toBeUndefined();
   });
 
-  it('collapses a self relationship into a single path segment', async () => {
+  it('draws a self relationship as one curve', async () => {
     const relationship = makeRelationship({
       start: {
         tableId: 't1',
@@ -210,7 +261,9 @@ describe('Relationship as konva nodes', () => {
     });
     const { group } = await mountRelationship(relationship);
 
-    expect(getRelationshipPath(relationship).path.path.d()).toHaveLength(1);
+    expect(getRelationshipPath(relationship).path.path.d()).toHaveLength(
+      LOOP_SEGMENTS
+    );
     expect(childNamed(group, 'relationship-route').getAttr('data')).toBe(
       toPathD(getRelationshipPath(relationship).path.path.d())
     );
@@ -355,7 +408,7 @@ describe('Relationship as konva nodes', () => {
     expect(circles).toHaveLength(2);
     expect(circles[0].x()).toBe(line.startCircle.cx);
     expect(circles[0].y()).toBe(line.startCircle.cy);
-    expect(circles[0].getAttr('radius')).toBe(6);
+    expect(circles[0].getAttr('radius')).toBe(5);
 
     // The ring branch renders nodes the dash branch never does, and every other
     // mount in this file takes the dash branch.
@@ -414,6 +467,48 @@ describe('Relationship as konva nodes', () => {
     expect(route.getAttr('stroke')).toBe(THEME.keyFK);
   });
 
+  it('lights with a jump to it, and goes out once the jump light is put out (AC-N3)', async () => {
+    const { app, group } = await mountRelationship(makeRelationship());
+    const route = childNamed(group, 'relationship-route');
+    const editorId = app.store.state.editor.id;
+
+    setRelationshipHighlight(editorId, 'r1');
+    await settle();
+    expect(route.getAttr('stroke')).toBe(THEME.relationshipHover);
+
+    clearRelationshipHighlight(editorId);
+    await settle();
+    expect(route.getAttr('stroke')).toBe(THEME.keyFK);
+  });
+
+  it('draws a diff mark in its colour, and the hover and a jump light over it', async () => {
+    const diffMap: DiffMap = new Map([
+      ['r1', new Map([[ENTITY_PATH, Diff.insert]])],
+    ]);
+    const { app, group } = await mountRelationship(
+      makeRelationship(),
+      RELATIONSHIP_STROKE_WIDTH,
+      diffMap
+    );
+    const route = childNamed(group, 'relationship-route');
+    const editorId = app.store.state.editor.id;
+    expect(route.getAttr('stroke')).toBe(THEME.diffInsertForeground);
+
+    setRelationshipHighlight(editorId, 'r1');
+    await settle();
+    expect(route.getAttr('stroke')).toBe(THEME.relationshipHover);
+
+    clearRelationshipHighlight(editorId);
+    await settle();
+    expect(route.getAttr('stroke')).toBe(THEME.diffInsertForeground);
+
+    app.store.dispatchSync(
+      hoverRelationshipMapAction({ relationshipIds: ['r1'] })
+    );
+    await settle();
+    expect(route.getAttr('stroke')).toBe(THEME.relationshipHover);
+  });
+
   it('hovers every start and end column on mouseenter and clears them on mouseleave', async () => {
     const { app, group } = await mountRelationship(makeRelationship());
     const route = childNamed(group, 'relationship-route');
@@ -432,6 +527,114 @@ describe('Relationship as konva nodes', () => {
     await settle();
     expect(app.store.state.editor.hoverColumnMap).toEqual({});
     expect(route.getAttr('stroke')).toBe(THEME.keyFK);
+  });
+});
+
+const withActions = (value: Parameters<typeof createRelationship>[0] = {}) =>
+  makeRelationship({
+    onDelete: ReferentialAction.cascade,
+    onUpdate: ReferentialAction.restrict,
+    ...value,
+  });
+
+const titleOf = (group: Container) =>
+  group.getStage()!.container().getAttribute('title');
+
+describe('the referential action tooltip', () => {
+  it('spells the clauses out on the canvas while hovered, and takes them away on leave', async () => {
+    const { group } = await mountRelationship(withActions());
+
+    group.fire('mouseenter');
+    expect(titleOf(group)).toBe('ON DELETE CASCADE\nON UPDATE RESTRICT');
+
+    group.fire('mouseleave');
+    expect(titleOf(group)).toBeNull();
+  });
+
+  it('spells them out with the label hidden too', async () => {
+    const { app, group } = await mountRelationship(withActions());
+    app.store.dispatchSync(
+      changeShowAction({ show: Show.hideReferentialAction, value: true })
+    );
+    await settle();
+
+    group.fire('mouseenter');
+
+    expect(titleOf(group)).toBe('ON DELETE CASCADE\nON UPDATE RESTRICT');
+  });
+
+  it('writes none for a connector that sets neither action', async () => {
+    const { group } = await mountRelationship(makeRelationship());
+
+    group.fire('mouseenter');
+
+    expect(titleOf(group)).toBeNull();
+  });
+
+  it('rewrites its tooltip as a peer changes the actions under a resting pointer', async () => {
+    const app = createTestAppContext();
+    app.store.dispatchSync(
+      addTableAction({ id: 't1', ui: { x: 0, y: 0, zIndex: 1 } }),
+      addTableAction({ id: 't2', ui: { x: 600, y: 0, zIndex: 2 } }),
+      addRelationshipAction({
+        id: 'r1',
+        relationshipType: RelationshipType.ZeroN,
+        start: { tableId: 't1', columnIds: [] },
+        end: { tableId: 't2', columnIds: [] },
+      })
+    );
+    const container = document.createElement('div');
+    document.body.append(container);
+    const rendered = renderScene({
+      app,
+      container,
+      scene: sceneOf(
+        app.store.state.collections.relationshipEntities.r1,
+        RELATIONSHIP_STROKE_WIDTH
+      ),
+      width: 800,
+      height: 600,
+      theme: THEME,
+    });
+    teardowns.push(() => {
+      rendered.destroy();
+      container.remove();
+    });
+    await settle();
+    const group = rendered.stage.findOne<Container>('.relationship')!;
+
+    group.fire('mouseenter');
+    await settle();
+    expect(titleOf(group)).toBeNull();
+
+    app.store.dispatchSync(
+      changeRelationshipOnDeleteAction({
+        id: 'r1',
+        value: ReferentialAction.cascade,
+      })
+    );
+    await settle();
+    expect(titleOf(group)).toBe('ON DELETE CASCADE');
+
+    app.store.dispatchSync(
+      changeRelationshipOnDeleteAction({
+        id: 'r1',
+        value: ReferentialAction.none,
+      })
+    );
+    await settle();
+    expect(titleOf(group)).toBeNull();
+  });
+
+  it('takes its tooltip away when it unmounts hovered', async () => {
+    const { group } = await mountRelationship(withActions());
+    const container = group.getStage()!.container();
+    group.fire('mouseenter');
+    expect(container.getAttribute('title')).not.toBeNull();
+
+    teardowns.splice(0).forEach(teardown => teardown());
+
+    expect(container.getAttribute('title')).toBeNull();
   });
 });
 

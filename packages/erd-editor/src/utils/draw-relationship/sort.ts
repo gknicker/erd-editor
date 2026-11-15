@@ -13,6 +13,9 @@ import {
   copyAnchor,
   DirectionName,
   DirectionNameList,
+  heldRouteRedraws,
+  LINE_SIZE,
+  MIN_STUB,
   nextSortEpoch,
   ObjectPoint,
   setAnchors,
@@ -28,9 +31,9 @@ import type {
   ViewSource,
 } from '@/utils/draw-relationship/geometrySource';
 import {
-  boundsOfPoints,
   createDirtyLanes,
   diffTableBoxes,
+  type DirtyBox,
   getSortCache,
   markRoute,
   type NudgeMemo,
@@ -40,7 +43,7 @@ import {
 import { nudgeRoutes } from '@/utils/draw-relationship/nudge';
 import {
   collectObstacles,
-  routeOrthogonal,
+  routeWithReach,
 } from '@/utils/draw-relationship/route';
 import { stubEnds } from '@/utils/draw-relationship/stub';
 
@@ -49,8 +52,8 @@ type RelationshipGraph = {
   centerX: number;
   centerY: number;
   objectPoint: ObjectPoint;
-  /** Loops placed on this table so far, which decides how far each is offset. */
-  selfCount: number;
+  /** The loops on this table, laid out together once every one is known. */
+  loops: ChangeRelationship[];
   top: SideEntry[];
   bottom: SideEntry[];
   left: SideEntry[];
@@ -89,14 +92,23 @@ const directionNameToDirection: Record<string, number> = {
 
 const TAU = Math.PI * 2;
 
-/** Loop corner offset: a fraction of the table's shorter side, within bounds. */
-const SELF_CORNER_RATIO = 0.15;
-const SELF_CORNER_MIN = 20;
-const SELF_CORNER_MAX = 60;
-/** How far each additional loop on the same table steps out from the previous. */
-const SELF_CORNER_STRIDE = 14;
+/**
+ * How far the first loop's anchors sit from the table's top-right corner, the
+ * same on every table, so a large table's loop is no larger than a small one's.
+ */
+const SELF_CORNER_OFFSET = 20;
+/**
+ * How far each additional loop on the same table steps out from the previous,
+ * enough that the markers of two neighbouring loops stay apart where it fits.
+ */
+const SELF_CORNER_STRIDE = 18;
 /** Gap kept between the outermost loop and the nearest ordinary anchor. */
 const SELF_CLEARANCE = 8;
+/**
+ * How far apart the anchors of a side its loops squeeze must sit for their
+ * markers, LINE_SIZE either side of each anchor, not to run into each other.
+ */
+const SQUEEZED_PITCH = LINE_SIZE * 2;
 
 /**
  * The angle at which each side's clockwise walk begins. Reading the boundary as
@@ -118,9 +130,15 @@ const WALKS_BACKWARDS: Record<DirectionName, boolean> = {
   [DirectionName.left]: true,
 };
 
+/**
+ * Places each relationship's anchors and slots on the source's channel, and on
+ * the document's routes every connector too, unless route is false, as in a
+ * store that draws nothing, where a route is never read.
+ */
 export function relationshipSort(
   state: RootState,
-  source: GeometrySource = 'document'
+  source: GeometrySource = 'document',
+  { route = true }: { route?: boolean } = {}
 ) {
   // Every route box the last sort left behind answers for a route this one is
   // about to replace, and the connectors it skips over - self relationships,
@@ -161,15 +179,17 @@ export function relationshipSort(
     slotMap.set(relationshipShape.id, [0, 0]);
 
     if (start.tableId === end.tableId) {
-      const graph = getOrCreateGraph(state, graphMap, startTable, source);
-      placeSelf(graph, relationshipShape);
+      getOrCreateGraph(state, graphMap, startTable, source).loops.push(
+        relationshipShape
+      );
     } else {
       const startGraph = getOrCreateGraph(state, graphMap, startTable, source);
       const endGraph = getOrCreateGraph(state, graphMap, endTable, source);
       const [startDirection, endDirection] = getAndSetDirection(
         startGraph.objectPoint,
         endGraph.objectPoint,
-        relationshipShape
+        relationshipShape,
+        source
       );
 
       startGraph[startDirection].push({
@@ -190,6 +210,7 @@ export function relationshipSort(
   }
 
   for (const graph of graphMap.values()) {
+    placeLoops(graph);
     for (const key of DirectionNameList) {
       placeSide(key as DirectionName, graph, slotMap);
     }
@@ -201,7 +222,7 @@ export function relationshipSort(
   }
 
   if (source === 'document') {
-    routeRelationships(state, changeMap, slotMap);
+    if (route) routeRelationships(state, changeMap, slotMap);
   } else {
     stubRelationships(changeMap, slotMap, source);
   }
@@ -261,6 +282,7 @@ function routeRelationships(
 
     let pristine: Point[];
     let points: Point[];
+    let bounds: DirtyBox;
 
     if (
       moved !== null &&
@@ -270,8 +292,9 @@ function routeRelationships(
     ) {
       pristine = was.pristine;
       points = clonePoints(pristine);
+      bounds = was.bounds;
     } else {
-      points = routeOrthogonal(
+      const routed = routeWithReach(
         m,
         start.direction,
         l,
@@ -280,6 +303,8 @@ function routeRelationships(
         start.tableId,
         end.tableId
       );
+      points = routed.points;
+      bounds = routed.reach;
       pristine = clonePoints(points);
       dirty.add(id);
       if (was) markRoute(lanes, was.nudged);
@@ -300,7 +325,7 @@ function routeRelationships(
       endTableId: end.tableId,
       pristine,
       nudged: points,
-      bounds: boundsOfPoints(pristine),
+      bounds,
     });
   }
 
@@ -319,9 +344,10 @@ function routeRelationships(
     moved === null ? undefined : createMemo(previous, dirty, lanes)
   );
 
+  const held = heldRouteRedraws(state);
   for (const [id, points] of routes) {
     const origin = origins.get(id);
-    if (origin) setRoute(origin, points);
+    if (origin) setRoute(origin, points, 'document', held);
   }
 
   cache.entries = entries;
@@ -381,7 +407,7 @@ function getOrCreateGraph(
       centerX: objectPoint.top.x,
       centerY: objectPoint.left.y,
       objectPoint,
-      selfCount: 0,
+      loops: [],
       top: [],
       bottom: [],
       left: [],
@@ -393,39 +419,35 @@ function getOrCreateGraph(
 }
 
 /**
- * Places a loop around the table's top-right corner, kept out of the side lists
- * entirely so it inflates no side's count. The offset grows with the table, and
- * each further loop steps outwards from the last.
+ * Places a table's loops around its top-right corner, kept out of the side lists
+ * entirely so they inflate no side's count. Each further loop steps outwards from
+ * the last, closer together where the table's shorter side has no room for more.
  */
-function placeSelf(graph: RelationshipGraph, relationship: ChangeRelationship) {
-  const { rt, width, height } = graph.objectPoint;
-  const index = graph.selfCount++;
-  const offset =
-    clamp(
-      Math.min(width, height) * SELF_CORNER_RATIO,
-      SELF_CORNER_MIN,
-      SELF_CORNER_MAX
-    ) +
-    index * SELF_CORNER_STRIDE;
+function placeLoops(graph: RelationshipGraph) {
+  const { rt } = graph.objectPoint;
+  const offsets = loopOffsets(graph);
 
-  relationship.start.direction = Direction.top;
-  relationship.start.x = rt.x - offset;
-  relationship.start.y = rt.y;
-  relationship.end.direction = Direction.right;
-  relationship.end.x = rt.x;
-  relationship.end.y = rt.y + offset;
+  graph.loops.forEach((relationship, index) => {
+    const offset = offsets[index];
+    relationship.start.direction = Direction.top;
+    relationship.start.x = rt.x - offset;
+    relationship.start.y = rt.y;
+    relationship.end.direction = Direction.right;
+    relationship.end.x = rt.x;
+    relationship.end.y = rt.y + offset;
+  });
 }
 
-function selfOffset(graph: RelationshipGraph, index: number) {
+/** How far each loop's anchors sit from the corner, on a side of either length. */
+function loopOffsets(graph: RelationshipGraph): number[] {
   const { width, height } = graph.objectPoint;
-  return (
-    clamp(
-      Math.min(width, height) * SELF_CORNER_RATIO,
-      SELF_CORNER_MIN,
-      SELF_CORNER_MAX
-    ) +
-    index * SELF_CORNER_STRIDE
-  );
+  const count = graph.loops.length;
+  const room = Math.max(0, Math.min(width, height) - LINE_SIZE);
+  const first = Math.min(SELF_CORNER_OFFSET, room);
+  const stride =
+    count > 1 ? Math.min(SELF_CORNER_STRIDE, (room - first) / (count - 1)) : 0;
+
+  return graph.loops.map((_, index) => first + index * stride);
 }
 
 /**
@@ -434,12 +456,9 @@ function selfOffset(graph: RelationshipGraph, index: number) {
  * this the anchor spread reaches the corner one already sits in.
  */
 function selfReserve(graph: RelationshipGraph) {
-  if (!graph.selfCount) return 0;
-  return selfOffset(graph, graph.selfCount - 1) + SELF_CLEARANCE;
-}
-
-function clamp(value: number, low: number, high: number) {
-  return Math.min(Math.max(value, low), high);
+  const offsets = loopOffsets(graph);
+  if (!offsets.length) return 0;
+  return offsets[offsets.length - 1] + SELF_CLEARANCE;
 }
 
 function createChangeRelationship({
@@ -518,47 +537,98 @@ function orderAngle(
   return normalizeAngle(theta - SIDE_START_ANGLE[direction]);
 }
 
+/** Which way each side faces, as the unit step a stub grows along. */
+const OUTWARD: Record<DirectionName, { x: number; y: number }> = {
+  [DirectionName.left]: { x: -1, y: 0 },
+  [DirectionName.right]: { x: 1, y: 0 },
+  [DirectionName.top]: { x: 0, y: -1 },
+  [DirectionName.bottom]: { x: 0, y: 1 },
+};
+
 /**
- * Chooses which side of each table the relationship leaves from: the nearest of
- * the sixteen side-midpoint pairs, DirectionNameList order breaking ties.
- * Obstacles are not consulted — routing past a table is the router's job.
+ * Whether the shortest stubs out of these two side midpoints face each other:
+ * each lies ahead of the other's side, which is what lets the router join them
+ * in one bend or two without turning back over either end's markers.
  */
-function getAndSetDirection(
+function stubsFace(
+  start: ObjectPoint,
+  startSide: DirectionName,
+  end: ObjectPoint,
+  endSide: DirectionName
+) {
+  if (startSide === endSide) return false;
+
+  const a = OUTWARD[startSide];
+  const b = OUTWARD[endSide];
+  const mx = start[startSide].x + a.x * MIN_STUB;
+  const my = start[startSide].y + a.y * MIN_STUB;
+  const lx = end[endSide].x + b.x * MIN_STUB;
+  const ly = end[endSide].y + b.y * MIN_STUB;
+
+  return (
+    (lx - mx) * a.x + (ly - my) * a.y >= 0 &&
+    (mx - lx) * b.x + (my - ly) * b.y >= 0
+  );
+}
+
+/**
+ * The nearest of the sixteen side-midpoint pairs that accept takes, the first
+ * in DirectionNameList order breaking a tie. With no test it starts from the
+ * two bottom sides; with one, from no pair, and it finds none if none passes.
+ */
+function nearestSides(
   start: ObjectPoint,
   end: ObjectPoint,
-  relationship: ChangeRelationship
-): DirectionTuple {
-  const direction: DirectionTuple = [
-    DirectionName.bottom,
-    DirectionName.bottom,
-  ];
-
-  let min = euclideanDistance(start.bottom, end.bottom);
-  relationship.start.x = start.bottom.x;
-  relationship.start.y = start.bottom.y;
-  relationship.end.x = end.bottom.x;
-  relationship.end.y = end.bottom.y;
-  relationship.start.direction = Direction.bottom;
-  relationship.end.direction = Direction.bottom;
+  accept?: (startSide: DirectionName, endSide: DirectionName) => boolean
+): DirectionTuple | null {
+  let nearest: DirectionTuple | null = accept
+    ? null
+    : [DirectionName.bottom, DirectionName.bottom];
+  let min = accept ? Infinity : euclideanDistance(start.bottom, end.bottom);
 
   for (const key of DirectionNameList) {
     for (const key2 of DirectionNameList) {
       const k = key as DirectionName;
       const k2 = key2 as DirectionName;
-      const temp = euclideanDistance(start[k], end[k2]);
-      if (min <= temp) continue;
+      const distance = euclideanDistance(start[k], end[k2]);
+      if (min <= distance) continue;
+      if (accept && !accept(k, k2)) continue;
 
-      min = temp;
-      direction[0] = k;
-      direction[1] = k2;
-      relationship.start.x = start[k].x;
-      relationship.start.y = start[k].y;
-      relationship.start.direction = directionNameToDirection[k];
-      relationship.end.x = end[k2].x;
-      relationship.end.y = end[k2].y;
-      relationship.end.direction = directionNameToDirection[k2];
+      min = distance;
+      nearest = [k, k2];
     }
   }
+
+  return nearest;
+}
+
+/**
+ * Chooses which side of each table the relationship leaves from, by the rule in
+ * this directory's AGENTS.md. Obstacles are not consulted: routing past a table
+ * is the router's job.
+ */
+function getAndSetDirection(
+  start: ObjectPoint,
+  end: ObjectPoint,
+  relationship: ChangeRelationship,
+  source: GeometrySource
+): DirectionTuple {
+  let direction = nearestSides(start, end) as DirectionTuple;
+  const [startSide, endSide] = direction;
+
+  if (source === 'document' && !stubsFace(start, startSide, end, endSide)) {
+    direction =
+      nearestSides(start, end, (k, k2) => stubsFace(start, k, end, k2)) ??
+      direction;
+  }
+
+  const [k, k2] = direction;
+  relationship.start.x = start[k].x;
+  relationship.start.y = start[k].y;
+  relationship.start.direction = directionNameToDirection[k];
+  relationship.end.x = end[k2].x;
+  relationship.end.y = end[k2].y;
+  relationship.end.direction = directionNameToDirection[k2];
 
   return direction;
 }
@@ -598,6 +668,22 @@ function placeSide(
       high -= reserve;
     } else if (direction === DirectionName.right) {
       low += reserve;
+    }
+  }
+
+  // A side the loops squeeze too short for its markers gives up the inset the
+  // reserve already clears, then the inset at its other end, and reaches no
+  // further than its own edge.
+  const needed = (entries.length - 1) * SQUEEZED_PITCH;
+  if (reserve && high - low < needed) {
+    const edgeLow = isX ? objectPoint.lt.x : objectPoint.lt.y;
+    const edgeHigh = isX ? objectPoint.rb.x : objectPoint.rb.y;
+    if (direction === DirectionName.right) {
+      low = Math.min(edgeLow + reserve, edgeHigh);
+      if (high - low < needed) high = edgeHigh;
+    } else if (direction === DirectionName.top) {
+      high = Math.max(edgeHigh - reserve, edgeLow);
+      if (high - low < needed) low = edgeLow;
     }
   }
   if (high < low) {

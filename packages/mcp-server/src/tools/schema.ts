@@ -1,5 +1,5 @@
 import { Schema } from 'effect';
-import { McpSchema } from 'effect/unstable/ai';
+import { McpSchema } from 'effect/ai';
 
 import type { ToolArg, ToolArgKind } from '@/tools/registry';
 
@@ -21,7 +21,7 @@ export function argKindSchema(kind: ToolArgKind): Schema.Top {
     case 'enum':
       return Schema.Literals(Object.keys(kind.values));
     case 'entityId':
-      return Schema.String;
+      return kind.orNone ? Schema.NullOr(Schema.String) : Schema.String;
     case 'entityIdList':
       return Schema.Array(Schema.String);
     case 'tablePositions':

@@ -102,13 +102,14 @@ const BROKEN = '{"doc": <<<<<<< HEAD';
 writeFileSync(join(vault, 'broken.erd'), BROKEN);
 writeFileSync(join(vault, 'untitled.erd'), '');
 // What the tab seed, the slow close, the outside conflict, the theme, the
-// coding agent and the keys work on; notes.md is no diagram and never listed.
+// welcome screen, the coding agent and the keys work on; notes.md is no diagram.
 for (const name of [
   'deferred.erd',
   'slow-close.erd',
   'conflict.erd',
   'theme-a.erd',
   'theme-b.erd',
+  'welcome.erd',
   'agent.erd',
   'closed.erd',
   'background.erd',
@@ -117,6 +118,15 @@ for (const name of [
   writeFileSync(join(vault, name), '');
 }
 writeFileSync(join(vault, 'notes.md'), '# notes');
+// No locks and no origin, as releases before both wrote it, so it opens locked:
+// the bytes are not the replica's, and a zoom or a scroll must not rewrite them.
+const VIEW_ONLY = JSON.stringify({
+  version: '3.0.0',
+  settings: { ignoreSaveSettings: 3, zoomLevel: 1 },
+  doc: { tableIds: [], relationshipIds: [], indexIds: [], memoIds: [] },
+  collections: {},
+});
+writeFileSync(join(vault, 'view-only.erd'), VIEW_ONLY);
 writeFileSync(
   join(userData, 'obsidian.json'),
   JSON.stringify({
@@ -162,18 +172,21 @@ async function waitFor(check, timeout, interval = 250) {
 
 const alive = () => app.exitCode === null && app.signalCode === null;
 
-/** Tables in a saved document, v3 or the v2 a .vuerd file holds until its first save. */
+/**
+ * Tables in a saved document, v3 or the v2 a .vuerd file holds until its first
+ * save; a v3 file leaves out a list that holds nothing.
+ */
 function tableCount(path) {
   const text = readFileSync(join(vault, path), 'utf8');
   if (!text) return 0;
   const json = JSON.parse(text);
-  return json.doc ? json.doc.tableIds.length : json.table.tables.length;
+  return json.table ? json.table.tables.length : (json.doc?.tableIds ?? []).length;
 }
 
 /** The table ids of a v3 document on disk. */
 function fileIds(path) {
   const text = readFileSync(join(vault, path), 'utf8');
-  return text ? JSON.parse(text).doc.tableIds : [];
+  return text ? (JSON.parse(text).doc.tableIds ?? []) : [];
 }
 
 const lockPath = pid => join(LOCK_DIR, `${pid}.json`);
@@ -328,7 +341,7 @@ async function openDiagram(page, path) {
           editor?.isConnected
           ? {
               title: view.getDisplayText(),
-              tables: JSON.parse(editor.value).doc.tableIds.length,
+              tables: (JSON.parse(editor.value).doc.tableIds ?? []).length,
             }
           : null;
       }, path),
@@ -358,7 +371,7 @@ const tabIds = (page, path) =>
         .map(leaf => {
           const editor = leaf.view.contentEl.querySelector('erd-editor');
           try {
-            return JSON.parse(editor.value).doc.tableIds;
+            return JSON.parse(editor.value).doc.tableIds ?? [];
           } catch {
             return null;
           }
@@ -453,6 +466,42 @@ async function themedAs(page, paths, theme, timeout = 3_000) {
     50
   );
   return { ok: Boolean(ok), shown: shown[0] };
+}
+
+/**
+ * The languages the run may give Obsidian, each with the one the editor shows
+ * for it; the plugin reads Obsidian's pt as European Portuguese, where the
+ * editor alone would read a bare pt as Brazilian.
+ */
+const OBSIDIAN_LANGUAGES = { pt: 'pt-PT', ja: 'ja-JP' };
+
+/** The lang each file's first tab carries on its editor's root, one file after the other. */
+async function shownLangs(page, paths) {
+  const langs = [];
+  for (const path of paths) {
+    langs.push(
+      await inEditor(
+        page,
+        path,
+        root => root.querySelector('[lang]')?.getAttribute('lang') ?? null
+      )
+    );
+  }
+  return langs;
+}
+
+/** Waits until the editor of every file shows the language. */
+async function langsAs(page, paths, lang, timeout = 3_000) {
+  let shown = [];
+  const ok = await waitFor(
+    async () => {
+      shown = await shownLangs(page, paths);
+      return shown.every(shownLang => shownLang === lang);
+    },
+    timeout,
+    100
+  );
+  return { ok: Boolean(ok), shown };
 }
 
 const obsidianDark = page =>
@@ -599,7 +648,9 @@ const editorValue = (page, path) =>
 function columnCounts(text) {
   if (!text) return [];
   const { doc, collections } = JSON.parse(text);
-  return doc.tableIds.map(id => collections.tableEntities[id].columnIds.length);
+  return (doc.tableIds ?? []).map(
+    id => collections.tableEntities[id].columnIds.length
+  );
 }
 
 /** The view type of the active leaf, which decides whose scope Obsidian asks about a key first. */
@@ -634,6 +685,37 @@ try {
   );
   console.log(
     `obsidian ${version} (${ASAR ? `from ${ASAR}` : `bundled with ${OBSIDIAN}`})`
+  );
+
+  // Obsidian reads its language once, as its window loads, so the run gives it
+  // one the system's own list lacks: only the plugin's getLanguage can bring it
+  // to the editor, which then never shows the language it would find alone.
+  const obsidianLanguage = await page.evaluate(languages => {
+    const own = navigator.languages.map(tag => tag.split('-')[0]);
+    const language =
+      languages.find(code => !own.includes(code)) ?? languages[0];
+    localStorage.setItem('language', language);
+    return language;
+  }, Object.keys(OBSIDIAN_LANGUAGES));
+  await detach();
+  await rawEval(
+    "setTimeout(() => window.app.commands.executeCommandById('app:reload'), 100); 'reloading'"
+  );
+  await sleep(1_500);
+  page = await connect();
+  let obsidianShown = null;
+  const obsidianTook = await waitFor(
+    async () => {
+      obsidianShown = await page.evaluate(() => window.i18next?.language);
+      return obsidianShown === obsidianLanguage;
+    },
+    5_000,
+    100
+  );
+  step(
+    "Obsidian shows the language the run gave it, which the system's lacks",
+    Boolean(obsidianTook),
+    JSON.stringify({ obsidianLanguage, obsidianShown })
   );
 
   await page.evaluate(async () => {
@@ -749,8 +831,10 @@ try {
     page.evaluate(() =>
       window.__split.map(
         leaf =>
-          JSON.parse(leaf.view.contentEl.querySelector('erd-editor').value).doc
-            .tableIds.length
+          (
+            JSON.parse(leaf.view.contentEl.querySelector('erd-editor').value)
+              .doc.tableIds ?? []
+          ).length
       )
     );
   const pressIn = async index => {
@@ -1288,6 +1372,80 @@ try {
     JSON.stringify({ searchIn, searchBefore, searchOpened, searchClosed })
   );
 
+  // The Explorer stands aside on an editor too narrow for it and its least
+  // canvas, 520 px, so the window widens first where it would.
+  const editorWidth = () =>
+    page.evaluate(
+      path =>
+        window.app.workspace
+          .getLeavesOfType('erd-editor')
+          .find(leaf => leaf.view.file?.path === path)
+          ?.view.contentEl.querySelector('erd-editor')
+          ?.getBoundingClientRect().width ?? 0,
+      'keys.erd'
+    );
+  const narrowBy = 520 - (await editorWidth());
+  if (narrowBy > 0) {
+    await page.evaluate(extra => {
+      const win = window.require('@electron/remote').getCurrentWindow();
+      const [width, height] = win.getSize();
+      win.setSize(width + extra, height);
+    }, Math.ceil(narrowBy) + 40);
+    await waitFor(async () => (await editorWidth()) >= 520, 2_000, 100);
+  }
+  const explorerState = () =>
+    inEditor(page, 'keys.erd', root => ({
+      open: Boolean(root.querySelector('.explorer')),
+      inField: root.activeElement?.classList.contains('find-input') ?? false,
+    }));
+  await focusDiagram(page, 'keys.erd');
+  const findIn = await activeViewType(page);
+  const findWidth = await editorWidth();
+  const findBefore = await explorerState();
+  await page.keyboard.press('ControlOrMeta+KeyF');
+  const findOpened = await waitFor(
+    async () => {
+      const state = await explorerState();
+      return state?.open && state.inField;
+    },
+    2_000,
+    100
+  );
+  await page.keyboard.press('Escape');
+  const findLeft = await waitFor(
+    async () => {
+      const state = await explorerState();
+      return state?.open && !state.inField;
+    },
+    2_000,
+    100
+  );
+  await clickInEditor(page, 'keys.erd', root =>
+    root.querySelector('.toolbar-explorer')
+  );
+  const findClosed = await waitFor(
+    async () => (await explorerState())?.open === false,
+    2_000,
+    100
+  );
+  step(
+    "Mod+F, Obsidian's search current file, opens the Explorer on its search in the ERD tab, Escape leaves it open, and its button closes it",
+    findIn === 'erd-editor' &&
+      findWidth >= 520 &&
+      findBefore?.open === false &&
+      Boolean(findOpened) &&
+      Boolean(findLeft) &&
+      Boolean(findClosed),
+    JSON.stringify({
+      findIn,
+      findWidth,
+      findBefore,
+      findOpened,
+      findLeft,
+      findClosed,
+    })
+  );
+
   // Nothing waits to be saved, so only Mod+S can write the edit this early.
   await sleep(AUTOSAVE_MS + 500);
   const tablesBeforeSave = tableCount('keys.erd');
@@ -1425,9 +1583,9 @@ try {
     })
   );
 
-  // The builder of one diagram: a color keeps auto, the other appearance replaces it.
+  // The builder of one diagram: a color keeps auto, the other appearance replaces it, System is auto.
   const builderOpened = await clickInEditor(page, 'theme-a.erd', root =>
-    root.querySelector('div[title="Theme"]')
+    root.querySelector('.toolbar-theme')
   );
   await sleep(300);
   const accentPicked = await clickInEditor(
@@ -1445,16 +1603,20 @@ try {
     appearance: 'auto',
     accentColor: 'grass',
   });
-  const otherLabel = firstDark ? 'Light' : 'Dark';
-  const appearancePicked = await clickInEditor(
-    page,
-    'theme-a.erd',
-    (root, label) =>
-      [...root.querySelectorAll('.theme-builder span')].find(
-        span => span.textContent === label
-      )?.parentElement,
-    otherLabel
-  );
+  // By place, as every label is in the editor's language: past the header's
+  // close button, the builder's icons are those of its appearance buttons,
+  // System, Light and Dark in turn.
+  const pickAppearance = label =>
+    clickInEditor(
+      page,
+      'theme-a.erd',
+      (root, index) =>
+        [...root.querySelectorAll('.theme-builder .icon')].filter(
+          icon => !icon.closest('.theme-builder-close')
+        )[index]?.parentElement,
+      ['System', 'Light', 'Dark'].indexOf(label)
+    );
+  const appearancePicked = await pickAppearance(firstDark ? 'Light' : 'Dark');
   const appearanceShown = await themedAs(page, ['theme-b.erd'], {
     grayColor: 'sand',
     accentColor: 'grass',
@@ -1462,6 +1624,17 @@ try {
   });
   const savedAppearance = await savedAs({
     appearance: appearanceOf(!firstDark),
+    grayColor: 'sand',
+    accentColor: 'grass',
+  });
+  const systemPicked = await pickAppearance('System');
+  const systemShown = await themedAs(page, ['theme-b.erd'], {
+    grayColor: 'sand',
+    accentColor: 'grass',
+    appearance: appearanceOf(firstDark),
+  });
+  const savedSystem = await savedAs({
+    appearance: 'auto',
     grayColor: 'sand',
     accentColor: 'grass',
   });
@@ -1473,8 +1646,18 @@ try {
       savedAccent.ok &&
       appearancePicked &&
       appearanceShown.ok &&
-      savedAppearance.ok,
-    JSON.stringify({ grassShown, savedAccent, appearanceShown, savedAppearance })
+      savedAppearance.ok &&
+      systemPicked &&
+      systemShown.ok &&
+      savedSystem.ok,
+    JSON.stringify({
+      grassShown,
+      savedAccent,
+      appearanceShown,
+      savedAppearance,
+      systemShown,
+      savedSystem,
+    })
   );
   // Obsidian reads data.json again when it changes on disk, as a sync changes it.
   const synced = {
@@ -1502,6 +1685,65 @@ try {
     fromSync.ok && JSON.stringify(syncedSettings) === JSON.stringify(synced),
     JSON.stringify({ fromSync, syncedSettings })
   );
+
+  // ---- The display language, on the root of each editor, and the welcome screen ----
+  // The language the run gave Obsidian, which the editor finds through the plugin alone.
+  const defaultLang = OBSIDIAN_LANGUAGES[obsidianLanguage];
+  const langByDefault = await langsAs(page, themePaths, defaultLang);
+  step(
+    "by default every diagram shows Obsidian's language, not the system's",
+    (pluginData()?.locale ?? 'auto') === 'auto' && langByDefault.ok,
+    JSON.stringify({ obsidianLanguage, langByDefault })
+  );
+
+  const pickedLang = 'de-DE';
+  const shownLanguage = await pickInSettings(page, {
+    'Display language': pickedLang,
+  });
+  const langFromSettings = await langsAs(page, themePaths, pickedLang);
+  const savedLang = await savedAs({ locale: pickedLang });
+  await pickInSettings(page, { 'Display language': 'auto' });
+  const langAutoAgain = await langsAs(page, themePaths, defaultLang);
+  const savedLangAuto = await savedAs({ locale: 'auto' });
+  step(
+    "the settings tab's Display language changes every open diagram at once and saves to data.json; Auto follows Obsidian again",
+    shownLanguage['Display language'] === 'auto' &&
+      langFromSettings.ok &&
+      savedLang.ok &&
+      langAutoAgain.ok &&
+      savedLangAuto.ok,
+    JSON.stringify({
+      shownLanguage,
+      langFromSettings,
+      savedLang,
+      langAutoAgain,
+      savedLangAuto,
+    })
+  );
+
+  await openDiagram(page, 'welcome.erd');
+  const welcomeShown = () =>
+    inEditor(page, 'welcome.erd', root =>
+      Boolean(root.querySelector('.welcome-screen'))
+    );
+  const welcomeOpened = await waitFor(welcomeShown, 3_000, 100);
+  await pressAddTableIn(page, 'welcome.erd');
+  const welcomeGone = await waitFor(
+    async () => (await welcomeShown()) === false,
+    3_000,
+    100
+  );
+  step(
+    'a new empty diagram shows the welcome screen, and Alt+N takes it away',
+    Boolean(welcomeOpened) && Boolean(welcomeGone),
+    JSON.stringify({
+      welcomeOpened,
+      welcomeGone,
+      tables: JSON.parse((await editorValue(page, 'welcome.erd')) ?? '{}').doc
+        ?.tableIds?.length,
+    })
+  );
+  await closeDiagram(page, 'welcome.erd');
   await page.evaluate(
     theme => window.app.changeTheme(theme),
     obsidianTheme ?? 'system'
@@ -1522,10 +1764,10 @@ try {
     return lock?.hub && isSocket(lock.pipe) ? lock : null;
   }, 10_000);
   step(
-    'lock: ide obsidian, hub on, protocol 1, the manifest version, a token',
+    'lock: ide obsidian, hub on, protocol 2, the manifest version, a token',
     lock?.ide === 'obsidian' &&
       lock.hub === true &&
-      lock.protocolVersion === 1 &&
+      lock.protocolVersion === 2 &&
       lock.version === manifest.version &&
       lock.token?.length > 8,
     JSON.stringify(lock && { ...lock, token: `${lock.token.slice(0, 8)}...` })
@@ -1863,9 +2105,10 @@ try {
       .map(leaf => ({
         path: leaf.view.file?.path,
         unsaved: leaf.view.hasUnsavedValue?.(),
-        tables: JSON.parse(
-          leaf.view.contentEl.querySelector('erd-editor').value
-        ).doc.tableIds.length,
+        tables: (
+          JSON.parse(leaf.view.contentEl.querySelector('erd-editor').value).doc
+            .tableIds ?? []
+        ).length,
       }));
   });
   const tokenBeforeReload = readLock(rendererPid)?.token;
@@ -1925,6 +2168,54 @@ try {
     reloadAdded.text.slice(0, 300)
   );
 
+  // The timed save and the close both write only a value the replica marked
+  // changed, so a zoom and a scroll leave view-only.erd's bytes as they were.
+  await openDiagram(page, 'view-only.erd');
+  await sleep(REPLICA_SETTLE_MS);
+  // Zoom in sits right after the zoom readout; its title is in the editor's language.
+  const zoomIn = root => root.querySelector('.zoom-level')?.nextElementSibling;
+  const zoomed =
+    (await clickInEditor(page, 'view-only.erd', zoomIn)) &&
+    (await clickInEditor(page, 'view-only.erd', zoomIn));
+  const zoomShown = await inEditor(
+    page,
+    'view-only.erd',
+    root => root.querySelector('.zoom-level')?.textContent ?? null
+  );
+  const viewBox = await page.evaluate(() => {
+    const { x, y, width, height } = window.app.workspace
+      .getMostRecentLeaf()
+      .view.contentEl.querySelector('erd-editor')
+      .getBoundingClientRect();
+    return { x, y, width, height };
+  });
+  // Left of the welcome screen's menu, which this empty diagram shows at its
+  // centre and which takes the pointer, so the wheel reaches the canvas.
+  await page.mouse.move(viewBox.x + 60, viewBox.y + viewBox.height / 2);
+  for (let i = 0; i < 3; i++) {
+    await page.mouse.wheel(0, 240);
+    await sleep(50);
+  }
+  await sleep(REPLICA_SETTLE_MS + AUTOSAVE_MS + 500);
+  const viewOnlySaved = readFileSync(real('view-only.erd'), 'utf8');
+  await closeDiagram(page, 'view-only.erd');
+  await sleep(1_000);
+  const viewOnlyClosed = readFileSync(real('view-only.erd'), 'utf8');
+  step(
+    'a zoom and a scroll under the viewport lock leave a file an older release wrote as it was, saved and closed',
+    zoomed &&
+      Boolean(zoomShown) &&
+      zoomShown !== '100%' &&
+      viewOnlySaved === VIEW_ONLY &&
+      viewOnlyClosed === VIEW_ONLY,
+    JSON.stringify({
+      zoomed,
+      zoomShown,
+      saved: viewOnlySaved.slice(0, 120),
+      closed: viewOnlyClosed.slice(0, 120),
+    })
+  );
+
   step('no page errors', errors.length === 0, errors.join(' | '));
 
   if (!KEEP) {
@@ -1952,7 +2243,9 @@ try {
             try {
               const full = vault.adapter.getFullPath(path);
               const text = fs.readFileSync(full, 'utf8');
-              return text ? JSON.parse(text).doc.tableIds.length : 0;
+              return text
+                ? (JSON.parse(text).doc.tableIds ?? []).length
+                : 0;
             } catch {
               return null;
             }

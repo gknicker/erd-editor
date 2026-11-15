@@ -5,6 +5,7 @@
 // reaches and a parent that filtered would have to route every connector again.
 
 import { type DOMTemplateLiterals, useProvider } from '@dineug/r-html';
+import { whenDrawn } from '@dineug/r-html-konva';
 import type { Container } from 'konva/lib/Container';
 import { afterEach, describe, expect, it } from 'vite-plus/test';
 
@@ -23,19 +24,28 @@ import {
   viewSetLayoutAction,
 } from '@/engine/modules/editor/view.actions';
 import { addRelationshipAction } from '@/engine/modules/relationship/atom.actions';
-import { addTableAction } from '@/engine/modules/table/atom.actions';
+import {
+  addTableAction,
+  moveToTableAction,
+} from '@/engine/modules/table/atom.actions';
 import { Relationship as RelationshipType_ } from '@/internal-types';
-import { whenDrawn } from '@/konva/batchDraw';
 import { renderScene } from '@/konva/scene/renderScene';
 import { type CullingRect } from '@/konva/scene/viewport';
 import { createRelationship } from '@/utils/collection/relationship.entity';
+import {
+  holdRouteRedraws,
+  releaseRouteRedraws,
+} from '@/utils/draw-relationship';
 import type { GeometrySource } from '@/utils/draw-relationship/geometrySource';
 import { relationshipSort } from '@/utils/draw-relationship/sort';
 
 const THEME = createTestTheme();
 
-/** A screen at the origin, which the far relationship below sits well outside. */
-const VIEWPORT: CullingRect = { x: 0, y: 0, width: 100, height: 100 };
+/**
+ * A screen over the near relationship's reach but not its anchors, which the far
+ * relationship below sits well outside.
+ */
+const VIEWPORT: CullingRect = { x: 0, y: 40, width: 100, height: 100 };
 
 const makeRelationship = (
   id: string,
@@ -211,7 +221,7 @@ describe('RelationshipGroup', () => {
   it('keeps a relationship the viewport only straddles', async () => {
     const group = await mountGroup({
       relationships: [near(), far()],
-      viewport: { x: 450, y: 350, width: 100, height: 100 },
+      viewport: { x: 410, y: 310, width: 100, height: 100 },
     });
 
     expect(names(group)).toEqual(['relationship near']);
@@ -308,5 +318,62 @@ describe('RelationshipGroup', () => {
     const group = await mountGroup({ relationships: [near()] });
 
     expect(routeOf(group, 'near').getAttr('stroke')).toBe(THEME.keyFK);
+  });
+});
+
+describe('a connector whose route alone changes', () => {
+  /** t1 and t2 joined by one straight run along y 15, and t3 well below it, with room to go round. */
+  async function createRoutedApp() {
+    const app = createTestAppContext();
+    const { store } = app;
+    store.dispatchSync(
+      addTableAction({ id: 't1', ui: { x: 0, y: 0, zIndex: 1 } }),
+      addTableAction({ id: 't2', ui: { x: 1200, y: 0, zIndex: 2 } }),
+      addTableAction({ id: 't3', ui: { x: 600, y: 600, zIndex: 3 } }),
+      addRelationshipAction({
+        id: 'r1',
+        relationshipType: RelationshipType.ZeroOne,
+        start: { tableId: 't1', columnIds: [] },
+        end: { tableId: 't2', columnIds: [] },
+      })
+    );
+    await tick(50);
+    const relationship = store.state.collections.relationshipEntities.r1;
+    const group = await mountGroup({ relationships: [relationship], app });
+    return { app, group, relationship };
+  }
+
+  const drawn = (group: Container) =>
+    routeOf(group, 'r1').getAttr('data') as string;
+
+  it('redraws the route a table moved onto it sends around, its anchors where they were', async () => {
+    const { app, group, relationship } = await createRoutedApp();
+    const straight = drawn(group);
+    const start = { ...relationship.start };
+
+    app.store.dispatchSync(moveToTableAction({ id: 't3', x: 600, y: 0 }));
+    await tick(50);
+    await flush();
+    await whenDrawn();
+
+    expect(relationship.start).toMatchObject(start);
+    expect(drawn(group)).not.toBe(straight);
+  });
+
+  it('keeps the route it drew while a drag holds the store, and redraws it once the drag lets go', async () => {
+    const { app, group } = await createRoutedApp();
+    const straight = drawn(group);
+
+    holdRouteRedraws(app.store.state);
+    app.store.dispatchSync(moveToTableAction({ id: 't3', x: 600, y: 0 }));
+    await tick(50);
+    await flush();
+    await whenDrawn();
+    expect(drawn(group)).toBe(straight);
+
+    releaseRouteRedraws(app.store.state);
+    await flush();
+    await whenDrawn();
+    expect(drawn(group)).not.toBe(straight);
   });
 });

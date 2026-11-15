@@ -18,7 +18,7 @@ import { bHas, createPeerStore } from '@dineug/erd-editor/peer.js';
 import { HUB_PROTOCOL_VERSION, pipePath } from '@dineug/erd-editor-agent-hub';
 import { SchemaV3Constants } from '@dineug/erd-editor-schema';
 import * as NodePath from '@effect/platform-node/NodePath';
-import { Effect, Layer } from 'effect';
+import { Effect, FileSystem, Layer } from 'effect';
 import {
   afterEach,
   beforeEach,
@@ -36,7 +36,7 @@ import {
 import { connectMcp, type McpHarness, settle } from '@/__test-utils__/mcp';
 import { fsError } from '@/__test-utils__/memoryFs';
 import { createMemoryHost, type MemoryHost } from '@/__test-utils__/memoryHost';
-import { PRIVATE_MODE } from '@/__test-utils__/platform';
+import { PRIVATE_MODE, SPAWN_TIMEOUT } from '@/__test-utils__/platform';
 import * as NodeFs from '@/io/fileSystem';
 import * as ProcessInfo from '@/io/process';
 import type { HeadlessSession } from '@/session/headless';
@@ -50,7 +50,7 @@ import { runTool } from '@/tools/run';
 
 const DOCUMENT = '/work/solo.erd.json';
 
-const { ColumnOption, ColumnUIKey } = SchemaV3Constants;
+const { ColumnOption, RelationshipType } = SchemaV3Constants;
 
 let io: MemoryHost;
 let mcp: McpHarness;
@@ -171,7 +171,7 @@ describe('headless: no lock, the file itself (AC-M2)', () => {
     const [tableId] = (await mcp.ok('erd_add_table', { path: DOCUMENT }))
       .createdIds;
     await mcp.ok('erd_undo', { path: DOCUMENT });
-    expect(JSON.parse(io.read(DOCUMENT)).doc.tableIds).toEqual([]);
+    expect(JSON.parse(io.read(DOCUMENT)).doc.tableIds ?? []).toEqual([]);
 
     await mcp.ok('erd_redo', { path: DOCUMENT });
     expect(JSON.parse(io.read(DOCUMENT)).doc.tableIds).toEqual([tableId]);
@@ -300,7 +300,7 @@ describe('headless: no lock, the file itself (AC-M2)', () => {
     const memo = await mcp.ok('erd_add_memo', { path: DOCUMENT });
     expect(memo.notes).toEqual([RELOADED_NOTE]);
     const document = JSON.parse(io.read(DOCUMENT));
-    expect(document.doc.tableIds).toEqual([]);
+    expect(document.doc.tableIds ?? []).toEqual([]);
     expect(document.doc.memoIds).toEqual(memo.createdIds);
   });
 });
@@ -309,13 +309,6 @@ describe('headless: what the engine adds after an edit reaches the file', () => 
   const onDisk = () => JSON.parse(io.read(DOCUMENT));
   const columnOnDisk = (columnId: string) =>
     onDisk().collections.tableColumnEntities[columnId];
-  const isForeignKey = (columnId: string) =>
-    bHas(columnOnDisk(columnId).ui.keys, ColumnUIKey.foreignKey);
-  /** Each relationship's two ends, where the relationship sort placed them. */
-  const placements = (document: any) =>
-    Object.values<any>(document.collections.relationshipEntities).map(
-      ({ id, start, end }) => ({ id, start, end })
-    );
 
   /** A table with one column, both made by the tools. */
   async function tableWithColumn() {
@@ -346,32 +339,45 @@ describe('headless: what the engine adds after an edit reaches the file', () => 
     expect(columnOnDisk(columnId).options).toBe(ColumnOption.notNull);
   });
 
-  it('writes the foreign-key mark and the placement a link brings, and the undo takes the mark off', async () => {
+  it('writes a link as erd_read json gives it, none of the marks, flags or anchors a load derives again, and the undo takes it out', async () => {
     const start = await tableWithColumn();
     const end = await tableWithColumn();
 
-    await mcp.ok('erd_link_columns', {
-      path: DOCUMENT,
-      startTableId: start.tableId,
-      startColumnIds: [start.columnId],
-      endTableId: end.tableId,
-      endColumnIds: [end.columnId],
-      relationshipType: 'ZeroN',
+    const [relationshipId] = (
+      await mcp.ok('erd_link_columns', {
+        path: DOCUMENT,
+        startTableId: start.tableId,
+        startColumnIds: [start.columnId],
+        endTableId: end.tableId,
+        endColumnIds: [end.columnId],
+        relationshipType: 'ZeroN',
+      })
+    ).createdIds;
+    const link = onDisk().collections.relationshipEntities[relationshipId];
+    expect(Object.keys(link)).toEqual([
+      'id',
+      'relationshipType',
+      'onDelete',
+      'onUpdate',
+      'start',
+      'end',
+    ]);
+    expect(link).toMatchObject({
+      relationshipType: RelationshipType.ZeroN,
+      start: { tableId: start.tableId, columnIds: [start.columnId] },
+      end: { tableId: end.tableId, columnIds: [end.columnId] },
     });
-    expect(isForeignKey(end.columnId)).toBe(true);
-    const session = JSON.parse(
-      await mcp.text('erd_read', { path: DOCUMENT, format: 'json' })
+    expect(Object.keys(link.start)).toEqual(['tableId', 'columnIds']);
+    expect(columnOnDisk(end.columnId)).not.toHaveProperty('ui');
+    expect(onDisk()).toEqual(
+      JSON.parse(await mcp.text('erd_read', { path: DOCUMENT, format: 'json' }))
     );
-    // The placement alone: identification and startRelationshipType follow the
-    // session's load too, behind a 10 ms throttle, so a link inside that window
-    // gets them changed in the session after its write.
-    expect(placements(onDisk())).toEqual(placements(session));
 
     await mcp.ok('erd_undo', { path: DOCUMENT });
-    expect(isForeignKey(end.columnId)).toBe(false);
+    expect(onDisk().doc.relationshipIds ?? []).toEqual([]);
   });
 
-  it('writes the key columns a relationship adds, not-null and marked, and the undo takes them out', async () => {
+  it('writes the key columns a relationship adds, the parent key not-null, and the undo takes them out', async () => {
     const [startTableId] = (await mcp.ok('erd_add_table', { path: DOCUMENT }))
       .createdIds;
     const [endTableId] = (await mcp.ok('erd_add_table', { path: DOCUMENT }))
@@ -390,7 +396,7 @@ describe('headless: what the engine adds after an edit reaches the file', () => 
     expect(columnOnDisk(primaryKey).options).toBe(
       ColumnOption.primaryKey | ColumnOption.notNull
     );
-    expect(isForeignKey(foreignKey)).toBe(true);
+    expect(columnOnDisk(foreignKey)).toMatchObject({ tableId: endTableId });
 
     await mcp.ok('erd_undo', { path: DOCUMENT });
     const undone = onDisk();
@@ -498,7 +504,7 @@ describe('headless compare-and-swap (AC-P14)', () => {
 
     expect(memo.notes).toEqual([RELOADED_NOTE]);
     const document = JSON.parse(io.read(DOCUMENT));
-    expect(document.doc.tableIds).toEqual([]);
+    expect(document.doc.tableIds ?? []).toEqual([]);
     expect(document.doc.memoIds).toEqual([
       ...JSON.parse(theirs).doc.memoIds,
       ...memo.createdIds,
@@ -851,7 +857,7 @@ describe('headless on Windows: a document another program holds open', () => {
     // The in-place write's stat is the baseline, so its own write is no change.
     const undone = await winMcp.ok('erd_undo', { path: DOCUMENT });
     expect(undone).not.toHaveProperty('notes');
-    expect(JSON.parse(win.read(DOCUMENT)).doc.tableIds).toEqual([]);
+    expect(JSON.parse(win.read(DOCUMENT)).doc.tableIds ?? []).toEqual([]);
   });
 
   it('retries an in-place write another program holds, as it does a rename', async () => {
@@ -872,7 +878,9 @@ describe('headless on Windows: a document another program holds open', () => {
   });
 });
 
-describe('headless on a real file system', () => {
+// On Windows each write here runs icacls, which a hosted runner can hold for
+// seconds, so these run it to its end within SPAWN_TIMEOUT.
+describe('headless on a real file system', { timeout: SPAWN_TIMEOUT }, () => {
   let dir: string;
 
   beforeEach(async () => {
@@ -883,7 +891,24 @@ describe('headless on a real file system', () => {
     await rm(dir, { recursive: true, force: true });
   });
 
-  const node = Layer.mergeAll(NodeFs.layer, NodePath.layer, ProcessInfo.layer);
+  const unbounded = Layer.effect(
+    NodeFs.FileAccess,
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const stats = yield* NodeFs.FileStats;
+      return NodeFs.makeFileAccess(fs, stats, {
+        platform: process.platform,
+        icacls: NodeFs.runProgram(NodeFs.ICACLS, 0),
+      });
+    })
+  ).pipe(Layer.provide(NodeFs.layer));
+  // The later layer's FileAccess wins.
+  const node = Layer.mergeAll(
+    NodeFs.layer,
+    NodePath.layer,
+    ProcessInfo.layer,
+    unbounded
+  );
   const onNode = <A, E>(
     effect: Effect.Effect<A, E, Layer.Success<typeof node>>
   ) => Effect.runPromise(Effect.provide(effect, node));
@@ -948,7 +973,9 @@ describe('headless on a real file system', () => {
       result: { label: 'erd_add_table' },
       notes: [],
     });
-    expect(JSON.parse(await readFile(path, 'utf8')).doc.tableIds).toEqual([]);
+    expect(JSON.parse(await readFile(path, 'utf8')).doc.tableIds ?? []).toEqual(
+      []
+    );
     await onNode(session.close);
   });
 

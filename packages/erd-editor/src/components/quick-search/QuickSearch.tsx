@@ -5,11 +5,14 @@ import {
   observable,
   onMounted,
   ref,
+  repeat,
+  watch,
 } from '@dineug/r-html';
 import { isEmpty } from 'es-toolkit/compat';
 import { filter } from 'rxjs';
 
-import { useAppContext } from '@/components/appContext';
+import { type AppContext, useAppContext } from '@/components/appContext';
+import { useI18n } from '@/components/localeContext';
 import HighlightedText from '@/components/primitives/highlighted-text/HighlightedText';
 import Kbd from '@/components/primitives/kbd/Kbd';
 import TextInput from '@/components/primitives/text-input/TextInput';
@@ -17,15 +20,46 @@ import { Open } from '@/constants/open';
 import { changeOpenMapAction } from '@/engine/modules/editor/atom.actions';
 import { isEditingText } from '@/engine/modules/editor/state';
 import { useUnmounted } from '@/hooks/useUnmounted';
+import type { I18n } from '@/i18n/translate';
 import { arrayHas } from '@/utils/arrayHas';
 import { lastCursorFocus } from '@/utils/focus';
 import { focusEvent } from '@/utils/internalEvents';
-import { KeyBindingName } from '@/utils/keyboard-shortcut';
+import { isComposing, KeyBindingName } from '@/utils/keyboard-shortcut';
+import {
+  offsetToShow,
+  type VirtualRange,
+  visibleRange,
+} from '@/utils/virtualRange';
 
-import { Action, createScopeActions, searchActions } from './actions';
+import {
+  type Action,
+  type PalettePreferences,
+  searchActions,
+} from './documentSearch';
+import { clearHangulForms, findPaletteChunks } from './hangul';
+import { PALETTE_ROW_HEIGHT, paletteListHeight } from './paletteList';
+import {
+  PALETTE_PREFIXES,
+  PaletteQuery,
+  parsePaletteQuery,
+  scopeLabel,
+} from './paletteQuery';
 import * as styles from './QuickSearch.styles';
+import { paletteRows, scopeBase } from './scopedActions';
 
-export type QuickSearchProps = {};
+/** What builds the palette's top level in the language shown, with the options of the pickers the element offers. */
+export type PaletteTopLevel = (
+  app: AppContext,
+  i18n: I18n,
+  preferences: PalettePreferences
+) => Action[];
+
+export type QuickSearchProps = PalettePreferences & {
+  /** The rows the palette opens on, which its host decides: the editor hands in its commands and table jumps. */
+  topLevel: PaletteTopLevel;
+  /** Whether the host is readonly, which the rows it builds follow, so a turn builds the level shown again. */
+  readonly?: boolean;
+};
 
 const hasAutocompleteKey = arrayHas([
   'ArrowUp',
@@ -37,21 +71,88 @@ const hasAutocompleteKey = arrayHas([
 
 const QuickSearch: FC<QuickSearchProps> = (props, ctx) => {
   const app = useAppContext(ctx);
+  const i18n = useI18n(ctx);
   const { addUnsubscribe } = useUnmounted();
   const root = createRef<HTMLDivElement>();
+  const list = createRef<HTMLDivElement>();
+  // Only a new range renders the list: a scroll inside the overscan changes
+  // nothing drawn, so the offset itself stays unobserved, as in the tree.
+  const range = observable<VirtualRange>({ first: 0, last: -1 });
+  const scroll = { top: 0 };
 
   const state = observable({
     keyword: '',
-    prevActions: [] as Action[],
-    actions: [] as Action[],
+    /** Every row of the level shown, the top level or a submenu, which each keystroke searches afresh. */
+    level: [] as Action[],
+    rows: [] as Action[],
+    submenu: false,
+    /** The id of the top-level row whose submenu is shown, so a rebuild finds it again wherever it now sits, or not at all. */
+    parent: undefined as Action['id'],
+    /** Whether the search with no prefix finds no command of the level. */
+    missed: false,
     index: -1,
   });
 
-  const getActions = () => {
-    return state.actions.filter(action =>
-      action.filter ? action.filter(app.value) : true
+  const byFilter = (actions: Action[]) =>
+    actions.filter(action => (action.filter ? action.filter(app.value) : true));
+
+  const isOpen = () =>
+    Boolean(app.value.store.state.editor.openMap[Open.search]);
+
+  /** The top level its host builds in the language shown, handed the options of the pickers the element offers. */
+  const createTopLevel = () =>
+    props.topLevel(app.value, i18n.value, {
+      appearance: props.appearance,
+      locale: props.locale,
+    });
+
+  /** What the list shows: the level's commands or their fuzzy hits, at the top level the prefixes offered below them, or a scope's rows. */
+  const getActions = () => byFilter(state.rows);
+
+  const rangeOf = (count: number) =>
+    visibleRange(
+      count,
+      scroll.top,
+      paletteListHeight(count),
+      PALETTE_ROW_HEIGHT
     );
+
+  const syncRange = () => {
+    const { first, last } = rangeOf(getActions().length);
+    if (first !== range.first) range.first = first;
+    if (last !== range.last) range.last = last;
   };
+
+  /** Scrolls the list to an offset, read back as the browser clamps it. */
+  const scrollListTo = (top: number) => {
+    const $list = list.value;
+    scroll.top = top;
+    if ($list) {
+      $list.scrollTop = top;
+      scroll.top = $list.scrollTop;
+    }
+    syncRange();
+  };
+
+  const handleScroll = () => {
+    const $list = list.value;
+    if (!$list || $list.scrollTop === scroll.top) return;
+    scroll.top = $list.scrollTop;
+    syncRange();
+  };
+
+  const setLevel = (actions: Action[]) => {
+    state.level = actions;
+    state.rows = scopeBase(actions, null);
+    state.missed = false;
+    scrollListTo(0);
+  };
+
+  /** What is typed, read for a prefix at the top level only; a submenu filters its own rows. */
+  const readQuery = (value: string): PaletteQuery =>
+    state.submenu
+      ? { scope: null, keyword: value.trim(), table: null }
+      : parsePaletteQuery(value);
 
   const clearKeyword = () => {
     state.keyword = '';
@@ -59,19 +160,106 @@ const QuickSearch: FC<QuickSearchProps> = (props, ctx) => {
   };
 
   const setActions = (value: string) => {
-    const newValue = value.trim();
+    const query = readQuery(value);
+    const base = scopeBase(state.level, query.scope);
+    const noKeyword = isEmpty(query.keyword);
+    // Every keystroke searches the level's whole list, as VS Code's palette
+    // does, never the last hits: a word deleted or typed anew finds afresh.
+    const found = noKeyword
+      ? base
+      : searchActions(byFilter(base), query.keyword);
 
     state.index = -1;
-    state.actions = isEmpty(newValue)
-      ? state.prevActions
-      : searchActions(getActions(), newValue);
+    // Rows read from the document are looked up only at the top level.
+    state.rows = state.submenu
+      ? found
+      : paletteRows(app.value, found, query, i18n.value);
+    state.missed =
+      !state.submenu && query.scope === null && !noKeyword && !found.length;
+    // A new list starts at its top, as the keyboard's row does.
+    scrollListTo(0);
   };
 
+  /** Types a prefix for the reader, as a help row or a hint does, and leaves the caret after it. */
+  const insertText = (text: string) => {
+    state.keyword = text;
+    setActions(text);
+
+    nextTick(() => {
+      const input = root.value?.querySelector('input');
+      input && lastCursorFocus(input);
+    });
+  };
+
+  /** The words a row lights up: the keyword as typed, or without its prefix, and a column search's table part. */
+  const getSearchWords = ({
+    scope,
+    keyword,
+    table,
+  }: PaletteQuery): string[] => {
+    if (!scope) return [state.keyword];
+    return table ? [keyword, table] : [keyword];
+  };
+
+  /** How much of the list shows: its height for so many rows, or less where a short host shrinks it. */
+  const shownHeight = (count: number) =>
+    Math.min(paletteListHeight(count), list.value?.clientHeight || Infinity);
+
+  /** Brings the keyboard's row into view once the list holds it, drawn or not. */
   const scrollIntoView = () => {
     nextTick(() => {
-      root.value?.querySelector('.selected')?.scrollIntoView({
-        block: 'nearest',
-      });
+      const count = getActions().length;
+      if (state.index < 0 || state.index >= count) return;
+      scrollListTo(
+        offsetToShow(
+          state.index,
+          scroll.top,
+          shownHeight(count),
+          PALETTE_ROW_HEIGHT
+        )
+      );
+    });
+  };
+
+  /** Stands the keyboard on a submenu's option in force, as the locale picker does, scrolled into view. */
+  const selectChecked = () => {
+    state.index = getActions().findIndex(action => action.checked);
+    if (state.index !== -1) scrollIntoView();
+  };
+
+  /**
+   * Builds the level shown again once the language, an option in force or the
+   * host's readonly changed while the palette is open, keeping what is typed:
+   * the submenu shown comes back while its row is still listed, else the top level.
+   */
+  const rebuild = () => {
+    if (!isOpen()) return;
+
+    const top = createTopLevel();
+    const submenu =
+      state.submenu && state.parent
+        ? byFilter(top).find(action => action.id === state.parent)?.next
+        : undefined;
+
+    state.submenu = Boolean(submenu);
+    setLevel(submenu ?? top);
+    if (state.keyword) {
+      setActions(state.keyword);
+    } else if (submenu) {
+      selectChecked();
+    } else {
+      state.index = -1;
+    }
+  };
+
+  let rebuildQueued = false;
+  /** One rebuild for a switch, which sets the language's fields one by one, read once every field is in. */
+  const queueRebuild = () => {
+    if (rebuildQueued) return;
+    rebuildQueued = true;
+    nextTick(() => {
+      rebuildQueued = false;
+      rebuild();
     });
   };
 
@@ -84,6 +272,7 @@ const QuickSearch: FC<QuickSearchProps> = (props, ctx) => {
   const handleClose = () => {
     const { store } = app.value;
     store.dispatch(changeOpenMapAction({ [Open.search]: false }));
+    clearHangulForms();
     emitFocus();
   };
 
@@ -95,12 +284,16 @@ const QuickSearch: FC<QuickSearchProps> = (props, ctx) => {
       action.perform(app.value);
       handleClose();
     } else if (action.next) {
-      state.prevActions = action.next;
-      state.actions = action.next;
+      if (!state.submenu) state.parent = action.id;
+      setLevel(action.next);
+      state.submenu = true;
+      clearKeyword();
+      selectChecked();
 
       const input = root.value?.querySelector('input');
       input && lastCursorFocus(input);
-      clearKeyword();
+    } else if (action.insert !== undefined) {
+      insertText(action.insert);
     } else {
       handleClose();
     }
@@ -149,7 +342,9 @@ const QuickSearch: FC<QuickSearchProps> = (props, ctx) => {
   };
 
   const handleKeydown = (event: KeyboardEvent) => {
-    if (!hasAutocompleteKey(event.key)) return;
+    // A key pressed mid-syllable belongs to the IME, which finishes it first,
+    // and Chrome on a Mac sends that Enter again once it has: only that one acts.
+    if (isComposing(event) || !hasAutocompleteKey(event.key)) return;
 
     keyMap[event.key]?.(event);
   };
@@ -169,16 +364,20 @@ const QuickSearch: FC<QuickSearchProps> = (props, ctx) => {
     if (!isEditingText(editor)) {
       const opened = !editor.openMap[Open.search];
       store.dispatch(changeOpenMapAction({ [Open.search]: opened }));
+      clearHangulForms();
 
       if (opened) {
-        const actions = createScopeActions(app.value);
-        state.prevActions = actions;
-        state.actions = actions;
+        setLevel(createTopLevel());
+        state.submenu = false;
+        state.parent = undefined;
         clearKeyword();
         store.dispatch(
           changeOpenMapAction({
             [Open.tableProperties]: false,
             [Open.themeBuilder]: false,
+            [Open.exportImage]: false,
+            [Open.localePicker]: false,
+            [Open.mapColumns]: false,
           })
         );
       } else {
@@ -195,6 +394,50 @@ const QuickSearch: FC<QuickSearchProps> = (props, ctx) => {
     canClose && handleClose();
   };
 
+  // The icon slot stays on a row without one, so every name starts in one
+  // line, as a context menu's does.
+  const renderRow = (
+    action: Action,
+    index: number,
+    selected: boolean,
+    searchWords: string[]
+  ) => (
+    <div
+      class={['quick-search-row', styles.action, { selected }]}
+      style={{ transform: `translateY(${index * PALETTE_ROW_HEIGHT}px)` }}
+      on:click={(event: MouseEvent) => {
+        event.stopPropagation();
+        handlePerform(index);
+      }}
+    >
+      <div class={styles.icon}>{action.icon}</div>
+      <span class={styles.name} prop:dir="auto">
+        <HighlightedText
+          searchWords={searchWords}
+          textToHighlight={action.name}
+          findChunks={findPaletteChunks}
+        />
+      </span>
+      {action.keywords ? (
+        <>
+          <div class={styles.vertical}></div>
+          <span class={styles.keyword} prop:dir="auto" title={action.keywords}>
+            <HighlightedText
+              searchWords={searchWords}
+              textToHighlight={action.keywords}
+              findChunks={findPaletteChunks}
+            />
+          </span>
+        </>
+      ) : null}
+      {action.shortcut ? (
+        <div class={styles.shortcut}>
+          <Kbd shortcut={action.shortcut} />
+        </div>
+      ) : null}
+    </div>
+  );
+
   onMounted(() => {
     const { shortcut$, emitter } = app.value;
 
@@ -205,7 +448,15 @@ const QuickSearch: FC<QuickSearchProps> = (props, ctx) => {
       shortcut$
         .pipe(filter(({ type }) => type === KeyBindingName.search))
         .subscribe(handleToggleSearch),
-      emitter.on({ toggleSearch: handleToggleSearch })
+      emitter.on({ toggleSearch: handleToggleSearch }),
+      watch(i18n.value).subscribe(name => {
+        name === 'locale' && queueRebuild();
+      }),
+      watch(props).subscribe(name => {
+        (name === 'appearance' || name === 'locale' || name === 'readonly') &&
+          queueRebuild();
+      }),
+      clearHangulForms
     );
   });
 
@@ -216,53 +467,84 @@ const QuickSearch: FC<QuickSearchProps> = (props, ctx) => {
     } = store.state;
     if (!openMap[Open.search]) return null;
 
+    const { t } = i18n.value;
+    const query = readQuery(state.keyword);
+    const searchWords = getSearchWords(query);
+    const topLevel = !state.submenu;
+    const actions = getActions();
+    // Read here, since repeat builds each row outside this render: a new
+    // selection or range renders the list, rows that arrive moving the range.
+    const selected = state.index;
+    void range.first;
+    void range.last;
+    const { first, last } = rangeOf(actions.length);
+    const indexes: number[] = [];
+    for (let index = first; index <= last; index++) indexes.push(index);
+
     return (
       <div class={styles.root} on:click={handleOutsideClick}>
         <div class={['quick-search', styles.container]} use:ref={ref(root)}>
-          <TextInput
-            class={styles.search}
-            placeholder="Search"
-            autofocus={true}
-            value={state.keyword}
-            onInput={handleInputKeyword}
-            onKeydown={handleKeydown}
-          />
-          <div class={['scrollbar', styles.list]}>
-            {getActions().map((action, index) => (
-              <div
-                class={[styles.action, { selected: index === state.index }]}
-                on:click={(event: MouseEvent) => {
-                  event.stopPropagation();
-                  handlePerform(index);
-                }}
-              >
-                {action.icon ? (
-                  <div class={styles.icon}>{action.icon}</div>
-                ) : null}
-                <span class={styles.name}>
-                  <HighlightedText
-                    searchWords={[state.keyword]}
-                    textToHighlight={action.name}
-                  />
-                </span>
-                {action.keywords ? (
-                  <>
-                    <div class={styles.vertical}></div>
-                    <span class={styles.keyword}>
-                      <HighlightedText
-                        searchWords={[state.keyword]}
-                        textToHighlight={action.keywords}
-                      />
-                    </span>
-                  </>
-                ) : null}
-                {action.shortcut ? (
-                  <div class={styles.shortcut}>
-                    <Kbd shortcut={action.shortcut} />
-                  </div>
-                ) : null}
-              </div>
-            ))}
+          <div class={styles.field}>
+            <TextInput
+              class={styles.search}
+              placeholder={t('common.search')}
+              dir="auto"
+              autofocus={true}
+              value={state.keyword}
+              onInput={handleInputKeyword}
+              onKeydown={handleKeydown}
+            />
+            {query.scope ? (
+              <span class={['quick-search-scope', styles.scope]}>
+                {scopeLabel(query.scope, i18n.value)}
+              </span>
+            ) : null}
+          </div>
+          {topLevel && !state.keyword ? (
+            <div class={['quick-search-hint', styles.hint]}>
+              {PALETTE_PREFIXES.map(({ prefix, labelKey, descriptionKey }) => (
+                <button
+                  class={styles.hintItem}
+                  type="button"
+                  title={t(descriptionKey)}
+                  on:click={(event: MouseEvent) => {
+                    event.stopPropagation();
+                    insertText(prefix);
+                  }}
+                >
+                  <span class={styles.prefix}>{prefix}</span>
+                  {t(labelKey)}
+                </button>
+              ))}
+            </div>
+          ) : null}
+          {state.missed ? (
+            <div class={['quick-search-empty', styles.empty]}>
+              {t('palette.noCommandsMatch')}
+            </div>
+          ) : null}
+          <div
+            class={['scrollbar', styles.list]}
+            use:ref={ref(list)}
+            style={{ height: `${paletteListHeight(actions.length)}px` }}
+            on:scroll={handleScroll}
+          >
+            <div
+              class={styles.space}
+              style={{ height: `${actions.length * PALETTE_ROW_HEIGHT}px` }}
+            >
+              {repeat(
+                indexes,
+                index => index,
+                index =>
+                  renderRow(
+                    actions[index],
+                    index,
+                    index === selected,
+                    searchWords
+                  )
+              )}
+            </div>
           </div>
         </div>
       </div>

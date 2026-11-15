@@ -13,6 +13,7 @@ import {
   addIcon,
   type App,
   FileSystemAdapter,
+  getLanguage,
   normalizePath,
   Notice,
   type OpenViewState,
@@ -43,15 +44,20 @@ import {
   pidSandbox,
 } from '@/hub';
 import { ERD_ICON, ERD_ICON_SVG } from '@/icon';
-import { scopeKeysOf } from '@/keys';
+import { editorScopeKeys } from '@/keys';
 import { type ErdEditorModule, loadErdEditor } from '@/loadErdEditor';
 import {
   ACCENT_COLORS,
   DEFAULT_SETTINGS,
+  editorLocale,
+  editorTheme,
   GRAY_COLORS,
+  LOCALE_NAMES,
+  localeFromPicker,
+  type LocaleHost,
+  obsidianLanguage,
   type PluginSettings,
   readSettings,
-  resolveTheme,
   themeFromBuilder,
   type ThemeHost,
   type ThemeSettings,
@@ -59,6 +65,13 @@ import {
 
 /** Obsidian's own light or dark, which an auto appearance follows. */
 const isObsidianDark = () => document.body.hasClass('theme-dark');
+
+/** Obsidian's own language, which an auto locale follows; getLanguage is missing before 1.8.7. */
+const obsidianDisplayLanguage = () =>
+  obsidianLanguage(
+    typeof getLanguage === 'function' ? getLanguage : undefined,
+    window.localStorage
+  );
 
 /** The native real path, or the path itself when it has none, as the hub spells every path. */
 function realpath(path: string): Promise<string> {
@@ -81,11 +94,19 @@ export default class ErdEditorPlugin extends Plugin {
 
   /** What every ERD tab of this vault shows, and where its theme builder saves. */
   private readonly theme: ThemeHost = {
-    current: () => resolveTheme(this.settings, isObsidianDark()),
+    current: () => editorTheme(this.settings, isObsidianDark()),
     picked: picked => {
-      void this.setTheme(
-        themeFromBuilder(this.settings, picked, isObsidianDark())
-      );
+      void this.setTheme(themeFromBuilder(this.settings, picked));
+      this.settingTab?.refresh();
+    },
+  };
+
+  /** The display language every ERD tab of this vault shows, and where its language picker saves. */
+  private readonly locale: LocaleHost = {
+    current: () =>
+      editorLocale(this.settings.locale, obsidianDisplayLanguage()),
+    picked: picked => {
+      void this.setLocale(localeFromPicker(this.settings.locale, picked));
       this.settingTab?.refresh();
     },
   };
@@ -113,12 +134,10 @@ export default class ErdEditorPlugin extends Plugin {
 
     addIcon(ERD_ICON, ERD_ICON_SVG);
     this.register(() => removeIcon(ERD_ICON));
-    const editorKeys = scopeKeysOf(
-      this.erdEditor.createKeyBindingMap?.() ?? {}
-    );
+    const editorKeys = editorScopeKeys(this.erdEditor);
     this.registerView(
       VIEW_TYPE_ERD,
-      leaf => new ErdView(leaf, registry, this.theme, editorKeys)
+      leaf => new ErdView(leaf, registry, this.theme, this.locale, editorKeys)
     );
     this.registerExtensions(DIAGRAM_EXTENSIONS, VIEW_TYPE_ERD);
 
@@ -172,9 +191,7 @@ export default class ErdEditorPlugin extends Plugin {
       })
     );
     this.registerEvent(
-      this.app.workspace.on('css-change', () => {
-        if (this.settings.appearance === 'auto') this.applyTheme();
-      })
+      this.app.workspace.on('css-change', () => this.applyTheme())
     );
     // Windows unloads the page within milliseconds of a quit, quit tasks or
     // not, and a 1.13 reload fires no quit, so each tab writes before these
@@ -195,6 +212,7 @@ export default class ErdEditorPlugin extends Plugin {
     if (this.unloaded) return;
     // Tabs restored with the layout may have opened on the defaults.
     this.applyTheme();
+    this.applyLocale();
     this.hubSwitch.set(this.settings.agentHub);
     this.settingTab = new ErdEditorSettingTab(this.app, this);
     this.addSettingTab(this.settingTab);
@@ -214,6 +232,7 @@ export default class ErdEditorPlugin extends Plugin {
   async onExternalSettingsChange(): Promise<void> {
     this.settings = readSettings(await this.loadData());
     this.applyTheme();
+    this.applyLocale();
     this.hubSwitch.set(this.settings.agentHub);
     this.settingTab?.refresh();
   }
@@ -231,11 +250,26 @@ export default class ErdEditorPlugin extends Plugin {
     await this.saveData(this.settings);
   }
 
+  /** From the settings tab or a language picker: every open diagram of the vault shows it at once. */
+  async setLocale(locale: PluginSettings['locale']): Promise<void> {
+    this.settings.locale = locale;
+    this.applyLocale();
+    await this.saveData(this.settings);
+  }
+
   /** Re-themes every ERD tab of this vault, those in popout windows too. */
   private applyTheme(): void {
     const theme = this.theme.current();
     for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_ERD)) {
       if (leaf.view instanceof ErdView) leaf.view.applyTheme(theme);
+    }
+  }
+
+  /** Sets the display language of every ERD tab of this vault, those in popout windows too. */
+  private applyLocale(): void {
+    const locale = this.locale.current();
+    for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_ERD)) {
+      if (leaf.view instanceof ErdView) leaf.view.applyLocale(locale);
     }
   }
 
@@ -467,7 +501,7 @@ class ErdEditorSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName('Appearance')
       .setDesc(
-        "Auto follows Obsidian's light or dark theme and switches with it. The theme builder in the editor's toolbar changes these three settings too."
+        "Auto follows Obsidian's light or dark theme and switches with it. The theme builder in the editor's toolbar changes these three settings too, where Auto is System."
       )
       .addDropdown(dropdown =>
         dropdown
@@ -506,6 +540,20 @@ class ErdEditorSettingTab extends PluginSettingTab {
               void this.plugin.setTheme({
                 accentColor: value as PluginSettings['accentColor'],
               })
+          )
+      );
+    new Setting(containerEl)
+      .setName('Display language')
+      .setDesc(
+        "The language of the editor's menus and panels. Auto follows Obsidian's language. The language button in the editor's toolbar changes this setting too, where Auto is System."
+      )
+      .addDropdown(dropdown =>
+        dropdown
+          .addOptions(LOCALE_NAMES)
+          .setValue(settings.locale)
+          .onChange(
+            value =>
+              void this.plugin.setLocale(value as PluginSettings['locale'])
           )
       );
     new Setting(containerEl)

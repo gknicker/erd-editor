@@ -1,6 +1,9 @@
-import { AnyAction } from '@dineug/r-html';
+import { toJson } from '@dineug/erd-editor-schema';
+import { AnyAction, watch } from '@dineug/r-html';
+import { pick } from 'es-toolkit';
 import { afterEach, beforeEach, describe, expect, it } from 'vite-plus/test';
 
+import { flush } from '@/__test-utils__/index';
 import {
   BracketType,
   CANVAS_ZOOM_MAX,
@@ -9,19 +12,28 @@ import {
   ColumnType,
   Database,
   Language,
+  LockSettingType,
   NameCase,
-  SaveSettingType,
+  NameViewMode,
   Show,
 } from '@/constants/schema';
 import { Clock } from '@/engine/clock';
-import { EngineContext } from '@/engine/context';
-import { changeViewportAction } from '@/engine/modules/editor/atom.actions';
-import { ViewKind } from '@/engine/modules/editor/state';
+import { EngineContext, type ReplicaEngineContext } from '@/engine/context';
+import { VIEWPORT_REGISTER } from '@/engine/geometryRegisters';
+import {
+  changeDrawTableGroupAction,
+  changeViewportAction,
+  editMemoAction,
+  editTableGroupAction,
+  selectAction,
+} from '@/engine/modules/editor/atom.actions';
+import { SelectType, ViewKind } from '@/engine/modules/editor/state';
 import {
   viewChangeZoomLevelAction,
   viewOpenAction,
   viewScrollToAction,
 } from '@/engine/modules/editor/view.actions';
+import { addMemoAction } from '@/engine/modules/memo/atom.actions';
 import { ActionType } from '@/engine/modules/settings/actions';
 import {
   actions,
@@ -31,11 +43,13 @@ import {
   changeColumnOrderAction,
   changeDatabaseAction,
   changeDatabaseNameAction,
+  changeDDLScriptAction,
   changeIgnoreSaveSettingsAction,
   changeLanguageAction,
+  changeLockSettingsAction,
   changeMaxWidthCommentAction,
+  changeNameViewModeAction,
   changeRelationshipDataTypeSyncAction,
-  changeRelationshipOptimizationAction,
   changeShowAction,
   changeTableNameCaseAction,
   changeZoomLevelAction,
@@ -48,15 +62,18 @@ import {
   settingsReducers,
   streamScrollToAction,
   streamZoomLevelAction,
+  toNameViewModeAction,
 } from '@/engine/modules/settings/atom.actions';
 import {
   addTableAction,
   removeTableAction,
 } from '@/engine/modules/table/atom.actions';
+import { addTableGroupAction } from '@/engine/modules/table-group/atom.actions';
 import { createStore, Store } from '@/engine/store';
 import { Tag } from '@/engine/tag';
 import { getContentRect } from '@/konva/scene/contentBounds';
 import { freezeView, thawView } from '@/konva/scene/viewFreeze';
+import { bHas } from '@/utils/bit';
 
 const toWidth = (text: string) => text.length * 10;
 
@@ -66,6 +83,18 @@ const VIEWPORT_HEIGHT = 800;
 /** A table at a scene point, which is what gives the origin any travel at all. */
 const seedTable = (store: Store, id: string, x: number, y: number) => {
   store.dispatchSync(addTableAction({ id, ui: { x, y, zIndex: 2 } }));
+};
+
+/** A table t1, a memo m1 and a group g1, which a selection names only once the document lists them. */
+const seedSelectable = (store: Store) => {
+  store.dispatchSync(
+    addTableAction({ id: 't1', ui: { x: 0, y: 0, zIndex: 2 } }),
+    addMemoAction({ id: 'm1', ui: { x: 0, y: 0, zIndex: 2 } }),
+    addTableGroupAction({
+      id: 'g1',
+      ui: { x: 0, y: 0, width: 600, height: 400, zIndex: 1 },
+    })
+  );
 };
 
 /** The content's two edges on each axis, read off the box the range is built on. */
@@ -147,6 +176,112 @@ describe('settings/atom.actions', () => {
       });
       expect(store.state.settings.databaseName).toBe('v9');
       expect(store.state.lww['settings.databaseName'][3].databaseName).toBe(9);
+    });
+  });
+
+  describe('changeDDLScript', () => {
+    const scripts = () => store.state.settings.ddlScripts;
+
+    it('writes the script at its position and records the LWW replace version', () => {
+      store.dispatchSync(
+        changeDDLScriptAction({ position: 'before', value: 'CREATE SCHEMA a;' })
+      );
+
+      expect(scripts()).toEqual({ before: 'CREATE SCHEMA a;', after: '' });
+      expect(store.state.lww['settings.ddlScripts']).toEqual([
+        'settings',
+        -1,
+        -1,
+        { before: 0 },
+      ]);
+    });
+
+    it('keeps a script exactly as it was typed, blanks and line ends included', () => {
+      const value = '\r\n  GRANT SELECT ON member TO app;  \n';
+      store.dispatchSync(changeDDLScriptAction({ position: 'after', value }));
+
+      expect(scripts().after).toBe(value);
+    });
+
+    it('falls back to the clock version when the action carries none', () => {
+      store.context.clock.merge(7);
+      store.dispatchSync(
+        changeDDLScriptAction({ position: 'after', value: 'clocked' })
+      );
+
+      expect(store.state.lww['settings.ddlScripts'][3].after).toBe(7);
+      expect(scripts().after).toBe('clocked');
+    });
+
+    it.each([
+      ['an unknown position', { position: 'middle', value: 'SELECT 1;' }],
+      ['a number for the value', { position: 'before', value: 12 }],
+      ['no value', { position: 'after' }],
+    ])('changes nothing for %s', (_label, payload) => {
+      store.dispatchSync({
+        ...changeDDLScriptAction({ position: 'before', value: '' }),
+        payload,
+      } as AnyAction);
+
+      expect(scripts()).toEqual({ before: '', after: '' });
+      expect(store.state.lww['settings.ddlScripts']).toBeUndefined();
+    });
+
+    it('ignores a stale write and accepts an equal or newer version', () => {
+      const write = (value: string, version: number) =>
+        store.dispatchSync({
+          ...changeDDLScriptAction({ position: 'before', value }),
+          version,
+        });
+
+      write('v5', 5);
+      write('v3-stale', 3);
+      expect(scripts().before).toBe('v5');
+      expect(store.state.lww['settings.ddlScripts'][3].before).toBe(5);
+
+      write('v5-again', 5);
+      expect(scripts().before).toBe('v5-again');
+
+      write('v9', 9);
+      expect(scripts().before).toBe('v9');
+      expect(store.state.lww['settings.ddlScripts'][3].before).toBe(9);
+    });
+
+    it('converges each script on its own, a newer write to one leaving the other', () => {
+      store.dispatchSync(
+        {
+          ...changeDDLScriptAction({ position: 'after', value: 'after@9' }),
+          version: 9,
+        },
+        {
+          ...changeDDLScriptAction({ position: 'before', value: 'before@4' }),
+          version: 4,
+        }
+      );
+
+      expect(scripts()).toEqual({ before: 'before@4', after: 'after@9' });
+      expect(store.state.lww['settings.ddlScripts'][3]).toEqual({
+        after: 9,
+        before: 4,
+      });
+    });
+
+    it('replaces the scripts object, so a watch on the settings hears the name', async () => {
+      const previous = scripts();
+      const heard: Array<string | number | symbol> = [];
+      const unsubscribe = watch(store.state.settings).subscribe(name => {
+        heard.push(name);
+      });
+
+      store.dispatchSync(
+        changeDDLScriptAction({ position: 'before', value: 'SELECT 1;' })
+      );
+      await flush();
+      unsubscribe();
+
+      expect(scripts()).not.toBe(previous);
+      expect(previous).toEqual({ before: '', after: '' });
+      expect(heard).toContain('ddlScripts');
     });
   });
 
@@ -242,23 +377,6 @@ describe('settings/atom.actions', () => {
       expect(store.state.settings.originY).toBe(0);
       expect(store.state.settings.originX).toBe(0);
     });
-
-    it('never touches the legacy scroll pair', () => {
-      // A pair the default would not tell apart from a zeroing reducer.
-      store.state.settings.scrollLeft = -300;
-      store.state.settings.scrollTop = -400;
-      seedTable(store, 't', 1_000, 1_000);
-
-      store.dispatchSync(scrollToAction({ originY: -300, originX: -250 }));
-      store.dispatchSync(
-        streamScrollToAction({ movementX: -100, movementY: -200 })
-      );
-
-      expect(store.state.settings.originX).toBe(-350);
-      expect(store.state.settings.originY).toBe(-500);
-      expect(store.state.settings.scrollLeft).toBe(-300);
-      expect(store.state.settings.scrollTop).toBe(-400);
-    });
   });
 
   describe('streamScrollTo', () => {
@@ -326,6 +444,105 @@ describe('settings/atom.actions', () => {
       );
       expect(store.state.settings.originX).toBe(0);
       expect(store.state.settings.originY).toBe(0);
+    });
+  });
+
+  describe('the viewport registers', () => {
+    const at = (action: AnyAction, version: number, tags?: number) => ({
+      ...action,
+      version,
+      ...(tags === undefined ? {} : { tags }),
+    });
+    const registers = () => store.state.lww[VIEWPORT_REGISTER]?.[3] ?? {};
+    const origin = () =>
+      pick(store.state.settings, ['originX', 'originY', 'zoomLevel']);
+
+    it('lands the same absolute scroll and zoom twice as once, and refuses older ones (AC-M1)', () => {
+      const scroll = at(scrollToAction({ originX: 40, originY: -20 }), 5);
+      const zoom = at(changeZoomLevelAction({ value: 0.5 }), 6);
+
+      store.dispatchSync(scroll, zoom);
+      store.dispatchSync(scroll, zoom);
+      store.dispatchSync(
+        at(scrollToAction({ originX: 0, originY: 0 }), 4),
+        at(changeZoomLevelAction({ value: 2 }), 5)
+      );
+
+      expect(origin()).toEqual({ originX: 40, originY: -20, zoomLevel: 0.5 });
+      expect(registers()).toEqual({ origin: 5, zoomLevel: 6 });
+    });
+
+    it('keeps the origin and the zoom in two registers, so neither refuses the other (AC-P7)', () => {
+      store.dispatchSync(at(changeZoomLevelAction({ value: 0.5 }), 9));
+      store.dispatchSync(at(scrollToAction({ originX: 40, originY: 40 }), 3));
+
+      expect(origin()).toEqual({ originX: 40, originY: 40, zoomLevel: 0.5 });
+      expect(registers()).toEqual({ origin: 3, zoomLevel: 9 });
+    });
+
+    it('raises each register with the store’s own pan and zoom steps', () => {
+      store.dispatchSync(
+        at(streamScrollToAction({ movementX: 30, movementY: 10 }), 7),
+        at(streamZoomLevelAction({ value: -0.25 }), 7)
+      );
+      store.dispatchSync(
+        at(scrollToAction({ originX: 0, originY: 0 }), 6),
+        at(changeZoomLevelAction({ value: 2 }), 6)
+      );
+
+      expect(origin()).toEqual({ originX: 30, originY: 10, zoomLevel: 0.75 });
+      expect(registers()).toEqual({ origin: 7, zoomLevel: 7 });
+    });
+
+    it('adds a peer’s pan and zoom steps outside the registers (AC-M3)', () => {
+      store.dispatchSync(
+        at(
+          streamScrollToAction({ movementX: 30, movementY: 10 }),
+          7,
+          Tag.shared
+        ),
+        at(streamZoomLevelAction({ value: -0.25 }), 7, Tag.shared)
+      );
+
+      expect(origin()).toEqual({ originX: 30, originY: 10, zoomLevel: 0.75 });
+      expect(registers()).toEqual({});
+    });
+
+    it('adds every pan and zoom step a replica’s context takes outside the registers (AC-P14)', () => {
+      const context: ReplicaEngineContext = {
+        toWidth,
+        clock: new Clock(),
+        remote: true,
+      };
+      store = createStore(context);
+
+      store.dispatchSync(
+        at(streamScrollToAction({ movementX: 30, movementY: 10 }), 7),
+        at(streamZoomLevelAction({ value: -0.25 }), 7)
+      );
+      store.dispatchSync(at(scrollToAction({ originX: 1, originY: 2 }), 3));
+
+      expect(origin()).toEqual({ originX: 1, originY: 2, zoomLevel: 0.75 });
+      expect(registers()).toEqual({ origin: 3 });
+    });
+
+    it('writes a readonly reader’s screen turns outside the registers', () => {
+      store.dispatchSync(
+        at(scrollToAction({ originX: 40, originY: 40 }), 9, Tag.screen),
+        at(changeZoomLevelAction({ value: 0.5 }), 9, Tag.screen)
+      );
+      store.dispatchSync(
+        at(streamScrollToAction({ movementX: 5, movementY: 5 }), 9, Tag.screen),
+        at(streamZoomLevelAction({ value: 0.25 }), 9, Tag.screen)
+      );
+
+      expect(origin()).toEqual({ originX: 45, originY: 45, zoomLevel: 0.75 });
+      expect(registers()).toEqual({});
+      expect(store.state.editor.screenBaseline?.viewport).toEqual({
+        originX: 0,
+        originY: 0,
+        zoomLevel: 1,
+      });
     });
   });
 
@@ -711,6 +928,68 @@ describe('settings/atom.actions', () => {
       );
       expect(store.state.settings.show).toBe(initial);
     });
+
+    it('lets go of every selected group, a draw armed and a name editor as groups are hidden, and of nothing as they show', () => {
+      const pick = {
+        g1: SelectType.tableGroup,
+        t1: SelectType.table,
+        m1: SelectType.memo,
+      };
+      seedSelectable(store);
+      store.dispatchSync(
+        selectAction(pick),
+        changeDrawTableGroupAction({ value: true }),
+        editTableGroupAction({ id: 'g1' }),
+        changeShowAction({ show: Show.tableComment, value: false })
+      );
+      expect(store.state.editor.selectedMap).toEqual(pick);
+      expect(store.state.editor.drawTableGroup).toBe(true);
+
+      store.dispatchSync(
+        changeShowAction({ show: Show.hideTableGroup, value: true })
+      );
+
+      expect(store.state.editor.selectedMap).toEqual({
+        t1: SelectType.table,
+        m1: SelectType.memo,
+      });
+      expect(store.state.editor.drawTableGroup).toBe(false);
+      expect(store.state.editor.editTableGroupId).toBeNull();
+
+      store.dispatchSync(
+        selectAction({ g1: SelectType.tableGroup }),
+        changeShowAction({ show: Show.hideTableGroup, value: false })
+      );
+      expect(store.state.editor.selectedMap).toMatchObject({
+        g1: SelectType.tableGroup,
+      });
+    });
+  });
+
+  describe('changeShow of the memos', () => {
+    it('lets go of every selected memo and the memo editor as memos are hidden, and of nothing as they show', () => {
+      seedSelectable(store);
+      store.dispatchSync(
+        selectAction({ m1: SelectType.memo, t1: SelectType.table }),
+        editMemoAction({ id: 'm1' })
+      );
+
+      store.dispatchSync(
+        changeShowAction({ show: Show.hideMemo, value: true })
+      );
+
+      expect(bHas(store.state.settings.show, Show.hideMemo)).toBe(true);
+      expect(store.state.editor.selectedMap).toEqual({ t1: SelectType.table });
+      expect(store.state.editor.editMemoId).toBeNull();
+
+      store.dispatchSync(
+        selectAction({ m1: SelectType.memo }),
+        changeShowAction({ show: Show.hideMemo, value: false })
+      );
+      expect(store.state.editor.selectedMap).toMatchObject({
+        m1: SelectType.memo,
+      });
+    });
   });
 
   describe('changeDatabase', () => {
@@ -746,6 +1025,41 @@ describe('settings/atom.actions', () => {
         )
       );
       expect(store.state.settings.canvasType).toBe(CanvasType.ERD);
+    });
+
+    it('ends a table group draw armed on the ERD tab once another tab comes up', () => {
+      store.dispatchSync(changeDrawTableGroupAction({ value: true }));
+      store.dispatchSync(changeCanvasTypeAction({ value: CanvasType.ERD }));
+      expect(store.state.editor.drawTableGroup).toBe(true);
+
+      store.dispatchSync(
+        changeCanvasTypeAction({ value: CanvasType.visualization })
+      );
+      expect(store.state.editor.drawTableGroup).toBe(false);
+    });
+
+    it('remembers the tab left for another, Settings never among them', () => {
+      const go = (value: string) => {
+        store.dispatchSync(changeCanvasTypeAction({ value }));
+        return store.state.editor.lastCanvasType;
+      };
+
+      expect(store.state.editor.lastCanvasType).toBe(CanvasType.ERD);
+      expect(go(CanvasType.schemaSQL)).toBe(CanvasType.ERD);
+      expect(go(CanvasType.settings)).toBe(CanvasType.schemaSQL);
+      expect(go(CanvasType.ERD)).toBe(CanvasType.schemaSQL);
+      expect(go(CanvasType.generatorCode)).toBe(CanvasType.ERD);
+    });
+
+    it('remembers nothing for a following-tagged switch', () => {
+      store.dispatchSync(
+        tag(
+          changeCanvasTypeAction({ value: CanvasType.schemaSQL }),
+          Tag.following
+        )
+      );
+
+      expect(store.state.editor.lastCanvasType).toBe(CanvasType.ERD);
     });
   });
 
@@ -803,23 +1117,13 @@ describe('settings/atom.actions', () => {
       store.dispatchSync(changeRelationshipDataTypeSyncAction({ value: true }));
       expect(store.state.settings.relationshipDataTypeSync).toBe(true);
     });
-
-    it('changeRelationshipOptimization assigns the raw value', () => {
-      store.dispatchSync(changeRelationshipOptimizationAction({ value: true }));
-      expect(store.state.settings.relationshipOptimization).toBe(true);
-
-      store.dispatchSync(
-        changeRelationshipOptimizationAction({ value: false })
-      );
-      expect(store.state.settings.relationshipOptimization).toBe(false);
-    });
   });
 
   describe('changeColumnOrder', () => {
     it('moves the value in front of the target when moving backwards', () => {
       const before = [...store.state.settings.columnOrder];
-      expect(before[0]).toBe(ColumnType.columnName);
-      expect(before[6]).toBe(ColumnType.columnComment);
+      expect(before[0]).toBe(ColumnType.columnLogicalName);
+      expect(before[8]).toBe(ColumnType.columnComment);
 
       store.dispatchSync(
         changeColumnOrderAction({
@@ -829,9 +1133,11 @@ describe('settings/atom.actions', () => {
       );
 
       expect(store.state.settings.columnOrder).toEqual([
+        ColumnType.columnLogicalName,
         ColumnType.columnComment,
         ColumnType.columnName,
         ColumnType.columnDataType,
+        ColumnType.columnDomain,
         ColumnType.columnNotNull,
         ColumnType.columnUnique,
         ColumnType.columnAutoIncrement,
@@ -848,7 +1154,9 @@ describe('settings/atom.actions', () => {
       );
 
       expect(store.state.settings.columnOrder).toEqual([
+        ColumnType.columnLogicalName,
         ColumnType.columnDataType,
+        ColumnType.columnDomain,
         ColumnType.columnNotNull,
         ColumnType.columnUnique,
         ColumnType.columnAutoIncrement,
@@ -945,37 +1253,562 @@ describe('settings/atom.actions', () => {
     });
   });
 
+  describe('changeLockSettings', () => {
+    const {
+      viewport,
+      canvasType,
+      language,
+      tableNameCase,
+      columnNameCase,
+      bracketType,
+    } = LockSettingType;
+    const lock = (
+      lockSettingType: number,
+      value: boolean,
+      values: Record<string, unknown> = {}
+    ) => {
+      store.dispatchSync(
+        changeLockSettingsAction({ lockSettingType, value, values })
+      );
+      return store.state.settings;
+    };
+    const lockLanguage = (
+      value: boolean,
+      version: number,
+      carried: number
+    ) => ({
+      ...changeLockSettingsAction({
+        lockSettingType: language,
+        value,
+        values: { language: carried },
+      }),
+      version,
+    });
+
+    /** The settings of two peers handed both actions, one in each order. */
+    const inBothOrders = (a: AnyAction, b: AnyAction) =>
+      [
+        [a, b],
+        [b, a],
+      ].map(order => {
+        const peer = createTestStore();
+        order.forEach(action => peer.dispatchSync(action));
+        return peer.state.settings;
+      });
+
+    it('starts a new document with every lock on', () => {
+      expect(store.state.settings.lockSettings).toBe(63);
+    });
+
+    it('unlocks what it names and leaves the locked values be', () => {
+      const before = { ...store.state.settings.lockedValues };
+      const settings = lock(language | bracketType, false);
+
+      expect(settings.lockSettings).toBe(63 & ~(language | bracketType));
+      expect(settings.lockedValues).toEqual(before);
+    });
+
+    it('locks at the values sent, not at the live ones', () => {
+      lock(language, false);
+      store.dispatchSync(changeLanguageAction({ value: Language.Kotlin }));
+
+      const settings = lock(language, true, { language: Language.Java });
+
+      expect(bHas(settings.lockSettings, language)).toBe(true);
+      expect(settings.lockedValues.language).toBe(Language.Java);
+      expect(settings.language).toBe(Language.Kotlin);
+    });
+
+    it('takes only the fields of the locks it names', () => {
+      lock(language | viewport, false);
+      const settings = lock(language, true, {
+        language: Language.Go,
+        originX: 400,
+        tableNameCase: NameCase.snakeCase,
+      });
+
+      expect(settings.lockedValues).toMatchObject({
+        language: Language.Go,
+        originX: 0,
+        tableNameCase: NameCase.pascalCase,
+      });
+    });
+
+    it('locks the origin and the zoom together', () => {
+      lock(viewport, false);
+      const settings = lock(viewport, true, {
+        originX: -12.5,
+        originY: 40,
+        zoomLevel: 0.8,
+      });
+
+      expect(bHas(settings.lockSettings, viewport)).toBe(true);
+      expect(settings.lockedValues).toMatchObject({
+        originX: -12.5,
+        originY: 40,
+        zoomLevel: 0.8,
+      });
+    });
+
+    it.each([
+      ['a missing field', { originX: 1, zoomLevel: 1 }],
+      [
+        'an origin that is no number',
+        { originX: NaN, originY: 0, zoomLevel: 1 },
+      ],
+      [
+        'a zoom past the canvas range',
+        { originX: 0, originY: 0, zoomLevel: 9 },
+      ],
+    ])('leaves the viewport unlocked for %s', (_, values) => {
+      lock(viewport, false);
+      const settings = lock(viewport, true, values);
+
+      expect(bHas(settings.lockSettings, viewport)).toBe(false);
+      expect(settings.lockedValues).toMatchObject({
+        originX: 0,
+        originY: 0,
+        zoomLevel: 1,
+      });
+    });
+
+    it('lets the latest lock or unlock of a setting win, whatever order they arrive in', () => {
+      const send = (value: boolean, version: number, language?: number) =>
+        store.dispatchSync({
+          ...changeLockSettingsAction({
+            lockSettingType: LockSettingType.language,
+            value,
+            values: { language },
+          }),
+          version,
+        });
+
+      send(true, 9, Language.Java);
+      send(false, 5);
+      send(true, 7, Language.Go);
+
+      expect(bHas(store.state.settings.lockSettings, language)).toBe(true);
+      expect(store.state.settings.lockedValues.language).toBe(Language.Java);
+
+      send(false, 12);
+      send(true, 10, Language.Go);
+
+      expect(bHas(store.state.settings.lockSettings, language)).toBe(false);
+    });
+
+    it.each([
+      [LockSettingType.canvasType, { canvasType: CanvasType.settings }],
+      [LockSettingType.canvasType, { canvasType: 'not-a-canvas' }],
+      [LockSettingType.language, { language: 3 }],
+      [LockSettingType.tableNameCase, { tableNameCase: 3 }],
+      [LockSettingType.columnNameCase, { columnNameCase: 0 }],
+      [LockSettingType.bracketType, { bracketType: '2' }],
+    ])('refuses a value its setter would refuse (lock %s)', (bit, values) => {
+      lock(bit, false);
+
+      expect(bHas(lock(bit, true, values).lockSettings, bit)).toBe(false);
+    });
+
+    it('locks a value at the bottom of the zoom range', () => {
+      lock(viewport, false);
+      const settings = lock(viewport, true, {
+        originX: 0,
+        originY: 0,
+        zoomLevel: 0.1,
+      });
+
+      expect(settings.lockedValues.zoomLevel).toBe(0.1);
+    });
+
+    it('shows the code values an unlock carries, and keeps the values it held', () => {
+      const before = { ...store.state.settings.lockedValues };
+      const settings = lock(
+        language | tableNameCase | columnNameCase | bracketType,
+        false,
+        {
+          language: Language.Kotlin,
+          tableNameCase: NameCase.snakeCase,
+          columnNameCase: NameCase.camelCase,
+          bracketType: BracketType.backtick,
+        }
+      );
+
+      expect(settings.lockSettings).toBe(viewport | canvasType);
+      expect(settings).toMatchObject({
+        language: Language.Kotlin,
+        tableNameCase: NameCase.snakeCase,
+        columnNameCase: NameCase.camelCase,
+        bracketType: BracketType.backtick,
+      });
+      expect(settings.lockedValues).toEqual(before);
+    });
+
+    it('shows what an older unlock carries through the code register, though a later lock won', () => {
+      store.dispatchSync(lockLanguage(true, 9, Language.Java));
+      store.dispatchSync(lockLanguage(false, 5, Language.Go));
+
+      expect(bHas(store.state.settings.lockSettings, language)).toBe(true);
+      expect(store.state.settings.lockedValues.language).toBe(Language.Java);
+      expect(store.state.settings.language).toBe(Language.Go);
+    });
+
+    it('shows one language whichever order an unlock meets a newer relock in', () => {
+      const peers = inBothOrders(
+        lockLanguage(false, 10, Language.Kotlin),
+        lockLanguage(true, 11, Language.Go)
+      );
+
+      for (const settings of peers) {
+        expect(bHas(settings.lockSettings, language)).toBe(true);
+        expect(settings.lockedValues.language).toBe(Language.Go);
+        expect(settings.language).toBe(Language.Kotlin);
+      }
+    });
+
+    it.each([
+      ['a value its setter would refuse', { language: 3 }],
+      ['no value', {}],
+    ])('unlocks all the same carrying %s, and shows nothing', (_, values) => {
+      const settings = lock(language, false, values);
+
+      expect(bHas(settings.lockSettings, language)).toBe(false);
+      expect(settings.language).toBe(Language.GraphQL);
+    });
+
+    it('shows nothing of the viewport or the tab an unlock carries, each reader keeping its own', () => {
+      const settings = lock(viewport | canvasType, false, {
+        originX: 400,
+        originY: -90,
+        zoomLevel: 0.5,
+        canvasType: CanvasType.schemaSQL,
+      });
+
+      expect(settings.lockSettings).toBe(63 & ~(viewport | canvasType));
+      expect(settings).toMatchObject({
+        originX: 0,
+        originY: 0,
+        zoomLevel: 1,
+        canvasType: CanvasType.ERD,
+      });
+    });
+
+    it.each([
+      ['newer', 11, Language.Java],
+      ['older', 9, Language.Kotlin],
+    ])(
+      'lands one language whichever order an unlock meets a setter %s than it in',
+      (_, setterVersion, landed) => {
+        const peers = inBothOrders(lockLanguage(false, 10, Language.Kotlin), {
+          ...changeLanguageAction({ value: Language.Java, shared: true }),
+          version: setterVersion,
+        });
+
+        expect(peers.map(settings => settings.language)).toEqual([
+          landed,
+          landed,
+        ]);
+      }
+    );
+  });
+
+  describe('the code settings', () => {
+    const CODE_SETTINGS = [
+      [
+        'language',
+        changeLanguageAction,
+        LockSettingType.language,
+        Language.Java,
+        Language.Go,
+      ] as const,
+      [
+        'tableNameCase',
+        changeTableNameCaseAction,
+        LockSettingType.tableNameCase,
+        NameCase.snakeCase,
+        NameCase.camelCase,
+      ] as const,
+      [
+        'columnNameCase',
+        changeColumnNameCaseAction,
+        LockSettingType.columnNameCase,
+        NameCase.snakeCase,
+        NameCase.camelCase,
+      ] as const,
+      [
+        'bracketType',
+        changeBracketTypeAction,
+        LockSettingType.bracketType,
+        BracketType.backtick,
+        BracketType.doubleQuote,
+      ] as const,
+    ];
+
+    it.each(CODE_SETTINGS)(
+      'keeps the latest %s whatever order two shared setters arrive in, its lock on',
+      (field, action, _lock, newer, older) => {
+        store.dispatchSync(
+          { ...action({ value: newer, shared: true }), version: 8 },
+          { ...action({ value: older, shared: true }), version: 6 }
+        );
+
+        expect(store.state.settings[field]).toBe(newer);
+        expect(store.state.lww['settings.code']).toEqual([
+          'settings',
+          -1,
+          -1,
+          { [field]: 8 },
+        ]);
+      }
+    );
+
+    it.each(CODE_SETTINGS)(
+      'shows the store’s own %s setter under its lock on its screen alone, outside the register and the locked value',
+      (field, action, _lock, newer) => {
+        const lockedValues = { ...store.state.settings.lockedValues };
+        store.state.editor.screenBaseline = { [field]: newer };
+
+        store.dispatchSync({ ...action({ value: newer }), version: 8 });
+
+        expect(store.state.settings[field]).toBe(newer);
+        expect(store.state.lww['settings.code']).toBeUndefined();
+        expect(store.state.settings.lockedValues).toEqual(lockedValues);
+        expect(store.state.editor.screenBaseline).toBeNull();
+        expect(JSON.parse(toJson(store.state)).settings[field]).toBe(
+          lockedValues[field]
+        );
+      }
+    );
+
+    it.each(CODE_SETTINGS)(
+      'drops a peer’s %s setter under its lock, as an editor built before the rule sends one, and every one a replica takes, then writes any through the register once the lock is off',
+      (field, action, lockSettingType, newer, older) => {
+        const shown = store.state.settings[field];
+        const context: ReplicaEngineContext = {
+          toWidth,
+          clock: new Clock(),
+          remote: true,
+        };
+        const replica = createStore(context);
+
+        store.dispatchSync(
+          tag({ ...action({ value: newer }), version: 8 }, Tag.shared)
+        );
+        replica.dispatchSync({ ...action({ value: newer }), version: 8 });
+
+        for (const { state } of [store, replica]) {
+          expect(state.settings[field]).toBe(shown);
+          expect(state.lww['settings.code']).toBeUndefined();
+        }
+        replica.destroy();
+
+        store.dispatchSync(
+          changeLockSettingsAction({
+            lockSettingType,
+            value: false,
+            values: {},
+          })
+        );
+        store.dispatchSync(
+          tag({ ...action({ value: newer }), version: 9 }, Tag.shared),
+          { ...action({ value: older }), version: 7 }
+        );
+
+        expect(store.state.settings[field]).toBe(newer);
+        expect(store.state.lww['settings.code']?.[3]).toEqual({ [field]: 9 });
+      }
+    );
+  });
+
+  describe('changeNameViewMode', () => {
+    const { unlockNameViewMode } = LockSettingType;
+    const { physical, logical, both } = NameViewMode;
+
+    const switchTo = (
+      value: string,
+      shared: boolean,
+      editorId: string,
+      version?: number
+    ): AnyAction => ({
+      ...changeNameViewModeAction({ value: value as any, shared, editorId }),
+      ...(version === undefined ? {} : { version }),
+    });
+    const unlockAt = (version: number, nameViewMode: string) => ({
+      ...changeLockSettingsAction({
+        lockSettingType: unlockNameViewMode,
+        value: false,
+        values: { nameViewMode: nameViewMode as any },
+      }),
+      version,
+    });
+
+    /** The settings of two peers handed both actions, one in each order. */
+    const inBothOrders = (a: AnyAction, b: AnyAction) =>
+      [
+        [a, b],
+        [b, a],
+      ].map(order => {
+        const peer = createTestStore();
+        order.forEach(action => peer.dispatchSync(action));
+        return peer.state.settings;
+      });
+
+    it('starts on the physical names, locked with its bit clear', () => {
+      expect(store.state.settings.nameViewMode).toBe(physical);
+      expect(bHas(store.state.settings.lockSettings, unlockNameViewMode)).toBe(
+        false
+      );
+    });
+
+    it('writes a shared switch through its register, the latest winning whatever order', () => {
+      store.dispatchSync(
+        switchTo(both, true, 'someone', 8),
+        switchTo(logical, true, 'someone else', 6)
+      );
+
+      expect(store.state.settings.nameViewMode).toBe(both);
+      expect(store.state.lww['settings.nameViewMode']).toEqual([
+        'settings',
+        -1,
+        -1,
+        { nameViewMode: 8 },
+      ]);
+    });
+
+    it('shows a switch its own editor made off the register, on this store alone', () => {
+      const own = store.state.editor.id;
+
+      store.dispatchSync(switchTo(logical, false, own, 3));
+
+      expect(store.state.settings.nameViewMode).toBe(logical);
+      expect(store.state.lww).not.toHaveProperty('settings.nameViewMode');
+
+      store.dispatchSync(switchTo(both, true, own, 2));
+
+      expect(store.state.settings.nameViewMode).toBe(both);
+    });
+
+    it.each([
+      ['untagged', undefined],
+      ['tagged as a follow from a peer', Tag.shared | Tag.following],
+    ])(
+      'drops a switch another editor made for its own screen, %s',
+      (_, tags) => {
+        const action = switchTo(logical, false, 'another editor');
+
+        store.dispatchSync(tags === undefined ? action : tag(action, tags));
+
+        expect(store.state.settings.nameViewMode).toBe(physical);
+      }
+    );
+
+    it('reads a switch without its flags as another editor’s own', () => {
+      store.dispatchSync({
+        type: ActionType.changeNameViewMode,
+        payload: { value: logical },
+      });
+
+      expect(store.state.settings.nameViewMode).toBe(physical);
+    });
+
+    it('ignores a name view no editor shows', () => {
+      store.dispatchSync(
+        switchTo('tree', true, 'someone'),
+        switchTo('tree', false, store.state.editor.id)
+      );
+
+      expect(store.state.settings.nameViewMode).toBe(physical);
+      expect(store.state.lww).not.toHaveProperty('settings.nameViewMode');
+    });
+
+    it('unlocks by setting its bit and shows the value carried through the same register', () => {
+      store.dispatchSync(unlockAt(5, both));
+
+      expect(store.state.settings.lockSettings).toBe(63 | unlockNameViewMode);
+      expect(store.state.settings.nameViewMode).toBe(both);
+      expect(store.state.lww['settings.nameViewMode'][3]).toEqual({
+        nameViewMode: 5,
+      });
+      expect(store.state.settings.lockedValues.nameViewMode).toBe(physical);
+    });
+
+    it('locks by clearing its bit at the value carried, and refuses one no editor shows', () => {
+      store.dispatchSync(unlockAt(1, both));
+      store.dispatchSync({
+        ...changeLockSettingsAction({
+          lockSettingType: unlockNameViewMode,
+          value: true,
+          values: { nameViewMode: 'tree' as any },
+        }),
+        version: 2,
+      });
+
+      expect(store.state.settings.lockSettings).toBe(63 | unlockNameViewMode);
+
+      store.dispatchSync({
+        ...changeLockSettingsAction({
+          lockSettingType: unlockNameViewMode,
+          value: true,
+          values: { nameViewMode: logical },
+        }),
+        version: 3,
+      });
+
+      expect(store.state.settings.lockSettings).toBe(63);
+      expect(store.state.settings.lockedValues.nameViewMode).toBe(logical);
+    });
+
+    it.each([
+      ['newer', 11, logical],
+      ['older', 9, both],
+    ])(
+      'lands one name view whichever order an unlock meets a shared switch %s than it in',
+      (_, switchVersion, landed) => {
+        const peers = inBothOrders(
+          unlockAt(10, both),
+          switchTo(logical, true, 'someone', switchVersion)
+        );
+
+        expect(peers.map(settings => settings.nameViewMode)).toEqual([
+          landed,
+          landed,
+        ]);
+      }
+    );
+
+    it('shares a reader’s switch only while the lock is off and the store may edit', () => {
+      const { state } = store;
+
+      expect(toNameViewModeAction(state, logical, false)).toEqual(
+        changeNameViewModeAction({
+          value: logical,
+          shared: false,
+          editorId: state.editor.id,
+        })
+      );
+
+      store.dispatchSync(unlockAt(1, physical));
+
+      expect(toNameViewModeAction(state, both, false).payload).toEqual({
+        value: both,
+        shared: true,
+        editorId: state.editor.id,
+      });
+      expect(toNameViewModeAction(state, both, true).payload.shared).toBe(
+        false
+      );
+    });
+  });
+
   describe('changeIgnoreSaveSettings', () => {
-    it('sets and clears the requested bit', () => {
-      store.dispatchSync(
-        changeIgnoreSaveSettingsAction({
-          saveSettingType: SaveSettingType.scroll,
-          value: true,
-        })
-      );
-      expect(store.state.settings.ignoreSaveSettings).toBe(
-        SaveSettingType.scroll
-      );
+    it('changes nothing, the locks having replaced the switch', () => {
+      const before = JSON.stringify(store.state.settings);
 
       store.dispatchSync(
-        changeIgnoreSaveSettingsAction({
-          saveSettingType: SaveSettingType.zoomLevel,
-          value: true,
-        })
-      );
-      expect(store.state.settings.ignoreSaveSettings).toBe(
-        SaveSettingType.scroll | SaveSettingType.zoomLevel
+        changeIgnoreSaveSettingsAction({ saveSettingType: 3, value: true }),
+        changeIgnoreSaveSettingsAction({ saveSettingType: 1, value: false })
       );
 
-      store.dispatchSync(
-        changeIgnoreSaveSettingsAction({
-          saveSettingType: SaveSettingType.scroll,
-          value: false,
-        })
-      );
-      expect(store.state.settings.ignoreSaveSettings).toBe(
-        SaveSettingType.zoomLevel
-      );
+      expect(JSON.stringify(store.state.settings)).toBe(before);
     });
   });
 
@@ -1074,11 +1907,13 @@ describe('settings/atom.actions', () => {
         'changeColumnOrderAction',
         'changeDatabaseAction',
         'changeDatabaseNameAction',
+        'changeDDLScriptAction',
         'changeIgnoreSaveSettingsAction',
         'changeLanguageAction',
+        'changeLockSettingsAction',
         'changeMaxWidthCommentAction',
+        'changeNameViewModeAction',
         'changeRelationshipDataTypeSyncAction',
-        'changeRelationshipOptimizationAction',
         'changeShowAction',
         'changeTableNameCaseAction',
         'changeZoomLevelAction',

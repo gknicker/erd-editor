@@ -1,12 +1,13 @@
 import type { AnyAction } from '@dineug/r-html';
 
 import type { AppContext } from '@/components/appContext';
-import { PlacingToast } from '@/components/erd/automatic-table-placement/runElkPlacement';
+import { PlacingToast } from '@/components/erd/automatic-table-placement/elkPlacement';
 import {
   getScrollToCenter,
   getViewTransform,
 } from '@/components/erd/minimap/minimapGeometry';
-import Toast from '@/components/primitives/toast/Toast';
+import { localized } from '@/components/localized/Localized';
+import { openStatusToast } from '@/components/toast-container/openStatusToast';
 import { CANVAS_ZOOM_MAX } from '@/constants/schema';
 import { TablePlacement } from '@/constants/tablePlacement';
 import {
@@ -21,7 +22,10 @@ import {
   viewScrollToAction,
   viewSetLayoutAction,
 } from '@/engine/modules/editor/view.actions';
-import { hasViewport } from '@/engine/modules/settings/atom.actions';
+import {
+  changeNameViewModeAction,
+  hasViewport,
+} from '@/engine/modules/settings/atom.actions';
 import type { RxStore } from '@/engine/rx-store';
 import type { RootState } from '@/engine/state';
 import type { Point } from '@/internal-types';
@@ -54,6 +58,8 @@ type FlowLayouts = {
   focused: Landing | null;
   pending: { key: string } | null;
   stood: string | null;
+  /** Whether the reader switched the name view here, which the next stand fits to. */
+  fit: boolean;
 };
 
 /**
@@ -77,6 +83,7 @@ function layoutsOf(view: SceneView): FlowLayouts {
     focused: null,
     pending: null,
     stood: null,
+    fit: false,
   };
   layouts.set(view, entry);
 
@@ -96,9 +103,9 @@ const framingOf = (view: SceneView): string =>
   [view.centerIds.join(' '), view.showMode].join('|');
 
 /**
- * What a placement was computed over: the centers, the show mode, and the
- * document's own lists. Never the positions a landing writes, since the loop
- * reading this asks again on a change and would otherwise be reading its own answer.
+ * What a placement was computed over: the centers, the show mode, the name
+ * view, whose cells size the cards, and the document's own lists. Never the
+ * positions a landing writes, or the loop reading this would ask again on its own answer.
  */
 function placedKey(state: RootState): string {
   const view = state.editor.views.flow;
@@ -108,6 +115,7 @@ function placedKey(state: RootState): string {
 
   return [
     framingOf(view),
+    state.settings.nameViewMode,
     doc.tableIds.join(' '),
     doc.relationshipIds.join(' '),
   ].join('|');
@@ -138,8 +146,8 @@ export function fitFlowView(store: RxStore): void {
 
 /**
  * Stands the view on the positions given, and moves the screen to them only
- * where the reader asked to be moved: a first placement, a framing they
- * changed, a Tidy up. A return to the tab and a peer's edit keep the viewport.
+ * where the reader asked: a first placement, a framing they changed, a name
+ * view they switched here, a Tidy up. A return to the tab and a peer's edit or switch keep the viewport.
  */
 function standFlowView(
   store: RxStore,
@@ -149,8 +157,9 @@ function standFlowView(
 ): void {
   const entry = layoutsOf(view);
   const framing = framingOf(view);
-  const fits = forced || entry.stood !== framing;
+  const fits = forced || entry.fit || entry.stood !== framing;
   entry.stood = framing;
+  entry.fit = false;
 
   store.dispatchSync(viewSetLayoutAction({ kind: FLOW, positions }));
   fits && fitFlowView(store);
@@ -212,7 +221,7 @@ function flowLayoutRequest(
  */
 export function ensureFlowPlaced(
   app: AppContext,
-  { force = false }: { force?: boolean } = {}
+  { force = false, fit = false }: { force?: boolean; fit?: boolean } = {}
 ): Promise<void> {
   const { store } = app;
 
@@ -228,6 +237,7 @@ export function ensureFlowPlaced(
   const entry = layoutsOf(view);
   const slot = slotOf(view);
   const key = placedKey(store.state);
+  if (fit) entry.fit = true;
 
   if (!force && entry.pending?.key === key) return Promise.resolve();
 
@@ -313,11 +323,11 @@ async function requestFlowLayout(
     console.warn('[visualization] no flow layout came back', error);
     if (cancelled) return;
 
-    emitter.emit(
-      openToastAction({
-        message: <Toast description="Could not place tables" />,
-      })
-    );
+    openStatusToast(emitter, {
+      key: 'common.toast.couldNotPlaceTables',
+      tone: 'error',
+      title: localized('common.toast.couldNotPlaceTables'),
+    });
   }
 }
 
@@ -359,6 +369,17 @@ function isRefocusBatch(
   );
 }
 
+/** Whether the batch holds this reader's own switch of the name view, which a peer's never is. */
+const isOwnNameViewSwitch = (
+  actions: ReadonlyArray<AnyAction>,
+  state: RootState
+): boolean =>
+  actions.some(
+    ({ type, payload }) =>
+      type === changeNameViewModeAction.type &&
+      payload?.editorId === state.editor.id
+  );
+
 /**
  * Keeps the Flow view placed for as long as the tab draws it: placed again
  * after any batch that changed what it is placed over, and never at the
@@ -387,6 +408,6 @@ export function keepFlowPlaced(app: AppContext): () => void {
 
     key = next;
     placed = view;
-    ensureFlowPlaced(app);
+    ensureFlowPlaced(app, { fit: isOwnNameViewSwitch(actions, store.state) });
   });
 }

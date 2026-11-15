@@ -56,6 +56,8 @@ describe('erdShortcutPerformCheck', () => {
     Open.search,
     Open.diffViewer,
     Open.timeTravel,
+    Open.exportImage,
+    Open.mapColumns,
   ])('blocks values while %s is open', open => {
     const source$ = new Subject<string>();
     const next = vi.fn();

@@ -38,28 +38,26 @@ export class SchemaService {
     this.cache.set(entity.id, { ...entity, store });
     this.load(entity.id, store, entity.value);
     store.on({
-      change: () => this.persist(entity.id, store),
+      change: ({ value }) => this.persist(entity.id, value),
     });
   }
 
   /**
-   * Replaces the replica's value and measures later edits against it. The
-   * baseline waits a microtask for the tombstone collection the engine queues
-   * on every load, which is housekeeping rather than an edit.
+   * Replaces the replica's value and measures later edits against it. The load
+   * returns with what it derives written, which is housekeeping rather than an
+   * edit.
    */
   private load(id: string, store: ReplicationStore, value: string) {
     store.setInitialValue(value);
-    queueMicrotask(() => {
-      if (this.cache.get(id)?.store !== store) return;
-      this.fingerprints.set(id, toFingerprint(store.value));
-    });
+    this.fingerprints.set(id, toFingerprint(store.value));
   }
 
-  private persist(id: string, store: ReplicationStore) {
+  private persist(id: string, value: string) {
     const prev = this.cache.get(id);
-    if (!prev) return;
+    // A change that left the stored value as it was, such as a scroll on a
+    // schema that saves none, has nothing to write.
+    if (!prev || value === prev.value) return;
 
-    const value = store.value;
     const fingerprint = toFingerprint(value);
     const edited = fingerprint !== this.fingerprints.get(id);
     const entityValue: SchemaEntityPatch = edited
@@ -127,9 +125,16 @@ export class SchemaService {
     }
   }
 
+  /**
+   * The schema to open, whose value is an open replica's runtime value, removed
+   * entities included, for a second tab or a guest to seed from, so an undo sent
+   * there brings an entity back whole; else the stored value, which opens one.
+   */
   async get(id: string) {
     const prev = this.cache.get(id);
-    if (prev) return omit(prev, ['store']);
+    if (prev) {
+      return { ...omit(prev, ['store']), value: prev.store.runtimeValue };
+    }
 
     const result = await getSchemaEntity(this.db, id);
     result && this.createCache(result);

@@ -11,6 +11,8 @@ export const TOOL_SCENARIOS: Readonly<Record<string, Record<string, unknown>>> =
     erd_remove_table: { tableId: SEED.orders },
     erd_change_table_name: { tableId: SEED.users, value: 'members' },
     erd_change_table_comment: { tableId: SEED.users, value: 'who signs in' },
+    // The derived users table takes the term's physical name.
+    erd_set_table_logical_name: { tableId: SEED.users, value: 'Member Number' },
     erd_change_table_color: { tableId: SEED.users, color: '#ff8800' },
     erd_move_table: { tableId: SEED.users, x: 40, y: 60 },
     erd_move_tables: {
@@ -45,6 +47,17 @@ export const TOOL_SCENARIOS: Readonly<Record<string, Record<string, unknown>>> =
       columnId: SEED.userName,
       value: 'shown to others',
     },
+    // The derived name column takes the term's physical name and its domain.
+    erd_set_column_logical_name: {
+      tableId: SEED.users,
+      columnId: SEED.userName,
+      value: 'Member Number',
+    },
+    erd_set_column_domain: {
+      tableId: SEED.users,
+      columnId: SEED.userName,
+      domainName: 'Identifier',
+    },
     erd_set_column_primary_key: {
       tableId: SEED.users,
       columnId: SEED.userName,
@@ -70,9 +83,9 @@ export const TOOL_SCENARIOS: Readonly<Record<string, Record<string, unknown>>> =
       columnId: SEED.orderNote,
       targetColumnId: SEED.orderId,
     },
-    // A start table with no key, so the relationship brings one of its own.
+    // Users to itself: its key links a domain, which the foreign key copies.
     erd_add_relationship: {
-      startTableId: SEED.empty,
+      startTableId: SEED.users,
       endTableId: SEED.users,
       relationshipType: 'ZeroN',
     },
@@ -87,6 +100,14 @@ export const TOOL_SCENARIOS: Readonly<Record<string, Record<string, unknown>>> =
     erd_change_relationship_type: {
       relationshipId: SEED.relationship,
       relationshipType: 'ZeroOne',
+    },
+    erd_change_relationship_on_delete: {
+      relationshipId: SEED.relationship,
+      onDelete: 'cascade',
+    },
+    erd_change_relationship_on_update: {
+      relationshipId: SEED.relationship,
+      onUpdate: 'setNull',
     },
     erd_add_index: { tableId: SEED.users },
     erd_remove_index: { indexId: SEED.index },
@@ -113,21 +134,42 @@ export const TOOL_SCENARIOS: Readonly<Record<string, Record<string, unknown>>> =
     erd_change_memo_color: { memoId: SEED.memo, color: '#336699' },
     erd_move_memo: { memoId: SEED.memo, x: 960, y: 420 },
     erd_resize_memo: { memoId: SEED.memo, width: 320, height: 240 },
+    erd_add_table_group: {
+      name: 'shipping',
+      color: '#22c55e',
+      tableIds: [SEED.orders],
+    },
+    erd_remove_table_group: { groupId: SEED.group },
+    erd_change_table_group_name: { groupId: SEED.group, value: 'members' },
+    erd_change_table_group_color: { groupId: SEED.group, color: '#a855f7' },
+    erd_move_table_group: { groupId: SEED.group, x: 160, y: 140 },
+    erd_resize_table_group: {
+      groupId: SEED.group,
+      x: 20,
+      y: 10,
+      width: 640,
+      height: 420,
+    },
+    erd_set_table_group: { tableIds: [SEED.orders], groupId: SEED.group },
+    erd_add_word: { name: 'Order', abbreviation: 'ORD', englishName: 'Order' },
+    erd_update_word: { wordId: SEED.memberWord, englishName: 'Club member' },
+    erd_remove_word: { wordId: SEED.numberWord },
+    // A physical name the words compose, and a domain by its name.
+    erd_add_term: { name: 'Number', domainName: 'Identifier' },
+    erd_update_term: { termId: SEED.term, description: 'Signs a member in' },
+    erd_remove_term: { termId: SEED.term },
+    erd_add_domain: { name: 'Text', category: 'Text', dataType: 'TEXT' },
+    // The key of users links the domain, and the data type sync reaches orders.
+    erd_update_domain: { domainId: SEED.domain, dataType: 'BIGINT' },
+    erd_remove_domain: { domainId: SEED.domain },
+    // The users table's logical name composes MBR from the word Member.
+    erd_derive_physical_names: { scope: 'document' },
     erd_set_database_name: { value: 'shop' },
     erd_set_database: { value: 'PostgreSQL' },
-    erd_set_language: { value: 'TypeScript' },
-    erd_set_table_name_case: { value: 'snakeCase' },
-    erd_set_column_name_case: { value: 'snakeCase' },
-    erd_set_bracket_type: { value: 'backtick' },
-    erd_set_relationship_data_type_sync: { value: false },
-    erd_set_relationship_optimization: { value: true },
-    erd_set_column_order: {
-      columnType: 'columnComment',
-      targetColumnType: 'columnName',
+    erd_set_ddl_script: {
+      position: 'before',
+      sql: 'CREATE EXTENSION IF NOT EXISTS pgcrypto;',
     },
-    erd_set_show: { show: 'columnUnique', value: true },
-    erd_set_max_width_comment: { value: 120 },
-    erd_set_ignore_save_settings: { saveSettingType: 'scroll', value: true },
     erd_import_sql: {
       value:
         'CREATE TABLE accounts (id INT NOT NULL PRIMARY KEY, email VARCHAR(255));',
@@ -136,8 +178,25 @@ export const TOOL_SCENARIOS: Readonly<Record<string, Record<string, unknown>>> =
       value: 'type Account {\n  id: ID!\n  email: String\n}',
     },
     erd_import_dbml: {
-      value: 'Table accounts {\n  id int [pk]\n  email varchar\n}',
+      value:
+        'Table accounts {\n  id int [pk]\n  email varchar\n}\n\nTableGroup billing {\n  accounts\n}',
     },
     erd_import_aml: { value: 'accounts\n  id int pk\n  email varchar' },
     erd_import_json: { value: createImportValue() },
   };
+
+/**
+ * The import tools again with mode append, each adding what its text holds
+ * below the seed: a table, and from the document and the DBML a table group too.
+ */
+export const APPEND_SCENARIOS: Readonly<
+  Record<string, Record<string, unknown>>
+> = Object.fromEntries(
+  [
+    'erd_import_sql',
+    'erd_import_graphql',
+    'erd_import_dbml',
+    'erd_import_aml',
+    'erd_import_json',
+  ].map(name => [name, { ...TOOL_SCENARIOS[name], mode: 'append' }])
+);

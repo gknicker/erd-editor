@@ -86,11 +86,20 @@ describe('a dispatch reports the undo entries the engine makes (AC-P2)', () => {
       'setColumnNameCase',
       'setBracketType',
       'setRelationshipDataTypeSync',
-      'setRelationshipOptimization',
       'setColumnOrder',
       'setMaxWidthComment',
-      'setIgnoreSaveSettings',
+      'setLockSettings',
+      'setNameViewMode',
+      'unlockNameViewMode',
     ]);
+  });
+
+  it('records one entry for a link to existing columns, a mapping edit and a mapping that adds its column', () => {
+    const entries = ['linkColumns', 'changeColumns', 'mapWithNewColumn'].map(
+      name => play(seededPeer(), SEED_SCENARIOS[name]()).historyEntries
+    );
+
+    expect(entries).toEqual([1, 1, 1]);
   });
 
   it('leaves no entry only where the undo map holds none of the types sent', () => {

@@ -11,18 +11,22 @@ describe('createTable', () => {
 
     expect(table.id).toBe('');
     expect(table.name).toBe('');
+    expect(table.logicalName).toBe('');
     expect(table.comment).toBe('');
     expect(table.columnIds).toEqual([]);
     expect(table.seqColumnIds).toEqual([]);
+    expect(table.groupId).toBe('');
+    expect(table.nameDerived).toBe(false);
     expect(table.ui).toEqual({
       x: 200,
       y: 100,
       zIndex: 2,
       widthName: 60,
+      widthLogicalName: 60,
       widthComment: 60,
       color: '',
     });
-    expect(table.meta.createAt).toBe(table.meta.updateAt);
+    expect(table).not.toHaveProperty('meta');
   });
 });
 
@@ -36,13 +40,16 @@ describe('createAndMergeTableEntities', () => {
     expect(createAndMergeTableEntities(source as any)).toEqual({});
   });
 
-  it('skips falsy entries and entries without an id', () => {
+  it('skips an entry that is not an object, and keys one without an id by its key', () => {
     const entities = createAndMergeTableEntities({
       a: null as any,
       b: { name: 'no-id' },
+      c: 'users' as any,
+      '': { name: 'no key' },
     });
 
-    expect(entities).toEqual({});
+    expect(Object.keys(entities)).toEqual(['b']);
+    expect(entities.b).toMatchObject({ id: 'b', name: 'no-id' });
   });
 
   it('merges every field', () => {
@@ -50,36 +57,42 @@ describe('createAndMergeTableEntities', () => {
       key: {
         id: 't1',
         name: 'users',
+        logicalName: 'User',
         comment: 'user table',
         columnIds: ['c1', 'c2'],
         seqColumnIds: ['c1', 'c2', 'c3'],
+        groupId: 'g1',
+        nameDerived: true,
         ui: {
           x: 10,
           y: 20,
           zIndex: 5,
           widthName: 80,
+          widthLogicalName: 70,
           widthComment: 90,
           color: '#123456',
         },
-        meta: { updateAt: 1, createAt: 2 },
       },
     });
 
     expect(entities.t1).toEqual({
       id: 't1',
       name: 'users',
+      logicalName: 'User',
       comment: 'user table',
       columnIds: ['c1', 'c2'],
       seqColumnIds: ['c1', 'c2', 'c3'],
+      groupId: 'g1',
+      nameDerived: true,
       ui: {
         x: 10,
         y: 20,
         zIndex: 5,
         widthName: 80,
+        widthLogicalName: 70,
         widthComment: 90,
         color: '#123456',
       },
-      meta: { updateAt: 1, createAt: 2 },
     });
   });
 
@@ -88,17 +101,31 @@ describe('createAndMergeTableEntities', () => {
       key: {
         id: 't1',
         name: 1 as any,
+        logicalName: null as any,
         columnIds: 'c1' as any,
+        groupId: 7 as any,
+        nameDerived: 1 as any,
         ui: { x: '10' as any, color: 3 as any, widthName: 80 },
       },
     });
 
     const table = entities.t1;
     expect(table.name).toBe('');
+    expect(table.logicalName).toBe('');
     expect(table.columnIds).toEqual([]);
+    expect(table.groupId).toBe('');
+    expect(table.nameDerived).toBe(false);
     expect(table.ui.x).toBe(200);
     expect(table.ui.color).toBe('');
     expect(table.ui.widthName).toBe(80);
+  });
+
+  it('keeps a group id naming no group as saved, for the readers to judge', () => {
+    const entities = createAndMergeTableEntities({
+      key: { id: 't1', groupId: 'gone' },
+    });
+
+    expect(entities.t1.groupId).toBe('gone');
   });
 
   it('keeps the ui defaults when ui is missing', () => {
@@ -109,9 +136,45 @@ describe('createAndMergeTableEntities', () => {
       y: 100,
       zIndex: 2,
       widthName: 60,
+      widthLogicalName: 60,
       widthComment: 60,
       color: '',
     });
+  });
+
+  it.each([
+    ['missing', undefined],
+    ['missing an id the columns list', ['c1', 'c3']],
+    ['not an array', 'c1'],
+  ])(
+    'starts the column sequence at the columns when it is %s',
+    (_, seqColumnIds) => {
+      const columnIds = ['c2', 'c1', 'c3'];
+      const entities = createAndMergeTableEntities({
+        key: { id: 't1', columnIds, seqColumnIds: seqColumnIds as any },
+      });
+
+      expect(entities.t1.seqColumnIds).toEqual(['c2', 'c1', 'c3']);
+      expect(entities.t1.seqColumnIds).not.toBe(entities.t1.columnIds);
+    }
+  );
+
+  it('keeps a column sequence that holds every listed column', () => {
+    const entities = createAndMergeTableEntities({
+      key: {
+        id: 't1',
+        columnIds: ['c2', 'c1'],
+        seqColumnIds: ['c1', 'c9', 'c2'],
+      },
+    });
+
+    expect(entities.t1.seqColumnIds).toEqual(['c1', 'c9', 'c2']);
+  });
+
+  it('keeps the empty column sequence of a table without columns', () => {
+    const entities = createAndMergeTableEntities({ key: { id: 't1' } });
+
+    expect(entities.t1.seqColumnIds).toEqual([]);
   });
 
   it('merges several tables', () => {

@@ -14,10 +14,23 @@ import {
   vi,
 } from 'vite-plus/test';
 
-import { CanvasType, Show } from '@/constants/schema';
+import {
+  CanvasType,
+  Language,
+  LockSettingType,
+  NameViewMode,
+  Show,
+} from '@/constants/schema';
 import { ChangeActionTypes, SharedActionTypes } from '@/engine/action-types';
 import { Clock } from '@/engine/clock';
 import {
+  addDictionaryAction,
+  removeDictionaryAction,
+  updateDictionaryAction,
+} from '@/engine/modules/dictionary/atom.actions';
+import {
+  changeDrawTableGroupAction,
+  changeHandToolAction,
   changeHasHistoryAction,
   changeOpenMapAction,
   changeViewportAction,
@@ -33,6 +46,8 @@ import {
   editMemoEndAction,
   editTableAction,
   editTableEndAction,
+  editTableGroupAction,
+  editTableGroupEndAction,
   focusColumnAction,
   focusMoveTableAction,
   focusTableAction,
@@ -42,6 +57,7 @@ import {
   hoverRelationshipMapAction,
   initialClearAction,
   initialLoadJsonAction,
+  keepsDictionaries,
   loadJsonAction,
   mergeLWWAction,
   scrollMemoAction,
@@ -54,15 +70,19 @@ import {
   sharedMouseTrackerAction,
   sharedSelectionTrackerAction,
   unselectAllAction,
-  validationIdsAction,
 } from '@/engine/modules/editor/atom.actions';
 import {
   FocusType,
+  isEditingText,
   MoveKey,
   SelectType,
   type SharedFocus,
 } from '@/engine/modules/editor/state';
 import {
+  changeCanvasTypeAction,
+  changeLanguageAction,
+  changeLockSettingsAction,
+  changeZoomLevelAction,
   getContentScrollRanges,
   scrollToAction,
   streamScrollToAction,
@@ -72,12 +92,10 @@ import { Tag } from '@/engine/tag';
 import { getContentRect } from '@/konva/scene/contentBounds';
 import { getTableRect } from '@/konva/scene/metrics';
 import { toScreenPoint } from '@/konva/scene/viewport';
-import { createIndex } from '@/utils/collection/index.entity';
-import { createIndexColumn } from '@/utils/collection/indexColumn.entity';
 import { createMemo } from '@/utils/collection/memo.entity';
-import { createRelationship } from '@/utils/collection/relationship.entity';
 import { createTable } from '@/utils/collection/table.entity';
 import { createColumn } from '@/utils/collection/tableColumn.entity';
+import { createTableGroup } from '@/utils/collection/tableGroup.entity';
 import { type Rect } from '@/utils/dragSelect';
 
 function createTestStore(enableObservable = true): Store {
@@ -110,6 +128,13 @@ function addMemo(store: Store, id: string) {
   store.state.collections.memoEntities[id] = memo;
   store.state.doc.memoIds.push(id);
   return memo;
+}
+
+function addTableGroup(store: Store, id: string) {
+  const group = createTableGroup({ id });
+  store.state.collections.tableGroupEntities[id] = group;
+  store.state.doc.tableGroupIds.push(id);
+  return group;
 }
 
 /** table t1 with columns c1, c2, c3. */
@@ -178,6 +203,8 @@ describe('editor.selectAll / unselectAll / select', () => {
   });
 
   it('merges the select payload into the existing map', () => {
+    addTable(store, 't1');
+    addMemo(store, 'm1');
     store.dispatchSync(selectAction({ t1: SelectType.table }));
     store.dispatchSync(selectAction({ m1: SelectType.memo }));
 
@@ -187,7 +214,58 @@ describe('editor.selectAll / unselectAll / select', () => {
     });
   });
 
+  it('selects only the ids the document lists for their type', () => {
+    addTable(store, 't1');
+    addTable(store, 't2');
+    addMemo(store, 'm1');
+    addTableGroup(store, 'g1');
+    store.state.collections.tableEntities.gone = createTable({ id: 'gone' });
+
+    store.dispatchSync(
+      selectAction({
+        t1: SelectType.table,
+        m1: SelectType.memo,
+        g1: SelectType.tableGroup,
+        ghost: SelectType.table,
+        gone: SelectType.table,
+        t2: SelectType.memo,
+      })
+    );
+
+    expect(store.state.editor.selectedMap).toEqual({
+      t1: SelectType.table,
+      m1: SelectType.memo,
+      g1: SelectType.tableGroup,
+    });
+  });
+
+  it('reads each id of a list once, however many ids a select names', () => {
+    const plain = createTestStore(false);
+    const ids = Array.from({ length: 1000 }, (_, index) => `t${index}`);
+    let reads = 0;
+    plain.state.doc.tableIds = new Proxy(ids, {
+      get(target, key, receiver) {
+        if (typeof key === 'string' && /^\d+$/.test(key)) reads++;
+        return Reflect.get(target, key, receiver);
+      },
+    });
+
+    plain.dispatchSync(
+      selectAction(
+        Object.fromEntries(
+          [...ids, 'ghost'].map(id => [id, SelectType.table] as const)
+        )
+      )
+    );
+
+    expect(Object.keys(plain.state.editor.selectedMap)).toHaveLength(1000);
+    expect(reads).toBe(1000);
+    plain.destroy();
+  });
+
   it('clears every entry on unselectAll', () => {
+    addTable(store, 't1');
+    addMemo(store, 'm1');
     store.dispatchSync(
       selectAction({ t1: SelectType.table, m1: SelectType.memo })
     );
@@ -251,7 +329,6 @@ const tableJson = (id: string, x: number, y: number) => ({
   columnIds: [],
   seqColumnIds: [],
   ui: { x, y, zIndex: 2, widthName: 60, widthComment: 60, color: '' },
-  meta: { updateAt: 1, createAt: 1 },
 });
 
 /** A document naming its zoom, its origin and the tables it holds. */
@@ -263,7 +340,7 @@ const documentAt = (
 ) =>
   JSON.stringify({
     version: '3.0.0',
-    settings: { zoomLevel, originX, originY },
+    settings: { zoomLevel, originX, originY, lockSettings: 0 },
     doc: { tableIds: tables.map(([id]) => id) },
     collections: {
       tableEntities: Object.fromEntries(
@@ -274,8 +351,7 @@ const documentAt = (
 
 /**
  * A document saved before the origin pair existed: it names the legacy scroll
- * pair, which the parser migrates once into an origin and otherwise carries as
- * it found it.
+ * pair, which the parser migrates once into an origin and then drops.
  */
 const legacyDocumentAt = (
   zoomLevel: number,
@@ -285,7 +361,7 @@ const legacyDocumentAt = (
 ) =>
   JSON.stringify({
     version: '3.0.0',
-    settings: { zoomLevel, scrollLeft, scrollTop },
+    settings: { zoomLevel, scrollLeft, scrollTop, lockSettings: 0 },
     doc: { tableIds: tables.map(([id]) => id) },
     collections: {
       tableEntities: Object.fromEntries(
@@ -467,8 +543,7 @@ describe('editor.loadJson / initialLoadJson', () => {
     expect(origin.originX).toBeLessThan(left.max);
     expect(origin.originY).toBeLessThan(top.max);
     expect(store.state.settings).toMatchObject(origin);
-    expect(store.state.settings.scrollLeft).toBe(0);
-    expect(store.state.settings.scrollTop).toBe(0);
+    expect(store.state.settings).not.toHaveProperty('scrollLeft');
   });
 
   it('migrates a legacy document, then pulls an origin outside the travel in', () => {
@@ -490,16 +565,13 @@ describe('editor.loadJson / initialLoadJson', () => {
     const near = toScreenPoint(store.state.settings, { x: rect.x, y: rect.y });
     expect(near.x).toBeCloseTo(0, 4);
     expect(near.y).toBeCloseTo(0, 4);
-    expect(store.state.settings.scrollLeft).toBe(-5_000);
-    expect(store.state.settings.scrollTop).toBe(-6_000);
   });
 
   /**
-   * The freeze in one round trip: the view moves, the document is written, and
-   * the legacy pair reads back exactly as the file arrived with it, beside an
-   * origin that has moved on from the one it migrated to.
+   * One round trip: the view moves, the document is written, and the origin
+   * read back is where the view went, the legacy pair written nowhere.
    */
-  it('writes the legacy pair back unchanged after the view has moved', () => {
+  it('writes the moved origin and none of the legacy pair', () => {
     store.dispatchSync(changeViewportAction(VIEWPORT));
     store.dispatchSync(
       loadJsonAction({
@@ -516,8 +588,9 @@ describe('editor.loadJson / initialLoadJson', () => {
     expect(settings.originY).toBe(100 + 20);
     expect(settings.originX).not.toBe(loaded.originX);
     expect(settings.originY).not.toBe(loaded.originY);
-    expect(settings.scrollLeft).toBe(-300);
-    expect(settings.scrollTop).toBe(-400);
+    expect(JSON.parse(toJson(store.state)).settings).not.toHaveProperty(
+      'scrollLeft'
+    );
   });
 
   /**
@@ -583,6 +656,38 @@ describe('editor.loadJson / initialLoadJson', () => {
     store.dispatchSync(changeViewportAction(VIEWPORT));
     expect(store.state.settings.originX).toBe(40_000);
   });
+
+  it('counts the origin shown once a measured screen held it, through a hide and a clear, until a load finds no screen', () => {
+    const shown = () => store.state.editor.originShown;
+    store.dispatchSync(changeViewportAction({ width: 0, height: 0 }));
+    expect(shown()).toBe(false);
+
+    store.dispatchSync(changeViewportAction(VIEWPORT));
+    expect(shown()).toBe(true);
+    store.dispatchSync(changeViewportAction({ width: 0, height: 0 }));
+    store.dispatchSync(clearAction());
+    expect(shown()).toBe(true);
+
+    store.dispatchSync(
+      loadJsonAction({ value: documentAt(1, 40_000, 0, [['t1', 0, 0]]) })
+    );
+    expect(shown()).toBe(false);
+    store.dispatchSync(clearAction());
+    expect(shown()).toBe(false);
+    store.dispatchSync(changeViewportAction(VIEWPORT));
+    expect(shown()).toBe(true);
+
+    store.dispatchSync(changeViewportAction({ width: 0, height: 0 }));
+    store.dispatchSync(
+      loadJsonAction({ value: documentAt(1, 40_000, 0, [['t1', 0, 0]]) })
+    );
+    store.dispatchSync({
+      ...scrollToAction({ originX: 40_000, originY: 0 }),
+      tags: Tag.screen,
+    });
+    expect(shown()).toBe(true);
+    expect(store.state.editor.scrollPullPending).toBe(false);
+  });
 });
 
 describe('editor.clear / initialClear', () => {
@@ -608,6 +713,26 @@ describe('editor.clear / initialClear', () => {
     expect(store.state.settings.databaseName).toBe('keep-me');
   });
 
+  it('ends a relationship draw on clear and leaves the memo and group name editors open', () => {
+    addTable(store, 't1');
+    addMemo(store, 'm1');
+    addTableGroup(store, 'g1');
+    store.dispatchSync(
+      editMemoAction({ id: 'm1' }),
+      editTableGroupAction({ id: 'g1' }),
+      drawStartRelationshipAction({ relationshipType: 8 }),
+      drawStartAddRelationshipAction({ tableId: 't1' })
+    );
+    expect(store.state.editor.drawRelationship?.start?.tableId).toBe('t1');
+
+    store.dispatchSync(clearAction());
+
+    const { editor } = store.state;
+    expect(editor.drawRelationship).toBeNull();
+    expect(editor.editMemoId).toBe('m1');
+    expect(editor.editTableGroupId).toBe('g1');
+  });
+
   it('resets doc and collections on initialClear', () => {
     seedTableWithColumns(store);
 
@@ -616,13 +741,255 @@ describe('editor.clear / initialClear', () => {
     expect(store.state.doc.tableIds).toEqual([]);
     expect(store.state.collections.tableEntities).toEqual({});
   });
+
+  it('ends a relationship draw and closes the memo, group name and cell editors on initialClear', () => {
+    addTable(store, 't1');
+    addMemo(store, 'm1');
+    addTableGroup(store, 'g1');
+    store.dispatchSync(
+      focusTableAction({ tableId: 't1' }),
+      editTableAction(),
+      editMemoAction({ id: 'm1' }),
+      editTableGroupAction({ id: 'g1' }),
+      drawStartRelationshipAction({ relationshipType: 8 }),
+      drawStartAddRelationshipAction({ tableId: 't1' })
+    );
+    expect(store.state.editor.focusTable?.edit).toBe(true);
+    expect(store.state.editor.drawRelationship?.start?.tableId).toBe('t1');
+
+    store.dispatchSync(initialClearAction());
+
+    const { editor } = store.state;
+    expect(editor.drawRelationship).toBeNull();
+    expect(editor.editMemoId).toBeNull();
+    expect(editor.editTableGroupId).toBeNull();
+    expect(isEditingText(editor)).toBe(false);
+  });
+});
+
+describe('editor.clear / loadJson that keep the dictionaries', () => {
+  /** A word, a term and a domain, one more domain removed, and a table. */
+  function seedDictionaries() {
+    seedTableWithColumns(store);
+    store.dispatchSync(
+      addDictionaryAction({ kind: 'word', id: 'w1', values: { name: 'W' } }),
+      addDictionaryAction({ kind: 'term', id: 't1', values: { name: 'T' } }),
+      addDictionaryAction({ kind: 'domain', id: 'd1', values: { name: 'D' } }),
+      addDictionaryAction({ kind: 'domain', id: 'd2', values: { name: 'R' } }),
+      removeDictionaryAction({ kind: 'domain', id: 'd2' })
+    );
+  }
+
+  const dictionariesOf = ({ doc, collections }: Store['state']) => ({
+    wordIds: doc.wordIds,
+    termIds: doc.termIds,
+    domainIds: doc.domainIds,
+    wordEntities: collections.wordEntities,
+    termEntities: collections.termEntities,
+    domainEntities: collections.domainEntities,
+  });
+
+  /** A document of one table and a dictionary row of its own in each sheet. */
+  const OTHER = JSON.stringify({
+    version: '3.0.0',
+    doc: { tableIds: ['other'] },
+    collections: {
+      tableEntities: { other: { id: 'other', name: 'other' } },
+      wordEntities: { fields: ['id', 'name'], rows: [['wx', 'X']] },
+      termEntities: { fields: ['id', 'name'], rows: [['tx', 'X']] },
+      domainEntities: { fields: ['id', 'name'], rows: [['dx', 'X']] },
+    },
+  });
+
+  it('keeps the three dictionaries and their own lists through a flagged clear', () => {
+    seedDictionaries();
+    const before = dictionariesOf(store.state);
+
+    store.dispatchSync(clearAction({ keepDictionaries: true }));
+
+    expect(store.state.doc.tableIds).toEqual([]);
+    expect(store.state.collections.tableEntities).toEqual({});
+    expect(dictionariesOf(store.state)).toEqual(before);
+    expect(store.state.doc.domainIds).toBe(before.domainIds);
+    expect(store.state.collections.domainEntities.d2.name).toBe('R');
+  });
+
+  it('keeps them through a flagged load, whatever dictionaries its text holds', () => {
+    seedDictionaries();
+    const before = dictionariesOf(store.state);
+
+    store.dispatchSync(
+      clearAction({ keepDictionaries: true }),
+      loadJsonAction({ value: OTHER, keepDictionaries: true })
+    );
+
+    expect(store.state.doc.tableIds).toEqual(['other']);
+    expect(dictionariesOf(store.state)).toEqual(before);
+    expect(store.state.doc.wordIds).toEqual(['w1']);
+    expect(store.state.collections.wordEntities).not.toHaveProperty('wx');
+  });
+
+  it('replaces them, removed rows included, through a clear or a load without the flag', () => {
+    seedDictionaries();
+
+    store.dispatchSync(clearAction());
+
+    expect(store.state.doc.wordIds).toEqual([]);
+    expect(store.state.collections.domainEntities).toEqual({});
+
+    seedDictionaries();
+    store.dispatchSync(
+      clearAction(),
+      loadJsonAction({ value: OTHER, keepDictionaries: false })
+    );
+
+    expect(store.state.doc.wordIds).toEqual(['wx']);
+    expect(store.state.doc.domainIds).toEqual(['dx']);
+    expect(Object.keys(store.state.collections.domainEntities)).toEqual(['dx']);
+  });
+
+  it('measures each column linking a kept domain by its name on a flagged load', () => {
+    seedDictionaries();
+    const value = JSON.stringify({
+      version: '3.0.0',
+      doc: { tableIds: ['t2'], domainIds: ['d1'] },
+      collections: {
+        tableEntities: { t2: { id: 't2', name: 't2', columnIds: ['c9'] } },
+        tableColumnEntities: {
+          c9: { id: 'c9', tableId: 't2', name: 'c9', domainId: 'd1' },
+        },
+        domainEntities: { fields: ['id', 'name'], rows: [['d1', 'Old']] },
+      },
+    });
+
+    store.dispatchSync(
+      updateDictionaryAction({
+        kind: 'domain',
+        id: 'd1',
+        values: { name: 'Money amount' },
+      }),
+      clearAction({ keepDictionaries: true }),
+      loadJsonAction({ value, keepDictionaries: true })
+    );
+
+    const column = store.state.collections.tableColumnEntities.c9;
+    expect(column.domainId).toBe('d1');
+    expect(store.state.collections.domainEntities.d1.name).toBe('Money amount');
+    expect(column.ui.widthDomain).toBe('Money amount'.length * 10);
+  });
+
+  it('reads a flag only when it is true, a later release sending another value', () => {
+    expect(keepsDictionaries({ keepDictionaries: true })).toBe(true);
+    expect(keepsDictionaries({ keepDictionaries: 'yes' })).toBe(false);
+    expect(keepsDictionaries({})).toBe(false);
+    expect(keepsDictionaries(undefined)).toBe(false);
+  });
+});
+
+/**
+ * A load that replaces the document while it is open keeps the reader's screen
+ * of each locked setting, while one that opens it takes what the file holds.
+ */
+describe('the locked settings a load lands', () => {
+  const fileOf = (lockSettings: number) =>
+    JSON.stringify({
+      version: '3.0.0',
+      settings: {
+        lockSettings,
+        canvasType: CanvasType.ERD,
+        language: Language.Java,
+        zoomLevel: 0.5,
+        originX: 0,
+        originY: 0,
+      },
+    });
+
+  beforeEach(() => {
+    store.dispatchSync(
+      changeCanvasTypeAction({ value: CanvasType.schemaSQL }),
+      changeLanguageAction({ value: Language.Kotlin }),
+      changeZoomLevelAction({ value: 1.2 })
+    );
+  });
+
+  it('keeps the screen of a locked setting but the view, and takes the lock from the load', () => {
+    store.dispatchSync(loadJsonAction({ value: fileOf(63) }));
+
+    const { settings } = store.state;
+    expect([
+      settings.canvasType,
+      settings.language,
+      settings.zoomLevel,
+    ]).toEqual([CanvasType.schemaSQL, Language.Kotlin, 0.5]);
+    expect(settings.lockedValues).toMatchObject({
+      canvasType: CanvasType.ERD,
+      language: Language.Java,
+      zoomLevel: 0.5,
+    });
+  });
+
+  it('takes the file value of a setting the load leaves unlocked', () => {
+    store.dispatchSync(
+      loadJsonAction({ value: fileOf(63 & ~LockSettingType.language) })
+    );
+
+    expect(store.state.settings.language).toBe(Language.Java);
+    expect(store.state.settings.canvasType).toBe(CanvasType.schemaSQL);
+  });
+
+  it('takes every value of the file when it opens the document', () => {
+    store.dispatchSync(initialLoadJsonAction({ value: fileOf(63) }));
+
+    expect(store.state.settings).toMatchObject({
+      canvasType: CanvasType.ERD,
+      language: Language.Java,
+      zoomLevel: 0.5,
+    });
+  });
+
+  it.each([
+    [63, 127],
+    [127, 63 & ~LockSettingType.language],
+  ])(
+    'takes the bits no lock owns from the load, as show, opened at %d and loading %d',
+    (opened, loaded) => {
+      store.dispatchSync(initialLoadJsonAction({ value: fileOf(opened) }));
+      store.dispatchSync(loadJsonAction({ value: fileOf(loaded) }));
+
+      expect(store.state.settings.lockSettings).toBe(loaded);
+      expect(JSON.parse(toJson(store.state)).settings.lockSettings).toBe(
+        loaded
+      );
+    }
+  );
+
+  it('leaves a lock newer than the load where it is', () => {
+    store.dispatchSync({
+      ...changeLockSettingsAction({
+        lockSettingType: LockSettingType.language,
+        value: false,
+        values: {},
+      }),
+      version: 50,
+    });
+
+    store.dispatchSync({
+      ...loadJsonAction({ value: fileOf(63) }),
+      version: 40,
+    });
+
+    const { settings } = store.state;
+    expect(settings.lockSettings).toBe(63 & ~LockSettingType.language);
+    expect(settings.language).toBe(Language.Java);
+    expect(settings.canvasType).toBe(CanvasType.schemaSQL);
+  });
 });
 
 describe('editor.loadJson / initialLoadJson', () => {
   const buildJson = (canvasType: string) =>
     JSON.stringify({
       version: '3.0.0',
-      settings: { canvasType, databaseName: 'loaded' },
+      settings: { canvasType, databaseName: 'loaded', lockSettings: 0 },
       doc: { tableIds: ['t1'], relationshipIds: [], indexIds: [], memoIds: [] },
       collections: {
         tableEntities: {
@@ -649,6 +1016,32 @@ describe('editor.loadJson / initialLoadJson', () => {
     expect(store.state.settings.canvasType).toBe(CanvasType.ERD);
   });
 
+  it.each([
+    ['loadJson', loadJsonAction],
+    ['initialLoadJson', initialLoadJsonAction],
+  ])('remembers the tab %s lands on, unless it is Settings', (_, load) => {
+    store.dispatchSync(load({ value: buildJson(CanvasType.generatorCode) }));
+    expect(store.state.editor.lastCanvasType).toBe(CanvasType.generatorCode);
+
+    store.dispatchSync(load({ value: buildJson(CanvasType.settings) }));
+    expect(store.state.settings.canvasType).toBe(CanvasType.settings);
+    expect(store.state.editor.lastCanvasType).toBe(CanvasType.generatorCode);
+  });
+
+  it('remembers the tab the reader left when a load moves them onto Settings', () => {
+    store.dispatchSync(
+      changeCanvasTypeAction({ value: CanvasType.generatorCode }),
+      changeCanvasTypeAction({ value: CanvasType.visualization })
+    );
+
+    store.dispatchSync(
+      loadJsonAction({ value: buildJson(CanvasType.settings) })
+    );
+
+    expect(store.state.settings.canvasType).toBe(CanvasType.settings);
+    expect(store.state.editor.lastCanvasType).toBe(CanvasType.visualization);
+  });
+
   it('loads through initialLoadJson as well', () => {
     store.dispatchSync(
       initialLoadJsonAction({ value: buildJson(CanvasType.visualization) })
@@ -656,6 +1049,110 @@ describe('editor.loadJson / initialLoadJson', () => {
 
     expect(store.state.doc.tableIds).toEqual(['t1']);
     expect(store.state.settings.canvasType).toBe(CanvasType.visualization);
+  });
+
+  it.each([
+    ['loadJson', loadJsonAction],
+    ['initialLoadJson', initialLoadJsonAction],
+  ])(
+    'lets go of the memos and groups selected or edited when %s lands their hide bits',
+    (_, load) => {
+      addTable(store, 't1');
+      addMemo(store, 'm1');
+      addTableGroup(store, 'g1');
+      store.dispatchSync(
+        selectAction({
+          m1: SelectType.memo,
+          g1: SelectType.tableGroup,
+          t1: SelectType.table,
+        }),
+        editMemoAction({ id: 'm1' })
+      );
+      const json = JSON.parse(buildJson(CanvasType.ERD));
+      json.settings.show = Show.hideMemo | Show.hideTableGroup;
+
+      store.dispatchSync(load({ value: JSON.stringify(json) }));
+
+      expect({ ...store.state.editor.selectedMap }).toEqual({
+        t1: SelectType.table,
+      });
+      expect(store.state.editor.editMemoId).toBeNull();
+    }
+  );
+
+  it.each([
+    ['loadJson', loadJsonAction],
+    ['initialLoadJson', initialLoadJsonAction],
+  ])(
+    'moves the focus onto the header cell the name view %s lands draws, closing its editor',
+    (_, load) => {
+      store.dispatchSync(load({ value: buildJson(CanvasType.ERD) }));
+      store.dispatchSync(
+        focusTableAction({ tableId: 't1' }),
+        editTableAction()
+      );
+      const json = JSON.parse(buildJson(CanvasType.ERD));
+      json.settings.lockSettings = LockSettingType.unlockNameViewMode;
+      json.settings.nameViewMode = NameViewMode.logical;
+
+      store.dispatchSync(load({ value: JSON.stringify(json) }));
+
+      expect(store.state.settings.nameViewMode).toBe(NameViewMode.logical);
+      expect(store.state.editor.focusTable).toMatchObject({
+        tableId: 't1',
+        focusType: FocusType.tableLogicalName,
+        edit: false,
+      });
+    }
+  );
+
+  it.each([
+    ['loadJson', loadJsonAction],
+    ['initialLoadJson', initialLoadJsonAction],
+  ])(
+    'moves the focus onto the domain the type cell draws once %s turns the Domain bit off',
+    (_, load) => {
+      const json = JSON.parse(buildJson(CanvasType.ERD));
+      json.settings.lockSettings = LockSettingType.unlockNameViewMode;
+      json.settings.nameViewMode = NameViewMode.logical;
+      json.settings.show = Show.columnDataType | Show.columnDomain;
+      json.doc.tableIds = ['t1'];
+      json.collections.tableEntities.t1.columnIds = ['c1'];
+      json.collections.tableColumnEntities = {
+        c1: { id: 'c1', tableId: 't1', name: 'c1' },
+      };
+      store.dispatchSync(load({ value: JSON.stringify(json) }));
+      store.dispatchSync(
+        focusColumnAction({
+          tableId: 't1',
+          columnId: 'c1',
+          focusType: FocusType.columnDataType,
+          $mod: false,
+          shiftKey: false,
+        }),
+        editTableAction()
+      );
+      json.settings.show = Show.columnDataType;
+
+      store.dispatchSync(load({ value: JSON.stringify(json) }));
+
+      expect(store.state.editor.focusTable).toMatchObject({
+        columnId: 'c1',
+        focusType: FocusType.columnDomain,
+        edit: false,
+      });
+    }
+  );
+
+  it('keeps the memo selection a load that shows the memos lands', () => {
+    addMemo(store, 'm1');
+    store.dispatchSync(selectAction({ m1: SelectType.memo }));
+
+    store.dispatchSync(loadJsonAction({ value: buildJson(CanvasType.ERD) }));
+
+    expect({ ...store.state.editor.selectedMap }).toEqual({
+      m1: SelectType.memo,
+    });
   });
 
   it('falls back to the ERD canvas type on initialLoadJson too', () => {
@@ -1004,6 +1501,60 @@ describe('editor.editMemo / editMemoEnd', () => {
 
     expect(store.state.editor.focusTable?.tableId).toBe('t1');
     expect(store.state.editor.editMemoId).toBe('m1');
+  });
+});
+
+describe('editor.editTableGroup / editTableGroupEnd', () => {
+  it('names the group the name editor is open on, a live text editor', () => {
+    store.dispatchSync(editTableGroupAction({ id: 'g1' }));
+    expect(store.state.editor.editTableGroupId).toBe('g1');
+    expect(isEditingText(store.state.editor)).toBe(true);
+
+    store.dispatchSync(editTableGroupEndAction());
+    expect(store.state.editor.editTableGroupId).toBeNull();
+    expect(isEditingText(store.state.editor)).toBe(false);
+  });
+});
+
+describe('editor.changeDrawTableGroup', () => {
+  it('arms the draw mode, putting the hand down and ending a relationship draw', () => {
+    store.dispatchSync(
+      changeHandToolAction({ value: true }),
+      drawStartRelationshipAction({ relationshipType: 8 })
+    );
+
+    store.dispatchSync(changeDrawTableGroupAction({ value: true }));
+
+    expect(store.state.editor.drawTableGroup).toBe(true);
+    expect(store.state.editor.handTool).toBe(false);
+    expect(store.state.editor.drawRelationship).toBeNull();
+
+    store.dispatchSync(changeDrawTableGroupAction({ value: false }));
+    expect(store.state.editor.drawTableGroup).toBe(false);
+  });
+
+  it('is ended by the hand tool and by a relationship draw, which leave one mode armed', () => {
+    store.dispatchSync(
+      changeDrawTableGroupAction({ value: true }),
+      changeHandToolAction({ value: true })
+    );
+    expect(store.state.editor.drawTableGroup).toBe(false);
+
+    store.dispatchSync(
+      changeDrawTableGroupAction({ value: true }),
+      drawStartRelationshipAction({ relationshipType: 8 })
+    );
+    expect(store.state.editor.drawTableGroup).toBe(false);
+    expect(store.state.editor.drawRelationship).not.toBeNull();
+  });
+
+  it('keeps an armed draw when the hand is put down', () => {
+    store.dispatchSync(
+      changeDrawTableGroupAction({ value: true }),
+      changeHandToolAction({ value: false })
+    );
+
+    expect(store.state.editor.drawTableGroup).toBe(true);
   });
 });
 
@@ -1779,83 +2330,6 @@ describe('editor.dragSelectRect', () => {
   });
 });
 
-describe('editor.validationIds', () => {
-  it('drops doc ids that have no matching entity', () => {
-    addTable(store, 't1');
-    store.state.doc.tableIds.push('ghost-table');
-
-    const relationship = createRelationship({ id: 'r1' });
-    store.state.collections.relationshipEntities.r1 = relationship;
-    store.state.doc.relationshipIds.push('r1', 'ghost-relationship');
-
-    const index = createIndex({ id: 'i1', tableId: 't1' });
-    store.state.collections.indexEntities.i1 = index;
-    store.state.doc.indexIds.push('i1', 'ghost-index');
-
-    addMemo(store, 'm1');
-    store.state.doc.memoIds.push('ghost-memo');
-
-    store.dispatchSync(validationIdsAction());
-
-    expect(store.state.doc.tableIds).toEqual(['t1']);
-    expect(store.state.doc.relationshipIds).toEqual(['r1']);
-    expect(store.state.doc.indexIds).toEqual(['i1']);
-    expect(store.state.doc.memoIds).toEqual(['m1']);
-  });
-
-  it('drops dangling column ids from tables', () => {
-    const table = addTable(store, 't1', ['c1', 'ghost-column']);
-    table.seqColumnIds.push('c1', 'ghost-column');
-    addColumn(store, 't1', 'c1');
-
-    store.dispatchSync(validationIdsAction());
-
-    expect(store.state.collections.tableEntities.t1.columnIds).toEqual(['c1']);
-    expect(store.state.collections.tableEntities.t1.seqColumnIds).toEqual([
-      'c1',
-    ]);
-  });
-
-  it('drops dangling index column ids from indexes', () => {
-    addTable(store, 't1');
-    const index = createIndex({
-      id: 'i1',
-      tableId: 't1',
-      indexColumnIds: ['ic1', 'ghost-index-column'],
-      seqIndexColumnIds: ['ic1', 'ghost-index-column'],
-    });
-    store.state.collections.indexEntities.i1 = index;
-    store.state.doc.indexIds.push('i1');
-    store.state.collections.indexColumnEntities.ic1 = createIndexColumn({
-      id: 'ic1',
-      indexId: 'i1',
-    });
-
-    store.dispatchSync(validationIdsAction());
-
-    expect(store.state.collections.indexEntities.i1.indexColumnIds).toEqual([
-      'ic1',
-    ]);
-    expect(store.state.collections.indexEntities.i1.seqIndexColumnIds).toEqual([
-      'ic1',
-    ]);
-  });
-
-  it('leaves a consistent document untouched', () => {
-    seedTableWithColumns(store);
-    const before = JSON.parse(JSON.stringify(store.state.doc));
-
-    store.dispatchSync(validationIdsAction());
-
-    expect(JSON.parse(JSON.stringify(store.state.doc))).toEqual(before);
-    expect(store.state.collections.tableEntities.t1.columnIds).toEqual([
-      'c1',
-      'c2',
-      'c3',
-    ]);
-  });
-});
-
 describe('editor.getLWW', () => {
   it('is a no-op reducer', () => {
     seedTableWithColumns(store);
@@ -1879,6 +2353,26 @@ describe('editor.getLWW', () => {
         })
       )
     ).toEqual(before);
+  });
+});
+
+describe('the registers a load leaves', () => {
+  const remote: LWW = { t1: ['tableEntities', 9, -1, { name: 9 }] };
+
+  it('drops them on initialLoadJson, which opens a document afresh', () => {
+    store.dispatchSync(mergeLWWAction({ lww: remote }));
+
+    store.dispatchSync(initialLoadJsonAction({ value: '{}' }));
+
+    expect(store.state.lww).toEqual({});
+  });
+
+  it('keeps them on loadJson, which replaces the document in the session', () => {
+    store.dispatchSync(mergeLWWAction({ lww: remote }));
+
+    store.dispatchSync(loadJsonAction({ value: '{}' }));
+
+    expect(store.state.lww.t1).toEqual(remote.t1);
   });
 });
 

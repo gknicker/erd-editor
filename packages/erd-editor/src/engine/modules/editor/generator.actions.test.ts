@@ -9,13 +9,27 @@ import {
   vi,
 } from 'vite-plus/test';
 
-import { ColumnOption, OrderType, RelationshipType } from '@/constants/schema';
+import {
+  ColumnOption,
+  Database,
+  NameViewMode,
+  OrderType,
+  RelationshipType,
+  Show,
+} from '@/constants/schema';
 import { Clock } from '@/engine/clock';
 import {
+  addDictionaryAction,
+  removeDictionaryAction,
+} from '@/engine/modules/dictionary/atom.actions';
+import { updateDictionaryEntryAction$ } from '@/engine/modules/dictionary/generator.actions';
+import {
+  clearAction,
   dragstartColumnAction,
   drawStartRelationshipAction,
   focusColumnAction,
   focusTableAction,
+  loadJsonAction,
   selectAction,
 } from '@/engine/modules/editor/atom.actions';
 import {
@@ -38,6 +52,7 @@ import {
   loadSchemaSQLAction$,
   moveAllAction$,
   pasteEntitiesAction$,
+  removeColorAllAction$,
   removeSelectedAction$,
   unselectAllAction$,
 } from '@/engine/modules/editor/generator.actions';
@@ -71,7 +86,10 @@ import {
   removeRelationshipAction,
 } from '@/engine/modules/relationship/atom.actions';
 import {
+  changeDatabaseAction,
   changeDatabaseNameAction,
+  changeNameViewModeAction,
+  changeShowAction,
   changeZoomLevelAction,
   scrollToAction,
 } from '@/engine/modules/settings/atom.actions';
@@ -79,7 +97,9 @@ import {
   addTableAction,
   changeTableColorAction,
   changeTableCommentAction,
+  changeTableLogicalNameAction,
   changeTableNameAction,
+  changeTableNameDerivedAction,
 } from '@/engine/modules/table/atom.actions';
 import {
   addColumnAction,
@@ -87,11 +107,15 @@ import {
   changeColumnCommentAction,
   changeColumnDataTypeAction,
   changeColumnDefaultAction,
+  changeColumnDomainAction,
+  changeColumnLogicalNameAction,
   changeColumnNameAction,
+  changeColumnNameDerivedAction,
   changeColumnNotNullAction,
   changeColumnPrimaryKeyAction,
   changeColumnUniqueAction,
   moveColumnAction,
+  removeColumnAction,
 } from '@/engine/modules/table-column/atom.actions';
 import { createRxStore, RxStore } from '@/engine/rx-store';
 import { createStore, Store } from '@/engine/store';
@@ -291,6 +315,63 @@ describe('loadJsonAction$', () => {
       'editor.loadJson',
     ]);
   });
+
+  it('sends the payloads it always did unless asked to keep the dictionaries', () => {
+    expect(flatten(store, loadJsonAction$(json))).toEqual([
+      clearAction(),
+      loadJsonAction({ value: json }),
+    ]);
+    expect(
+      flatten(store, loadJsonAction$(json, { keepDictionaries: true }))
+    ).toEqual([
+      clearAction({ keepDictionaries: true }),
+      loadJsonAction({ value: json, keepDictionaries: true }),
+    ]);
+  });
+});
+
+/**
+ * A replace by a schema import keeps the words, terms and domains, which its
+ * text never holds; a replace by a document takes the document's.
+ */
+describe('the dictionaries through a replace', () => {
+  function seedDictionaries() {
+    store.dispatchSync(
+      addDictionaryAction({ kind: 'word', id: 'w1', values: { name: 'W' } }),
+      addDictionaryAction({ kind: 'term', id: 't1', values: { name: 'T' } }),
+      addDictionaryAction({ kind: 'domain', id: 'd1', values: { name: 'D' } })
+    );
+  }
+
+  const listed = () => ({
+    words: [...store.state.doc.wordIds],
+    terms: [...store.state.doc.termIds],
+    domains: [...store.state.doc.domainIds],
+  });
+
+  it.each([
+    ['sql', loadSchemaSQLAction$('CREATE TABLE orders (id INT);')],
+    ['graphql', loadSchemaGraphQLAction$('type Order { id: ID! }')],
+    ['dbml', loadSchemaDBMLAction$('Table orders {\n  id int\n}')],
+    ['aml', loadSchemaAMLAction$('orders\n  id int pk')],
+  ])('keeps them through a %s import', (_, load) => {
+    seedDictionaries();
+
+    store.dispatchSync(load);
+
+    expect(store.state.doc.tableIds).toHaveLength(1);
+    expect(listed()).toEqual({ words: ['w1'], terms: ['t1'], domains: ['d1'] });
+    expect(store.state.collections.termEntities.t1.name).toBe('T');
+  });
+
+  it('replaces them with the document a JSON replace loads', () => {
+    seedDictionaries();
+
+    store.dispatchSync(loadJsonAction$(toJson(schemaV3Parser({}))));
+
+    expect(listed()).toEqual({ words: [], terms: [], domains: [] });
+    expect(store.state.collections.wordEntities).toEqual({});
+  });
 });
 
 describe('initialLoadJsonAction$', () => {
@@ -310,7 +391,6 @@ describe('initialLoadJsonAction$', () => {
               height: 100,
               color: '',
             },
-            meta: { updateAt: 0, createAt: 0 },
           } as any,
         },
       },
@@ -487,6 +567,18 @@ describe('dragSelectAction$', () => {
     expect(store.state.editor.selectedMap).toEqual({ m1: SelectType.memo });
   });
 
+  it('takes no memo while memos are hidden', () => {
+    seedTable(store, 't1', 100, 100);
+    seedMemo(store, 'm1', 120, 120);
+    store.dispatchSync(changeShowAction({ show: Show.hideMemo, value: true }));
+
+    store.dispatchSync(dragSelectAction$({ x: 0, y: 0, w: 1000, h: 1000 }));
+
+    expect({ ...store.state.editor.selectedMap }).toEqual({
+      t1: SelectType.table,
+    });
+  });
+
   it('clears the previous selection and the table focus first', () => {
     seedTable(store, 't1', 0, 0);
     seedMemo(store, 'm1', 5000, 5000);
@@ -589,6 +681,27 @@ describe('focusMoveTableAction$', () => {
     store.dispatchSync(focusMoveTableAction$(MoveKey.Tab, false));
 
     expect(tableOf(store, 't1').columnIds).toHaveLength(2);
+  });
+
+  it('tabs into the logical name of the column it adds in the view of both', () => {
+    seedTable(store, 't1');
+    store.dispatchSync(
+      changeNameViewModeAction({
+        value: NameViewMode.both,
+        shared: false,
+        editorId: store.state.editor.id,
+      })
+    );
+    store.dispatchSync(
+      focusTableAction({ tableId: 't1', focusType: FocusType.tableComment })
+    );
+
+    store.dispatchSync(focusMoveTableAction$(MoveKey.Tab, false));
+
+    expect(store.state.editor.focusTable).toMatchObject({
+      columnId: tableOf(store, 't1').columnIds[0],
+      focusType: FocusType.columnLogicalName,
+    });
   });
 
   it('moves the focus when the table field is not the last one', () => {
@@ -711,6 +824,24 @@ describe('drawStartAddRelationshipAction$', () => {
     });
   });
 
+  it('focuses the logical name of the primary key column it creates in the view of both', () => {
+    seedTable(store, 't1');
+    store.dispatchSync(
+      changeNameViewModeAction({
+        value: NameViewMode.both,
+        shared: false,
+        editorId: store.state.editor.id,
+      })
+    );
+
+    store.dispatchSync(drawStartAddRelationshipAction$('t1'));
+
+    expect(store.state.editor.focusTable).toMatchObject({
+      columnId: tableOf(store, 't1').columnIds[0],
+      focusType: FocusType.columnLogicalName,
+    });
+  });
+
   it('reuses the existing primary key column', () => {
     seedTable(store, 't1');
     seedColumn(store, 't1', 'c1');
@@ -754,6 +885,210 @@ describe('changeColorAllAction$', () => {
 
     expect(typesOf(store, changeColorAllAction$('#ff0000'))).toEqual([]);
   });
+
+  it('sends nothing for a selected table or memo already that color', () => {
+    seedTable(store, 't1');
+    seedMemo(store, 'm1');
+    store.dispatchSync(
+      changeTableColorAction({ id: 't1', color: '#ff0000', prevColor: '' }),
+      selectAction({ t1: SelectType.table, m1: SelectType.memo })
+    );
+
+    expect(flatten(store, changeColorAllAction$('#ff0000'))).toMatchObject([
+      {
+        type: 'memo.changeColor',
+        payload: { id: 'm1', color: '#ff0000', prevColor: '' },
+      },
+    ]);
+  });
+
+  it('emits nothing when every selected entity is already that color', () => {
+    seedTable(store, 't1');
+    seedMemo(store, 'm1');
+    store.dispatchSync(
+      changeTableColorAction({ id: 't1', color: '#ff0000', prevColor: '' }),
+      changeMemoColorAction({ id: 'm1', color: '#ff0000', prevColor: '' }),
+      selectAction({ t1: SelectType.table, m1: SelectType.memo })
+    );
+
+    expect(typesOf(store, changeColorAllAction$('#ff0000'))).toEqual([]);
+  });
+
+  it('sends nothing for one holding that color in upper case, as the old picker wrote it', () => {
+    seedTable(store, 't1');
+    seedMemo(store, 'm1');
+    seedMemo(store, 'm2');
+    store.dispatchSync(
+      changeTableColorAction({ id: 't1', color: '#FF0000', prevColor: '' }),
+      changeMemoColorAction({ id: 'm1', color: '#FF0000', prevColor: '' }),
+      changeMemoColorAction({ id: 'm2', color: '#ff000080', prevColor: '' }),
+      selectAction({
+        t1: SelectType.table,
+        m1: SelectType.memo,
+        m2: SelectType.memo,
+      })
+    );
+
+    expect(flatten(store, changeColorAllAction$('#ff0000'))).toMatchObject([
+      {
+        type: 'memo.changeColor',
+        payload: { id: 'm2', color: '#ff0000', prevColor: '#ff000080' },
+      },
+    ]);
+  });
+
+  it('sends nothing when the color it is given differs only in letter case', () => {
+    seedTable(store, 't1');
+    seedMemo(store, 'm1');
+    store.dispatchSync(
+      changeTableColorAction({ id: 't1', color: '#ff0000', prevColor: '' }),
+      changeMemoColorAction({ id: 'm1', color: '#ff0000', prevColor: '' }),
+      selectAction({ t1: SelectType.table, m1: SelectType.memo })
+    );
+
+    expect(typesOf(store, changeColorAllAction$('#FF0000'))).toEqual([]);
+  });
+});
+
+describe('removeColorAllAction$', () => {
+  function seedColored(colors: Record<string, string>) {
+    seedTable(store, 't1');
+    seedTable(store, 't2');
+    seedTable(store, 't3');
+    seedMemo(store, 'm1');
+    seedMemo(store, 'm2');
+    store.dispatchSync(
+      Object.entries(colors).map(([id, color]) =>
+        id.startsWith('t')
+          ? changeTableColorAction({ id, color, prevColor: '' })
+          : changeMemoColorAction({ id, color, prevColor: '' })
+      )
+    );
+  }
+
+  it('clears the color of every selected table and memo', () => {
+    seedColored({ t1: '#ff0000', t2: '#00ff00', m1: '#0000ff', m2: '#123' });
+    store.dispatchSync(
+      selectAction({ t1: SelectType.table, m1: SelectType.memo })
+    );
+
+    store.dispatchSync(removeColorAllAction$());
+
+    expect(tableOf(store, 't1').ui.color).toBe('');
+    expect(memoOf(store, 'm1').ui.color).toBe('');
+    expect(tableOf(store, 't2').ui.color).toBe('#00ff00');
+    expect(memoOf(store, 'm2').ui.color).toBe('#123');
+  });
+
+  it('sends nothing for a selected entity that has no color', () => {
+    seedColored({ t1: '#ff0000' });
+    store.dispatchSync(
+      selectAction({
+        t1: SelectType.table,
+        t3: SelectType.table,
+        m1: SelectType.memo,
+      })
+    );
+
+    expect(flatten(store, removeColorAllAction$())).toMatchObject([
+      {
+        type: 'table.changeColor',
+        payload: { id: 't1', color: '', prevColor: '#ff0000' },
+      },
+    ]);
+  });
+
+  it('emits nothing when no selected entity has a color', () => {
+    seedColored({ t2: '#00ff00' });
+    store.dispatchSync(
+      selectAction({ t1: SelectType.table, m1: SelectType.memo })
+    );
+
+    expect(typesOf(store, removeColorAllAction$())).toEqual([]);
+  });
+});
+
+describe('removeColorAllAction$ history', () => {
+  let rxStore: RxStore;
+
+  afterEach(() => {
+    vi.useRealTimers();
+    rxStore.destroy();
+  });
+
+  it('records one entry, whose undo gives every color back', () => {
+    vi.useFakeTimers();
+    rxStore = createRxStore({ toWidth, clock: new Clock() });
+    rxStore.dispatchSync(
+      addTableAction({ id: 't1', ui: { x: 0, y: 0, zIndex: 2 } }),
+      addTableAction({ id: 't2', ui: { x: 400, y: 0, zIndex: 2 } }),
+      addMemoAction({ id: 'm1', ui: { x: 0, y: 400, zIndex: 2 } }),
+      changeTableColorAction({ id: 't1', color: '#ff0000', prevColor: '' }),
+      changeTableColorAction({ id: 't2', color: '#00ff00', prevColor: '' }),
+      changeMemoColorAction({ id: 'm1', color: '#0000ff', prevColor: '' }),
+      selectAction({
+        t1: SelectType.table,
+        t2: SelectType.table,
+        m1: SelectType.memo,
+      })
+    );
+    vi.advanceTimersByTime(300);
+    const size = rxStore.history.size;
+
+    rxStore.dispatchSync(removeColorAllAction$());
+    vi.advanceTimersByTime(300);
+
+    expect(rxStore.history.size).toBe(size + 1);
+    expect(rxStore.state.collections.tableEntities.t2.ui.color).toBe('');
+
+    rxStore.undo();
+
+    expect(
+      [
+        rxStore.state.collections.tableEntities.t1,
+        rxStore.state.collections.tableEntities.t2,
+        rxStore.state.collections.memoEntities.m1,
+      ].map(entity => entity.ui.color)
+    ).toEqual(['#ff0000', '#00ff00', '#0000ff']);
+  });
+});
+
+describe('changeColorAllAction$ history', () => {
+  let rxStore: RxStore;
+
+  afterEach(() => {
+    vi.useRealTimers();
+    rxStore.destroy();
+  });
+
+  it('records no entry for a color pressed again, and paints one an undo took back', () => {
+    vi.useFakeTimers();
+    rxStore = createRxStore({ toWidth, clock: new Clock() });
+    rxStore.dispatchSync(
+      addTableAction({ id: 't1', ui: { x: 0, y: 0, zIndex: 2 } }),
+      selectAction({ t1: SelectType.table })
+    );
+    vi.advanceTimersByTime(300);
+    const size = rxStore.history.size;
+    const color = () => rxStore.state.collections.tableEntities.t1.ui.color;
+
+    rxStore.dispatchSync(changeColorAllAction$('#ff0000'));
+    vi.advanceTimersByTime(300);
+    rxStore.dispatchSync(changeColorAllAction$('#ff0000'));
+    vi.advanceTimersByTime(300);
+
+    expect(rxStore.history.size).toBe(size + 1);
+
+    rxStore.undo();
+    expect(color()).toBe('');
+
+    rxStore.dispatchSync(changeColorAllAction$('#ff0000'));
+    vi.advanceTimersByTime(300);
+
+    expect(color()).toBe('#ff0000');
+    rxStore.undo();
+    expect(color()).toBe('');
+  });
 });
 
 describe('loadSchemaSQLAction$', () => {
@@ -776,12 +1111,60 @@ describe('loadSchemaSQLAction$', () => {
     expect(tables[0].ui.y).toBe(50);
   });
 
-  it('emits clear, loadJson and sortTable', () => {
+  // A Databricks document reads the literals by Spark's escapes, any other by
+  // the guess that keeps a doubled backslash as it is.
+  it('reads the literals by the rules of the document database', () => {
+    const ddl = String.raw`CREATE TABLE t (a STRING COMMENT 'a\\b');`;
+    const commentOfA = () =>
+      Object.values(store.state.collections.tableColumnEntities)[0].comment;
+
+    store.dispatchSync(loadSchemaSQLAction$(ddl));
+    expect(commentOfA()).toBe(String.raw`a\\b`);
+
+    store.dispatchSync(changeDatabaseAction({ value: Database.Databricks }));
+    store.dispatchSync(loadSchemaSQLAction$(ddl));
+    expect(commentOfA()).toBe(String.raw`a\b`);
+    expect(store.state.settings.database).toBe(Database.Databricks);
+  });
+
+  it('emits clear and loadJson, the grid points inside it, and no sort', () => {
     expect(typesOf(store, loadSchemaSQLAction$(sql))).toEqual([
       'editor.clear',
       'editor.loadJson',
-      'table.sort',
     ]);
+  });
+
+  it('lands the tables at the same points on a peer whose fonts measure otherwise', () => {
+    // Wide enough that the rows wrap where the widths decide, which a sort
+    // replayed on the peer would decide with its own.
+    const ddl = Array.from(
+      { length: 12 },
+      (_, index) =>
+        `CREATE TABLE table_with_a_long_name_${index} (id INT, ${'c'.repeat(index * 4)} INT);`
+    ).join('\n');
+    const peer = createStore({
+      toWidth: text => text.length * 23,
+      clock: new Clock(),
+    });
+    const points = ({ state: { doc, collections } }: Store) =>
+      doc.tableIds.map(id => {
+        const { x, y } = collections.tableEntities[id].ui;
+        return [id, x, y];
+      });
+
+    const actions = flatten(store, loadSchemaSQLAction$(ddl));
+    store.dispatchSync(actions);
+    peer.dispatchSync(actions);
+
+    expect(new Set(points(store).map(([, , y]) => y)).size).toBeGreaterThan(1);
+    expect(points(peer)).toEqual(points(store));
+    expect(
+      peer.state.collections.tableEntities[peer.state.doc.tableIds[0]].ui
+        .widthName
+    ).not.toBe(
+      store.state.collections.tableEntities[store.state.doc.tableIds[0]].ui
+        .widthName
+    );
   });
 });
 
@@ -802,11 +1185,10 @@ describe('loadSchemaGraphQLAction$', () => {
     expect(store.state.settings.databaseName).toBe('keep-me');
   });
 
-  it('emits clear, loadJson and sortTable', () => {
+  it('emits clear and loadJson, the grid points inside it, and no sort', () => {
     expect(typesOf(store, loadSchemaGraphQLAction$(sdl))).toEqual([
       'editor.clear',
       'editor.loadJson',
-      'table.sort',
     ]);
   });
 
@@ -850,11 +1232,10 @@ describe('loadSchemaDBMLAction$', () => {
     expect(store.state.settings.databaseName).toBe('keep-me');
   });
 
-  it('emits clear, loadJson and sortTable', () => {
+  it('emits clear and loadJson, the grid points inside it, and no sort', () => {
     expect(typesOf(store, loadSchemaDBMLAction$(dbml))).toEqual([
       'editor.clear',
       'editor.loadJson',
-      'table.sort',
     ]);
   });
 
@@ -895,11 +1276,10 @@ describe('loadSchemaAMLAction$', () => {
     expect(store.state.settings.databaseName).toBe('keep-me');
   });
 
-  it('emits clear, loadJson and sortTable', () => {
+  it('emits clear and loadJson, the grid points inside it, and no sort', () => {
     expect(typesOf(store, loadSchemaAMLAction$(aml))).toEqual([
       'editor.clear',
       'editor.loadJson',
-      'table.sort',
     ]);
   });
 
@@ -915,9 +1295,9 @@ describe('loadSchemaAMLAction$', () => {
 });
 
 /**
- * An import is a brand-new document, so both view pairs come from the parser at
- * their defaults: the live origin and the frozen legacy pair are left out of the
- * settings an importer carries over, and the rest of them survive the import.
+ * An import is a brand-new document, so its view comes from the parser at the
+ * defaults: the origin is left out of the settings an importer carries over,
+ * and the rest of them survive the import.
  */
 describe('the four importers open the new document at the origin', () => {
   it.each([
@@ -939,8 +1319,6 @@ describe('the four importers open the new document at the origin', () => {
     ['loadSchemaAMLAction$', loadSchemaAMLAction$, 'users\n  id int pk'],
   ])('%s', (_, load, source) => {
     store.dispatchSync(changeDatabaseNameAction({ value: 'keep-me' }));
-    store.state.settings.scrollLeft = -300;
-    store.state.settings.scrollTop = -400;
     store.dispatchSync(scrollToAction({ originX: -250, originY: -300 }));
     expect(store.state.settings.originX).toBe(-250);
     expect(store.state.settings.originY).toBe(-300);
@@ -950,25 +1328,23 @@ describe('the four importers open the new document at the origin', () => {
     expect(store.state.doc.tableIds).toHaveLength(1);
     expect(store.state.settings.originX).toBe(0);
     expect(store.state.settings.originY).toBe(0);
-    expect(store.state.settings.scrollLeft).toBe(0);
-    expect(store.state.settings.scrollTop).toBe(0);
     expect(store.state.settings.databaseName).toBe('keep-me');
   });
 });
 
 describe('dragstartColumnAction$', () => {
   it('emits nothing when no table is focused', () => {
-    expect(typesOf(store, dragstartColumnAction$(false))).toEqual([]);
+    expect(typesOf(store, dragstartColumnAction$())).toEqual([]);
   });
 
   it('emits nothing when the focus is on the table itself', () => {
     seedTable(store, 't1');
     store.dispatchSync(focusTableAction({ tableId: 't1' }));
 
-    expect(typesOf(store, dragstartColumnAction$(false))).toEqual([]);
+    expect(typesOf(store, dragstartColumnAction$())).toEqual([]);
   });
 
-  it('drags the focused column only', () => {
+  it('drags every selected column while the focused one is among them', () => {
     seedTable(store, 't1');
     seedColumn(store, 't1', 'c1');
     seedColumn(store, 't1', 'c2');
@@ -991,7 +1367,33 @@ describe('dragstartColumnAction$', () => {
       })
     );
 
-    store.dispatchSync(dragstartColumnAction$(false));
+    store.dispatchSync(dragstartColumnAction$());
+
+    expect(store.state.editor.draggableColumn).toEqual({
+      tableId: 't1',
+      columnIds: ['c1', 'c2'],
+    });
+    expect(store.state.editor.draggingColumnMap).toEqual({
+      c1: true,
+      c2: true,
+    });
+  });
+
+  it('drags the focused column alone when it is the only one selected', () => {
+    seedTable(store, 't1');
+    seedColumn(store, 't1', 'c1');
+    seedColumn(store, 't1', 'c2');
+    store.dispatchSync(
+      focusColumnAction({
+        tableId: 't1',
+        columnId: 'c2',
+        focusType: FocusType.columnName,
+        $mod: false,
+        shiftKey: false,
+      })
+    );
+
+    store.dispatchSync(dragstartColumnAction$());
 
     expect(store.state.editor.draggableColumn).toEqual({
       tableId: 't1',
@@ -1000,7 +1402,7 @@ describe('dragstartColumnAction$', () => {
     expect(store.state.editor.draggingColumnMap).toEqual({ c2: true });
   });
 
-  it('drags every selected column when $mod is set', () => {
+  it('drags the focused column alone once the other selected one has left the table', () => {
     seedTable(store, 't1');
     seedColumn(store, 't1', 'c1');
     seedColumn(store, 't1', 'c2');
@@ -1023,11 +1425,15 @@ describe('dragstartColumnAction$', () => {
       })
     );
 
-    store.dispatchSync(dragstartColumnAction$(true));
+    // A peer, an agent or an undo can take a column out and leave it selected.
+    store.dispatchSync(removeColumnAction({ id: 'c1', tableId: 't1' }));
 
+    store.dispatchSync(dragstartColumnAction$());
+
+    expect(store.state.editor.focusTable?.selectColumnIds).toContain('c1');
     expect(store.state.editor.draggableColumn).toEqual({
       tableId: 't1',
-      columnIds: ['c1', 'c2'],
+      columnIds: ['c2'],
     });
   });
 });
@@ -1204,6 +1610,44 @@ describe('dragoverColumnAction$', () => {
       columnIds: [movedId],
     });
     expect(store.state.editor.focusTable?.tableId).toBe('t2');
+  });
+
+  it('carries the logical name, the domain link and the derived flag into the other table', () => {
+    store.dispatchSync(
+      addDictionaryAction({
+        kind: 'domain',
+        id: 'd1',
+        values: { name: 'Membership number' },
+      })
+    );
+    seedTable(store, 't1');
+    seedColumn(store, 't1', 'c1');
+    seedColumn(store, 't1', 'c2');
+    store.dispatchSync(
+      changeColumnLogicalNameAction({
+        tableId: 't1',
+        id: 'c1',
+        value: 'Member number',
+      }),
+      changeColumnDomainAction({ tableId: 't1', id: 'c1', value: 'd1' }),
+      changeColumnNameDerivedAction({ tableId: 't1', id: 'c1', value: true })
+    );
+    seedTable(store, 't2');
+    store.dispatchSync(
+      dragstartColumnAction({ tableId: 't1', columnIds: ['c1', 'c2'] })
+    );
+
+    store.dispatchSync(dragoverColumnAction$(null, 't2'));
+
+    const [moved, plain] = tableOf(store, 't2').columnIds.map(id =>
+      columnOf(store, id)
+    );
+    expect(moved.logicalName).toBe('Member number');
+    expect(moved.domainId).toBe('d1');
+    expect(moved.ui.widthDomain).toBe('Membership number'.length * 10);
+    expect(bHas(moved.options, ColumnOption.nameDerived)).toBe(true);
+    expect(plain).toMatchObject({ logicalName: '', domainId: '' });
+    expect(bHas(plain.options, ColumnOption.nameDerived)).toBe(false);
   });
 });
 
@@ -1475,9 +1919,10 @@ describe('pasteEntitiesAction$', () => {
     expect(tableCopy.comment).toBe('the users');
     expect(tableCopy.ui.color).toBe('#ff0000');
     // Stacked above everything that was already there, in the source's own
-    // overlap order: both sources sit at zIndex 2, so the tie breaks on id.
-    expect(memoCopy.ui.zIndex).toBe(3);
-    expect(tableCopy.ui.zIndex).toBe(4);
+    // overlap order: both sources sit at zIndex 2, and the memo stands over
+    // the table at a tie, as the scene paints them.
+    expect(tableCopy.ui.zIndex).toBe(3);
+    expect(memoCopy.ui.zIndex).toBe(4);
 
     const columnCopy = columnOf(store, tableCopy.columnIds[0]);
     expect(columnCopy.name).toBe('id');
@@ -1500,6 +1945,166 @@ describe('pasteEntitiesAction$', () => {
     seedTable(store, 't-ref', 900, 900);
     store.dispatchSync(changeTableNameAction({ id: 't-ref', value: 'users' }));
     expect(tableCopy.ui.widthName).toBe(tableOf(store, 't-ref').ui.widthName);
+  });
+});
+
+describe('the logical names and domain links a paste or a duplicate carries', () => {
+  /** Table t1 named logically and derived, its column c1 linking domain d1. */
+  function seedNamed() {
+    store.dispatchSync(
+      addDictionaryAction({
+        kind: 'domain',
+        id: 'd1',
+        values: { name: 'Membership number' },
+      })
+    );
+    seedTable(store, 't1', 100, 100);
+    seedColumn(store, 't1', 'c1');
+    store.dispatchSync(
+      changeTableNameAction({ id: 't1', value: 'member' }),
+      changeTableLogicalNameAction({ id: 't1', value: 'Member' }),
+      changeTableNameDerivedAction({ id: 't1', value: true }),
+      changeColumnLogicalNameAction({
+        tableId: 't1',
+        id: 'c1',
+        value: 'Member number',
+      }),
+      changeColumnDomainAction({ tableId: 't1', id: 'c1', value: 'd1' }),
+      changeColumnNameDerivedAction({ tableId: 't1', id: 'c1', value: true })
+    );
+  }
+
+  const copyOf = (sourceIds: string[]) => {
+    const [id] = addedIds(sourceIds, store.state.doc.tableIds);
+    const table = tableOf(store, id);
+    return { table, column: columnOf(store, table.columnIds[0]) };
+  };
+
+  it('pastes a copy of this document with every name, flag and link', () => {
+    seedNamed();
+    store.dispatchSync(selectAction({ t1: SelectType.table }));
+
+    store.dispatchSync(
+      pasteEntitiesAction$(entitiesCopyToPayload(store.state)!, 1)
+    );
+
+    const { table, column } = copyOf(['t1']);
+    expect(table).toMatchObject({ logicalName: 'Member', nameDerived: true });
+    expect(column).toMatchObject({
+      logicalName: 'Member number',
+      domainId: 'd1',
+    });
+    expect(column.ui.widthDomain).toBe('Membership number'.length * 10);
+    expect(bHas(column.options, ColumnOption.nameDerived)).toBe(true);
+  });
+
+  it('links no domain this document does not list, a removed one included', () => {
+    seedNamed();
+    store.dispatchSync(selectAction({ t1: SelectType.table }));
+    const payload = entitiesCopyToPayload(store.state)!;
+    payload.columns.push(
+      clipboardColumn('c-elsewhere', 't1', { domainId: 'elsewhere' })
+    );
+    payload.tables[0].columnIds.push('c-elsewhere');
+    store.dispatchSync(removeDictionaryAction({ kind: 'domain', id: 'd1' }));
+
+    const actions = flatten(store, pasteEntitiesAction$(payload, 1));
+    store.dispatchSync(actions);
+
+    expect(actions.map(({ type }) => type)).not.toContain(
+      'column.changeDomain'
+    );
+    const { table, column } = copyOf(['t1']);
+    expect(column.domainId).toBe('');
+    expect(columnOf(store, table.columnIds[1]).domainId).toBe('');
+    expect(column.logicalName).toBe('Member number');
+  });
+
+  it('links no domain whose type moved since the copy, keeping the type it copied', () => {
+    store.dispatchSync(
+      addDictionaryAction({
+        kind: 'domain',
+        id: 'd1',
+        values: { name: 'Amount', dataType: 'NUMERIC(10)' },
+      })
+    );
+    seedTable(store, 't1', 100, 100);
+    seedColumn(store, 't1', 'c1');
+    store.dispatchSync(
+      changeColumnDataTypeAction({
+        tableId: 't1',
+        id: 'c1',
+        value: 'NUMERIC(10)',
+      }),
+      changeColumnDomainAction({ tableId: 't1', id: 'c1', value: 'd1' }),
+      selectAction({ t1: SelectType.table })
+    );
+    const before = entitiesCopyToPayload(store.state)!;
+    store.dispatchSync(
+      updateDictionaryEntryAction$('domain', 'd1', {
+        dataType: 'NUMERIC(15,2)',
+      })
+    );
+    expect(columnOf(store, 'c1')).toMatchObject({
+      dataType: 'NUMERIC(15,2)',
+      domainId: 'd1',
+    });
+
+    const tableIds = [...store.state.doc.tableIds];
+    store.dispatchSync(pasteEntitiesAction$(before, 1));
+    expect(copyOf(tableIds).column).toMatchObject({
+      dataType: 'NUMERIC(10)',
+      domainId: '',
+    });
+
+    // A copy taken after the change holds the domain's type and keeps it.
+    store.dispatchSync(
+      unselectAllAction$(),
+      selectAction({ t1: SelectType.table })
+    );
+    const after = entitiesCopyToPayload(store.state)!;
+    const pastedIds = [...store.state.doc.tableIds];
+    store.dispatchSync(pasteEntitiesAction$(after, 2));
+    expect(copyOf(pastedIds).column).toMatchObject({
+      dataType: 'NUMERIC(15,2)',
+      domainId: 'd1',
+    });
+  });
+
+  it('pastes a copy made before the dictionaries with none of their fields', () => {
+    store.dispatchSync(
+      pasteEntitiesAction$(
+        entitiesPayload({
+          tables: [clipboardTable('t1', 0, 0, { columnIds: ['c1'] })],
+          columns: [clipboardColumn('c1', 't1', { name: 'id' })],
+        }),
+        1
+      )
+    );
+
+    const { table, column } = copyOf([]);
+    expect(table).toMatchObject({ logicalName: '', nameDerived: false });
+    expect(column).toMatchObject({ logicalName: '', domainId: '' });
+  });
+
+  it('duplicates every name, flag and link, as the document holds them', () => {
+    seedNamed();
+
+    store.dispatchSync(
+      duplicateAction$({
+        tableIds: ['t1'],
+        offset: { x: 20, y: 20 },
+        escapeCollision: false,
+      })
+    );
+
+    const { table, column } = copyOf(['t1']);
+    expect(table).toMatchObject({ logicalName: 'Member', nameDerived: true });
+    expect(column).toMatchObject({
+      logicalName: 'Member number',
+      domainId: 'd1',
+    });
+    expect(bHas(column.options, ColumnOption.nameDerived)).toBe(true);
   });
 });
 
@@ -1535,6 +2140,25 @@ describe('duplicateAction$', () => {
         })
       )
     ).toEqual([]);
+  });
+
+  it('adds a memo unselected while memos are hidden, as hidden memos never stay selected', () => {
+    seedTable(store, 't1', 100, 100);
+    seedMemo(store, 'm1', 500, 400);
+    store.dispatchSync(changeShowAction({ show: Show.hideMemo, value: true }));
+
+    store.dispatchSync(
+      duplicateAction$({
+        tableIds: ['t1'],
+        memoIds: ['m1'],
+        offset: { x: 50, y: 50 },
+        escapeCollision: true,
+      })
+    );
+
+    const { doc, editor } = store.state;
+    expect(doc.memoIds).toHaveLength(2);
+    expect(Object.values(editor.selectedMap)).toEqual([SelectType.table]);
   });
 
   it('duplicates the whole selection, keeping the relative layout', () => {
@@ -1795,6 +2419,8 @@ describe('actions$', () => {
   it('exposes every generator action of the editor module', () => {
     expect(Object.keys(actions$).sort()).toEqual(
       [
+        'appendSchemaAction$',
+        'appendSchemaJsonAction$',
         'changeColorAllAction$',
         'columnKeyHoverEndAction$',
         'columnKeyHoverStartAction$',
@@ -1814,6 +2440,7 @@ describe('actions$', () => {
         'loadSchemaSQLAction$',
         'moveAllAction$',
         'pasteEntitiesAction$',
+        'removeColorAllAction$',
         'removeSelectedAction$',
         'unselectAllAction$',
       ].sort()

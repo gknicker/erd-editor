@@ -6,7 +6,6 @@ import com.github.dineug.erdeditorintellijplugin.hub.document.DocumentFile
 import com.github.dineug.erdeditorintellijplugin.hub.document.DocumentRegistry
 import com.github.dineug.erdeditorintellijplugin.hub.document.HubView
 import com.github.dineug.erdeditorintellijplugin.settings.ErdEditorAppSettings
-import com.github.dineug.erdeditorintellijplugin.settings.ErdEditorTheme
 import com.intellij.ide.ui.LafManagerListener
 import com.intellij.notification.NotificationGroupManager
 import com.intellij.notification.NotificationType
@@ -33,7 +32,6 @@ import java.awt.BorderLayout
 import java.beans.PropertyChangeListener
 import java.io.IOException
 import java.util.*
-import java.util.concurrent.ConcurrentMap
 import javax.swing.JComponent
 import javax.swing.JPanel
 import kotlin.collections.HashMap
@@ -43,7 +41,7 @@ import kotlin.time.Duration.Companion.milliseconds
 @OptIn(FlowPreview::class)
 class ErdEditor(
         private val file: VirtualFile,
-        private val docToEditorsMap: ConcurrentMap<VirtualFile, MutableSet<ErdEditor>>
+        private val openEditors: OpenEditors<VirtualFile, ErdEditor>
 ) : UserDataHolderBase(),
         FileEditor,
         DumbAware, ErdEditorAppSettings.SettingsChangedListener, HubView {
@@ -80,10 +78,9 @@ class ErdEditor(
         val busConnection = ApplicationManager.getApplication().messageBus.connect(this)
         with(busConnection) {
             subscribe(ErdEditorAppSettings.SettingsChangedListener.TOPIC, this@ErdEditor)
-            // Auto shows the IDE's light or dark, so a new look and feel may change what it shows.
+            // Auto shows the IDE's light or dark, which the page keeps for its theme builder to pick.
             subscribe(LafManagerListener.TOPIC, LafManagerListener {
-                val settings = ErdEditorAppSettings.instance
-                if (settings.theme.appearance == ErdEditorTheme.AUTO) onSettingsChange(settings)
+                onSettingsChange(ErdEditorAppSettings.instance)
             })
         }
 
@@ -107,7 +104,7 @@ class ErdEditor(
             bridge.subscribe(coroutineScope) { action ->
                 when (action) {
                     is HostBridgeCommand.Initial -> {
-                        webviewPanel.dispatch(updateThemeCommand(ErdEditorAppSettings.instance))
+                        sendSettings(ErdEditorAppSettings.instance)
                         webviewPanel.dispatch(
                             WebviewBridgeCommand.UpdateReadonly(file.isWritable.not())
                         )
@@ -115,15 +112,22 @@ class ErdEditor(
                         val value = file.inputStream.use { it.reader(Charsets.UTF_8).readText() }
 
                         holdForLock()
-                        // The registry picks the value, its mirror once quiet or the file's, and readies
+                        // The registry picks the value, its seed once quiet or the file's, and readies
                         // the page in the same step, so every batch it injects later follows the value.
-                        postHeld({ sendInitialValue(value) }) { onViewReady(it, this@ErdEditor, value) }
+                        // Unregistered, the page starts from the runtime value its file's editors hold.
+                        postHeld({ sendInitialValue(openEditors.seed(file, value)) }) {
+                            onViewReady(it, this@ErdEditor, value)
+                        }
                     }
 
                     is HostBridgeCommand.SaveValue -> {
-                        val value = action.payload.value
-                        savePayload.value = value
-                        postForFile { onValueSaved(it, this@ErdEditor, value) }
+                        val (value, changed, runtimeValue) = action.payload
+                        // A save that changed nothing, as after a scroll the file does not keep, is not written.
+                        if (changed) savePayload.value = value
+                        // The runtime value seeds pages and agents, never a write: the registry keeps it,
+                        // and the open editors too, for a page of theirs the registry does not hold.
+                        openEditors.saved(file, this@ErdEditor, runtimeValue)
+                        postForFile { onValueSaved(it, this@ErdEditor, value.takeIf { changed }, runtimeValue) }
                     }
 
                     is HostBridgeCommand.SaveReplication -> {
@@ -185,6 +189,10 @@ class ErdEditor(
                             action.payload.accentColor
                         )
                     }
+
+                    is HostBridgeCommand.SaveLocale -> {
+                        ErdEditorAppSettings.instance.updateLocale(action.payload.locale)
+                    }
                 }
             }
 
@@ -194,7 +202,7 @@ class ErdEditor(
                 registry.post {
                     // Editors the registry let go of (the file renamed away and back) relay among
                     // themselves; a new one of that file joins them, so every page reaches every other.
-                    if (docToEditorsMap[file].orEmpty().all { it === this@ErdEditor || holds(doc, it) }) {
+                    if (openEditors.editors(file).all { it === this@ErdEditor || holds(doc, it) }) {
                         register(doc)
                         addView(doc, this@ErdEditor)
                     }
@@ -205,7 +213,7 @@ class ErdEditor(
                 coroutineScope,
                 bridge,
                 file,
-                docToEditorsMap
+                openEditors
             )
             if (document != null) {
                 // A new page holds nothing until it asks for its initial value again.
@@ -362,16 +370,14 @@ class ErdEditor(
 
     override fun onSettingsChange(settings: ErdEditorAppSettings) {
         if (this::webviewPanel.isInitialized) {
-            webviewPanel.dispatch(updateThemeCommand(settings))
+            sendSettings(settings)
         }
     }
 
-    // The page shows auto as dark, so it only ever gets the light or dark auto stands for now.
-    private fun updateThemeCommand(settings: ErdEditorAppSettings): WebviewBridgeCommand {
-        val theme = settings.shownTheme
-        return WebviewBridgeCommand.UpdateTheme(
-            WebviewUpdateThemeCommandPayload(theme.appearance, theme.grayColor, theme.accentColor)
-        )
+    /** The theme and the display language, each with what its auto follows in the IDE. */
+    private fun sendSettings(settings: ErdEditorAppSettings) {
+        webviewPanel.dispatch(WebviewBridgeCommand.UpdateTheme.of(settings))
+        webviewPanel.dispatch(WebviewBridgeCommand.UpdateLocale.of(settings))
     }
 
     override fun getComponent(): JComponent = toolbarAndWebView
@@ -400,10 +406,7 @@ class ErdEditor(
     override fun dispose() {
         isDisposed = true
         bridge.close()
-        docToEditorsMap.computeIfPresent(file) { _, editors ->
-            editors.remove(this)
-            if (editors.isEmpty()) null else editors
-        }
+        openEditors.close(file, this)
 
         // Order matters: flush before cancelling, otherwise the cancellation wins the race and the
         // last edit is lost for good. The registry hears of the flush first; the last view to go

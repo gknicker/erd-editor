@@ -21,9 +21,14 @@ import {
   getScrollToCenter,
   getViewTransform,
 } from '@/components/erd/minimap/minimapGeometry';
+import { readerNameViewAction } from '@/components/erd/readerNameView';
+import { useI18n } from '@/components/localeContext';
+import { localized } from '@/components/localized/Localized';
 import Button from '@/components/primitives/button/Button';
 import Toast from '@/components/primitives/toast/Toast';
+import { sceneInteractionContext } from '@/components/sceneInteractionContext';
 import { sceneSourceContext } from '@/components/sceneSourceContext';
+import { openStatusToast } from '@/components/toast-container/openStatusToast';
 import { Open } from '@/constants/open';
 import {
   changeOpenMapAction,
@@ -35,6 +40,8 @@ import {
   scrollToAction,
 } from '@/engine/modules/settings/atom.actions';
 import { useUnmounted } from '@/hooks/useUnmounted';
+import { sourceI18n } from '@/i18n/source';
+import type { I18n } from '@/i18n/translate';
 import { Point } from '@/internal-types';
 import { getContentRect } from '@/konva/scene/contentBounds';
 import { previewZoomLevel } from '@/konva/scene/fitZoom';
@@ -80,33 +87,44 @@ type PlacementToastProps = {
   onCancel: () => void;
 };
 
-export function placementDescription({
-  progress,
-}: PlacementToastState): string {
-  return `Placing tables… ${Math.round(progress * 100)}%`;
+export function placementDescription(
+  { progress }: PlacementToastState,
+  i18n: I18n = sourceI18n
+): string {
+  return i18n.t('feedback.placingProgress', {
+    percent: Math.round(progress * 100),
+  });
 }
 
 /**
  * The message up while the tables settle, following the simulation as it
  * cools. Apply takes the layout as it stands, Cancel puts every table back.
  */
-const PlacementToast: FC<PlacementToastProps> = props => () => (
-  <Toast
-    progress={props.state.progress}
-    description={placementDescription(props.state)}
-    action={
-      <>
-        <Button size="1" text="Apply" onClick={props.onApply} />
-        <Button
-          variant="soft"
-          size="1"
-          text="Cancel"
-          onClick={props.onCancel}
-        />
-      </>
-    }
-  />
-);
+const PlacementToast: FC<PlacementToastProps> = (props, ctx) => {
+  const i18n = useI18n(ctx);
+
+  return () => (
+    <Toast
+      progress={props.state.progress}
+      title={placementDescription(props.state, i18n.value)}
+      action={
+        <>
+          <Button
+            size="1"
+            text={i18n.value.t('common.apply')}
+            onClick={props.onApply}
+          />
+          <Button
+            variant="soft"
+            size="1"
+            text={i18n.value.t('common.cancel')}
+            onClick={props.onCancel}
+          />
+        </>
+      }
+    />
+  );
+};
 
 const AutomaticTablePlacement: FC<AutomaticTablePlacementProps> = (
   props,
@@ -123,6 +141,8 @@ const AutomaticTablePlacement: FC<AutomaticTablePlacementProps> = (
   // The preview is a document of its own, so it names the document source
   // rather than inheriting whatever scene it was opened over.
   const sceneSource = useProvider(ctx, sceneSourceContext, 'document');
+  // Its scene takes a press as an editor's does, whatever the ERD tab reads.
+  const sceneInteraction = useProvider(ctx, sceneInteractionContext, 'edit');
 
   const {
     store: { state: originState },
@@ -136,6 +156,7 @@ const AutomaticTablePlacement: FC<AutomaticTablePlacementProps> = (
       app.store.dispatch(changeViewportAction(getViewport()));
     }),
     () => {
+      sceneInteraction.destroy();
       sceneSource.destroy();
       provider.destroy();
       appDestroy(app);
@@ -152,8 +173,11 @@ const AutomaticTablePlacement: FC<AutomaticTablePlacementProps> = (
     centerOfRect(contentRect)
   );
 
+  // The preview opens in the reader's name view, so the tables it places are
+  // as wide as the ones the reader sees.
   store.dispatchSync(
     initialLoadJsonAction$(toJson(originState)),
+    readerNameViewAction(store.state, originState),
     changeViewportAction(getViewport()),
     changeZoomLevelAction({ value: zoomLevel }),
     scrollToAction({ originX: previewOrigin.x, originY: previewOrigin.y })
@@ -171,6 +195,16 @@ const AutomaticTablePlacement: FC<AutomaticTablePlacementProps> = (
   const [close, onClose] = closePromise();
 
   let isClosed = false;
+  let stopSimulation = () => {};
+
+  // An overlay taken away by anything but its own toast, the element turning
+  // readonly among them, presses no Cancel, so the run ends with the overlay
+  // rather than land its placement once the simulation settles.
+  addUnsubscribe(() => {
+    isClosed = true;
+    stopSimulation();
+    onClose();
+  });
 
   const handleClose = () => {
     isClosed = true;
@@ -182,11 +216,10 @@ const AutomaticTablePlacement: FC<AutomaticTablePlacementProps> = (
 
   if (!tables.length) {
     handleClose();
-    originApp.emitter.emit(
-      openToastAction({
-        message: <Toast description="No tables to place" />,
-      })
-    );
+    openStatusToast(originApp.emitter, {
+      key: 'common.toast.noTablesToPlace',
+      title: localized('common.toast.noTablesToPlace'),
+    });
     return () => null;
   }
 
@@ -194,6 +227,7 @@ const AutomaticTablePlacement: FC<AutomaticTablePlacementProps> = (
 
   try {
     const simulation = createAutomaticTablePlacement(store.state);
+    stopSimulation = () => simulation.stop();
 
     const handleApply = () => {
       simulation.stop();
@@ -243,7 +277,7 @@ const AutomaticTablePlacement: FC<AutomaticTablePlacementProps> = (
   }
 
   return () => (
-    <div class={styles.root}>
+    <div class={styles.root} prop:dir="ltr">
       <div class={styles.container} use:ref={ref(root)}>
         <Canvas root={root} canvas={canvas} grabMove={true} />
         <Minimap />

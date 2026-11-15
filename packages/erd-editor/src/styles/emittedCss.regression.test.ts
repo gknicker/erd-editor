@@ -36,7 +36,7 @@ function selectorOf(cssText: string): string {
   return cssText.slice(0, cssText.indexOf('{')).trim();
 }
 
-/** Every rule adopted when all 57 modules share one module registry. */
+/** Every rule adopted when all 72 modules share one module registry. */
 let cumulative: string[] = [];
 /** The css.global half of cumulative, which the bucket keeps in front. */
 let globalRules: string[] = [];
@@ -50,8 +50,7 @@ let erdEditorScope = '';
 let codeBlockRootScope = '';
 let codeBlockClipboardScope = '';
 let colorPickerScope = '';
-let uniqueScope = '';
-let orderTypeScope = '';
+let sashScope = '';
 
 beforeAll(async () => {
   vi.resetModules();
@@ -65,16 +64,12 @@ beforeAll(async () => {
     await import('@/components/primitives/code-block/CodeBlock.styles');
   const colorPicker =
     await import('@/components/primitives/color-picker/ColorPicker.styles');
-  const indexesIndex =
-    await import('@/components/erd/table-properties/table-properties-indexes/indexes-index/IndexesIndex.styles');
-  const indexesColumn =
-    await import('@/components/erd/table-properties/table-properties-indexes/indexes-column/IndexesColumn.styles');
+  const sash = await import('@/components/primitives/sash/Sash.styles');
   erdEditorScope = `.${String(erdEditor.root)}`;
   codeBlockRootScope = `.${String(codeBlock.root)}`;
   codeBlockClipboardScope = `.${String(codeBlock.clipboard)}`;
   colorPickerScope = `.${String(colorPicker.container)}`;
-  uniqueScope = `.${String(indexesIndex.unique)}`;
-  orderTypeScope = `.${String(indexesColumn.orderType)}`;
+  sashScope = `.${String(sash.sash)}`;
 
   const sheets = adoptedSheets(addCSSHost);
   globalRules = sheets.filter(isGlobalSheet).flat();
@@ -109,12 +104,12 @@ describe('selector-list scope widening', () => {
   });
 
   it('leaves the global bucket lists unscoped, which is the whole point of css.global', () => {
-    // These lists are type selectors, pseudo elements, the universal selector
-    // and the picker's own runtime class names. A scope class on any of them
-    // would stop it matching, which is what this assertion is about.
+    // These lists are type selectors, pseudo elements and the universal
+    // selector. A scope class on any of them would stop it matching, which is
+    // what this assertion is about.
     const lists = globalRules.filter(text => selectorOf(text).includes(','));
 
-    expect(lists).toHaveLength(46);
+    expect(lists).toHaveLength(8);
     for (const list of lists) {
       expect(list).not.toMatch(SCOPE_CLASS);
     }
@@ -122,27 +117,26 @@ describe('selector-list scope widening', () => {
 });
 
 describe('rule-count invariance', () => {
-  it('loads 57 style modules', () => {
-    // A new style module is meant to move this number, which is why it is
-    // pinned rather than derived. P6-51 took six, the marker one more, the
-    // chrome gave four back, and the dead DOM sash and an empty module took two.
-    expect(modulePaths).toHaveLength(57);
+  it('loads 80 style modules', () => {
+    // A style module added or removed is meant to move this number, which is
+    // why it is pinned rather than derived.
+    expect(modulePaths).toHaveLength(80);
   });
 
-  it('adopts 621 rules, none of them a duplicate', () => {
+  it('adopts 681 rules, none of them a duplicate', () => {
     // Pinned rather than derived, so a rule added or lost anywhere in the
     // package has to be accounted for here.
-    expect(cumulative).toHaveLength(621);
-    expect(new Set(cumulative).size).toBe(621);
+    expect(cumulative).toHaveLength(681);
+    expect(new Set(cumulative).size).toBe(681);
   });
 
-  it('splits into 327 global rules ahead of 294 component rules', () => {
+  it('splits into 20 global rules ahead of 661 component rules', () => {
     // A shadow root applies its own styleSheets before its adoptedStyleSheets,
     // so the only thing keeping the reset ahead of the components is the bucket,
     // which is what this asserts positionally. Both halves move independently.
-    expect(sheetsOfEachKind).toEqual({ global: 5, component: 163 });
-    expect(globalRules).toHaveLength(327);
-    expect(componentRules).toHaveLength(294);
+    expect(sheetsOfEachKind).toEqual({ global: 4, component: 371 });
+    expect(globalRules).toHaveLength(20);
+    expect(componentRules).toHaveLength(661);
     expect(cumulative).toEqual([...globalRules, ...componentRules]);
   });
 
@@ -157,20 +151,19 @@ describe('rule-count invariance', () => {
     );
 
     // Identifiers are content hashes now, so a rule's text is the same whether its module is
-    // rendered alone or with the other 56 — which is exactly what makes this comparison mean
+    // rendered alone or with the other 71 — which is exactly what makes this comparison mean
     // "nothing was lost to dedup" rather than "the class names differ".
-    expect(union.size).toBe(621);
+    expect(union.size).toBe(681);
     expect(droppedByLoadingTogether).toEqual([]);
   });
 
-  it('gives two templates with the same whole text one class and one rule', () => {
-    // The identifier hashes the whole canonical text, so two modules writing
-    // one template share a class and a rule; one root under different nested
-    // rules hashes apart, which r-html's compileToRules spec pins.
-    expect(uniqueScope).toBe(orderTypeScope);
-    expect(
-      cumulative.filter(rule => rule === `${uniqueScope} { cursor: pointer; }`)
-    ).toHaveLength(1);
+  it('gives two templates with the same root declarations their own class', () => {
+    // The identifier is the hash of the whole canonical text, not of the root
+    // declaration block, so two templates that declare the same one property get
+    // a class and an adopted rule each rather than sharing one.
+    expect(colorPickerScope).not.toBe(sashScope);
+    expect(cumulative).toContain(`${colorPickerScope} { position: absolute; }`);
+    expect(cumulative).toContain(`${sashScope} { position: absolute; }`);
   });
 });
 

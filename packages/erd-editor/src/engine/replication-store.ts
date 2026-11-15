@@ -1,28 +1,34 @@
-import { toJson } from '@dineug/erd-editor-schema';
+import { toDocumentJson, toJson } from '@dineug/erd-editor-schema';
 import { AnyAction } from '@dineug/r-html';
 import { omit } from 'es-toolkit';
-import { isEmpty } from 'es-toolkit/compat';
 import { debounceTime, map, Observable, Subject, Subscription } from 'rxjs';
 
-import { ChangeActionTypes } from '@/engine/action-types';
+import {
+  batchVersion,
+  mergeBatchVersions,
+  ReplicaActionTypes,
+  ReplicaChangeActionTypes,
+} from '@/engine/action-types';
+import { slotOf } from '@/engine/clock';
 import {
   createEngineContext,
   type InjectEngineContext,
+  type ReplicaEngineContext,
 } from '@/engine/context';
 import {
   changeViewportAction,
   initialClearAction,
   initialLoadJsonAction,
-  validationIdsAction,
 } from '@/engine/modules/editor/atom.actions';
 import { actionsFilter } from '@/engine/rx-operators';
 import { createStore } from '@/engine/store';
 import { createHooks } from '@/engine/store-hooks';
 import { Unsubscribe, ValuesType } from '@/internal-types';
-import { procGC } from '@/services/schema-gc/procGC';
-import { SchemaGCService } from '@/services/schema-gc/schemaGCService';
+import { arrayHas } from '@/utils/arrayHas';
+import { toLoadValue } from '@/utils/loadValue';
 import { safeCallback } from '@/utils/safeCallback';
-import { toSafeString } from '@/utils/validation';
+
+const isReplicaChange = arrayHas<string>(ReplicaChangeActionTypes);
 
 type ListenerRecord = {
   [P in keyof InternalActionMap]: (payload: InternalActionMap[P]) => void;
@@ -33,11 +39,29 @@ const InternalActionType = {
 } as const;
 type InternalActionType = ValuesType<typeof InternalActionType>;
 type InternalActionMap = {
-  [InternalActionType.change]: void;
+  [InternalActionType.change]: ReplicationChange;
+};
+
+/**
+ * What a change hands its listeners: the document in the form a file holds,
+ * and whether the change actions since the last change, or since the load,
+ * left that form byte for byte as it was, as a scroll under its lock does.
+ */
+export type ReplicationChange = {
+  value: string;
+  changed: boolean;
 };
 
 export type ReplicationStore = {
+  /** The document in the form a file holds. */
   readonly value: string;
+  /** The document as the replica holds it, removed entities included, to seed a peer. */
+  readonly runtimeValue: string;
+  /**
+   * A change comes 200 ms after the last change action, even one that left the
+   * value as it was (changed false): a hub waits for each as a save, and a host
+   * writes nothing for such a one, whatever bytes its file holds.
+   */
   on: (listeners: Partial<ListenerRecord>) => Unsubscribe;
   setInitialValue: (value: string) => void;
   dispatch: (actions: Array<AnyAction> | AnyAction) => void;
@@ -49,8 +73,14 @@ export function createReplicationStore(
   context: InjectEngineContext
 ): ReplicationStore {
   const subscriptionSet = new Set<Subscription>();
-  const engineContext = createEngineContext(context);
+  // Every step of a drag or a pan a replica takes is another store's.
+  const engineContext: ReplicaEngineContext = {
+    ...createEngineContext({ ...context, routes: false }),
+    remote: true,
+  };
+  const { clock } = engineContext;
   const store = createStore(engineContext, false);
+  clock.setSlot(slotOf(store.state.editor.id));
   // A replica has no screen, and the default editor size the store starts with
   // would pull every replicated load against a frame nobody looks through, so
   // the viewport is reported empty before anything can be reduced against it.
@@ -59,9 +89,12 @@ export function createReplicationStore(
   const dispatch$ = new Subject<Array<AnyAction>>();
   const change$ = new Observable<Array<AnyAction>>(subscriber =>
     store.subscribe(actions => subscriber.next(actions))
-  ).pipe(actionsFilter(ChangeActionTypes), debounceTime(200));
+  ).pipe(actionsFilter(ReplicaChangeActionTypes), debounceTime(200));
   const observers = new Set<Partial<ListenerRecord>>();
-  const schemaGCService = new SchemaGCService();
+  // What a change is measured against: the value the last one handed out, or
+  // after a load the value the first change action finds, not a join's registers
+  // before it, so it holds the load's own rewrites. A file is no measure.
+  let baseline: string | null = null;
 
   const on = (listeners: Partial<ListenerRecord>): Unsubscribe => {
     observers.has(listeners) || observers.add(listeners);
@@ -81,28 +114,17 @@ export function createReplicationStore(
     });
   };
 
+  // The load reducer writes what the document derives before it returns, so a
+  // change action that comes at once, as a pan replayed behind the load does,
+  // finds them in.
   const setInitialValue = (value: string) => {
-    const safeValue = toSafeString(value);
+    baseline = null;
     // The two atom actions initialLoadJsonAction$ yields, dispatched as they
     // are: its module holds the schema importers, which a replica never runs.
     store.dispatchSync([
       initialClearAction(),
-      initialLoadJsonAction({ value: isEmpty(safeValue) ? '{}' : safeValue }),
+      initialLoadJsonAction({ value: toLoadValue(value) }),
     ]);
-    schemaGCService.run(toJson(store.state)).then(gcIds => {
-      const isChange =
-        gcIds.tableIds.length ||
-        gcIds.tableColumnIds.length ||
-        gcIds.relationshipIds.length ||
-        gcIds.indexIds.length ||
-        gcIds.indexColumnIds.length ||
-        gcIds.memoIds.length;
-
-      if (isChange) {
-        procGC(store.state, gcIds);
-        store.dispatchSync(validationIdsAction());
-      }
-    });
   };
 
   const dispatchSync = (actions: Array<AnyAction> | AnyAction) => {
@@ -121,19 +143,40 @@ export function createReplicationStore(
     hooks.destroy();
   };
 
-  subscriptionSet
-    .add(change$.subscribe(() => emit(InternalActionType.change, undefined)))
-    .add(
-      dispatch$
-        .pipe(
-          actionsFilter(ChangeActionTypes),
-          map(actions => actions.map(action => omit(action, ['tags'])))
-        )
-        .subscribe(store.dispatchSync)
-    );
+  const handleChange = () => {
+    const value = toDocumentJson(store.state);
+    // Null after a load that came while a change was pending, whose value is
+    // what loaded.
+    const changed = baseline !== null && value !== baseline;
+    if (baseline !== null) baseline = value;
+    emit(InternalActionType.change, { value, changed });
+  };
+
+  subscriptionSet.add(change$.subscribe(handleChange)).add(
+    dispatch$
+      .pipe(
+        actionsFilter(ReplicaActionTypes),
+        map(actions => actions.map(action => omit(action, ['tags'])))
+      )
+      .subscribe(actions => {
+        if (actions.some(({ type }) => isReplicaChange(type))) {
+          baseline ??= toDocumentJson(store.state);
+        }
+        // Versions as the element's store gives them: what a stream regroup sent
+        // without one takes the next, and each moves the clock past the registers
+        // a join brought in, which would otherwise refuse every later stroke.
+        const version = batchVersion(clock, actions);
+        actions.forEach(action => (action.version ??= version));
+        store.dispatchSync(actions);
+        mergeBatchVersions(clock, actions);
+      })
+  );
 
   return Object.freeze({
     get value() {
+      return toDocumentJson(store.state);
+    },
+    get runtimeValue() {
       return toJson(store.state);
     },
     on,

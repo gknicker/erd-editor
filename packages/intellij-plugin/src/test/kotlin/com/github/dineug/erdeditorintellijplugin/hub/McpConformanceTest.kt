@@ -107,7 +107,7 @@ class McpConformanceTest {
         val served = checkNotNull(lock(env))
         assertEquals("intellij", served.ide)
         assertEquals(listOf(project.toString(), untrusted.toString()), served.workspaceFolders)
-        assertEquals(1L, served.protocolVersion)
+        assertEquals(HUB_PROTOCOL_VERSION.toLong(), served.protocolVersion)
         assertTrue(served.token, TOKEN.matches(served.token))
         assertEquals(LockPaths.choosePipePath(env.homeDir, env.tmpDir, pid, platform), served.pipe)
         if (!platform.isWindows) assertTrue("the socket is bound", Files.exists(Path.of(served.pipe)))
@@ -178,6 +178,9 @@ class McpConformanceTest {
         // 10. Coding agents off: a hub false lock, no documentClosed, writes blocked; then on again.
         host.turn(false)
         awaitUntil(message = "the lock turns hub false") { lock(env)?.hub == false }
+        // The hub false lock lands before the pipe goes, as DocumentHubTest pins, so the socket is
+        // checked once that state change ran to its end, not once the lock reads hub false.
+        checkNotNull(runtime.hub).flushed().get(STATE_CHANGE_SECONDS, TimeUnit.SECONDS)
         val off = checkNotNull(lock(env))
         assertEquals("" to "", off.pipe to off.token)
         assertEquals(served.workspaceFolders, off.workspaceFolders)
@@ -268,7 +271,7 @@ class McpConformanceTest {
         val lock = checkNotNull(lock(env))
         val peer = TestPeer.connect(lock.pipe).also(peers::add)
         peer.send(
-            """{"id":1,"method":"hello","params":{"token":"${lock.token}","protocolVersion":1,"client":"raw"}}""",
+            """{"id":1,"method":"hello","params":{"token":"${lock.token}","protocolVersion":$HUB_PROTOCOL_VERSION,"client":"raw"}}""",
             """{"id":2,"method":"join","params":{"path":${HubJson.quote(path)}}}""",
         )
         val (hello, join) = peer.receiveFrames(2)
@@ -382,7 +385,8 @@ class McpConformanceTest {
             runtime.threads.schedule(SAVE_AFTER_MS) {
                 val text = page.text
                 lastSaved = text
-                runtime.registry.onValueSaved(file, this, text)
+                // A page hands its runtime value with every save; this one holds nothing the file drops.
+                runtime.registry.onValueSaved(file, this, text, text)
             }
         }
     }
@@ -413,6 +417,7 @@ class McpConformanceTest {
         const val SAVE_AFTER_MS = 250L
         const val SETTLE_MS = 500L
         const val RETRY_MS = 10_000L
+        const val STATE_CHANGE_SECONDS = 5L
         const val PROBE_TIMEOUT_SECONDS = 90L
 
         /** registryCallBoundMs + drainCapMs + closeBoundMs + threadJoinBoundMs is 3 s; the rest is a loaded runner's. */

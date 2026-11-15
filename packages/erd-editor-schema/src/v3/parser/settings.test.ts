@@ -1,17 +1,58 @@
+import { isPlainObject } from 'es-toolkit';
 import { round } from 'es-toolkit/compat';
 import { describe, expect, it } from 'vite-plus/test';
 
-import { migrateScrollToOrigin } from '@/v3/parser/migrateScroll';
-import { createAndMergeSettings } from '@/v3/parser/settings';
+import { DeepPartial } from '@/internal-types';
+import {
+  type LegacyScrollBox,
+  migrateScrollToOrigin,
+} from '@/v3/parser/migrateScroll';
+import { createAndMergeSettings as mergeSettings } from '@/v3/parser/settings';
 import {
   BracketType,
   CanvasType,
   ColumnType,
+  ColumnTypeList,
   Database,
+  isSettingLocked,
   Language,
+  LanguageList,
+  LockSettingType,
   NameCase,
+  NameViewMode,
+  Settings,
   Show,
 } from '@/v3/schema/settings';
+
+const LOCK_ALL = 63;
+
+/** What a document saved before these fields left the settings. */
+type LegacyFields = Partial<
+  Record<
+    | 'width'
+    | 'height'
+    | 'scrollTop'
+    | 'scrollLeft'
+    | 'relationshipOptimization'
+    | 'ignoreSaveSettings',
+    unknown
+  >
+>;
+
+/** A file that names its locks, so the view and the tab it saved stay. */
+const createAndMergeSettings = (json?: DeepPartial<Settings> & LegacyFields) =>
+  mergeSettings(
+    isPlainObject(json) ? { lockSettings: LOCK_ALL, ...json } : json
+  );
+
+const legacyBox = (box: Partial<LegacyScrollBox> = {}): LegacyScrollBox => ({
+  width: 2000,
+  height: 2000,
+  zoomLevel: 1,
+  scrollLeft: 0,
+  scrollTop: 0,
+  ...box,
+});
 
 const defaultShow =
   Show.tableComment |
@@ -23,8 +64,10 @@ const defaultShow =
   Show.relationship;
 
 const defaultColumnOrder = [
+  ColumnType.columnLogicalName,
   ColumnType.columnName,
   ColumnType.columnDataType,
+  ColumnType.columnDomain,
   ColumnType.columnNotNull,
   ColumnType.columnUnique,
   ColumnType.columnAutoIncrement,
@@ -35,10 +78,6 @@ const defaultColumnOrder = [
 describe('createAndMergeSettings', () => {
   it('returns the default settings when no json is given', () => {
     expect(createAndMergeSettings()).toEqual({
-      width: 2000,
-      height: 2000,
-      scrollTop: 0,
-      scrollLeft: 0,
       originX: 0,
       originY: 0,
       zoomLevel: 1,
@@ -51,10 +90,22 @@ describe('createAndMergeSettings', () => {
       columnNameCase: NameCase.camelCase,
       bracketType: BracketType.none,
       relationshipDataTypeSync: true,
-      relationshipOptimization: false,
       columnOrder: defaultColumnOrder,
       maxWidthComment: -1,
-      ignoreSaveSettings: 0,
+      lockSettings: LOCK_ALL,
+      lockedValues: {
+        originX: 0,
+        originY: 0,
+        zoomLevel: 1,
+        canvasType: CanvasType.ERD,
+        language: Language.GraphQL,
+        tableNameCase: NameCase.pascalCase,
+        columnNameCase: NameCase.camelCase,
+        bracketType: BracketType.none,
+        nameViewMode: NameViewMode.physical,
+      },
+      ddlScripts: { before: '', after: '' },
+      nameViewMode: NameViewMode.physical,
     });
   });
 
@@ -62,7 +113,7 @@ describe('createAndMergeSettings', () => {
     const settings = createAndMergeSettings();
 
     expect(settings.zoomLevel).toBe(1);
-    expect(settings).toMatchObject(migrateScrollToOrigin(settings));
+    expect(settings).toMatchObject(migrateScrollToOrigin(legacyBox()));
   });
 
   it('computes the default show bitmask as 431', () => {
@@ -75,38 +126,50 @@ describe('createAndMergeSettings', () => {
     ['string', 'nope'],
     ['array', []],
   ])('ignores a non-object source (%s)', (_label, source) => {
-    expect(createAndMergeSettings(source as any).width).toBe(2000);
+    expect(createAndMergeSettings(source as any)).toEqual(mergeSettings());
   });
 
-  describe('canvas size', () => {
-    it('clamps width below the minimum', () => {
-      expect(createAndMergeSettings({ width: 10 }).width).toBe(2000);
+  describe('the legacy canvas box', () => {
+    const originOf = (json: LegacyFields) =>
+      createAndMergeSettings({ zoomLevel: 0.5, ...json });
+
+    it.each([
+      ['a width below the minimum', { width: 10 }, { originX: 500 }],
+      ['a width above the maximum', { width: 999_999 }, { originX: 5000 }],
+      ['a width inside the range', { width: 5_000 }, { originX: 1250 }],
+      ['a height below the minimum', { height: -1 }, { originY: 500 }],
+      ['a height above the maximum', { height: 20_001 }, { originY: 5000 }],
+    ])('migrates from %s clamped', (_label, json, origin) => {
+      expect(originOf(json)).toMatchObject(origin);
     });
 
-    it('clamps width above the maximum', () => {
-      expect(createAndMergeSettings({ width: 999_999 }).width).toBe(20_000);
+    it('reads a non-number width and height at the default box', () => {
+      expect(originOf({ width: '3000', height: null })).toMatchObject({
+        originX: 500,
+        originY: 500,
+      });
     });
 
-    it('keeps a width inside the range', () => {
-      expect(createAndMergeSettings({ width: 5_000 }).width).toBe(5_000);
-    });
-
-    it('clamps height below the minimum', () => {
-      expect(createAndMergeSettings({ height: -1 }).height).toBe(2000);
-    });
-
-    it('clamps height above the maximum', () => {
-      expect(createAndMergeSettings({ height: 20_001 }).height).toBe(20_000);
-    });
-
-    it('ignores a non-number width and height', () => {
+    it('keeps none of the fields a document saved before they left', () => {
       const settings = createAndMergeSettings({
-        width: '3000' as any,
-        height: null as any,
+        width: 4000,
+        height: 3000,
+        scrollTop: 12,
+        scrollLeft: -34,
+        relationshipOptimization: true,
+        ignoreSaveSettings: 3,
       });
 
-      expect(settings.width).toBe(2000);
-      expect(settings.height).toBe(2000);
+      for (const field of [
+        'width',
+        'height',
+        'scrollTop',
+        'scrollLeft',
+        'relationshipOptimization',
+        'ignoreSaveSettings',
+      ]) {
+        expect(settings).not.toHaveProperty(field);
+      }
     });
   });
 
@@ -172,35 +235,45 @@ describe('createAndMergeSettings', () => {
   describe('plain assignments', () => {
     it('assigns numbers, strings and booleans', () => {
       const settings = createAndMergeSettings({
-        scrollTop: 12,
-        scrollLeft: -34,
         show: Show.relationship,
-        ignoreSaveSettings: 3,
+        lockSettings: LockSettingType.language,
         databaseName: 'sakila',
         canvasType: CanvasType.schemaSQL,
         relationshipDataTypeSync: false,
-        relationshipOptimization: true,
       });
 
-      expect(settings.scrollTop).toBe(12);
-      expect(settings.scrollLeft).toBe(-34);
       expect(settings.show).toBe(Show.relationship);
-      expect(settings.ignoreSaveSettings).toBe(3);
+      expect(settings.lockSettings).toBe(LockSettingType.language);
       expect(settings.databaseName).toBe('sakila');
       expect(settings.canvasType).toBe(CanvasType.schemaSQL);
       expect(settings.relationshipDataTypeSync).toBe(false);
-      expect(settings.relationshipOptimization).toBe(true);
+    });
+
+    it('keeps the alternate key bit a document carries, off by default', () => {
+      const shown = Show.relationship | Show.columnAlternateKey;
+
+      expect(createAndMergeSettings({ show: shown }).show).toBe(shown);
+      expect(createAndMergeSettings().show & Show.columnAlternateKey).toBe(0);
+    });
+
+    it('shows table groups unless a document carries the hide bit', () => {
+      const hidden = Show.relationship | Show.hideTableGroup;
+
+      expect(createAndMergeSettings({ show: hidden }).show).toBe(hidden);
+      expect(createAndMergeSettings().show & Show.hideTableGroup).toBe(0);
+      expect(
+        createAndMergeSettings({ show: Show.relationship }).show &
+          Show.hideTableGroup
+      ).toBe(0);
     });
 
     it('ignores wrongly typed values', () => {
       const settings = createAndMergeSettings({
-        scrollTop: '12' as any,
         show: null as any,
         databaseName: 10 as any,
         relationshipDataTypeSync: 'false' as any,
       });
 
-      expect(settings.scrollTop).toBe(0);
       expect(settings.show).toBe(defaultShow);
       expect(settings.databaseName).toBe('');
       expect(settings.relationshipDataTypeSync).toBe(true);
@@ -284,6 +357,61 @@ describe('createAndMergeSettings', () => {
       );
     });
 
+    it('keeps the Mermaid language', () => {
+      expect(
+        createAndMergeSettings({ language: Language.Mermaid }).language
+      ).toBe(Language.Mermaid);
+    });
+
+    it('keeps the PHP language', () => {
+      expect(createAndMergeSettings({ language: Language.PHP }).language).toBe(
+        Language.PHP
+      );
+    });
+
+    it('keeps the Doctrine language', () => {
+      expect(
+        createAndMergeSettings({ language: Language.Doctrine }).language
+      ).toBe(Language.Doctrine);
+    });
+
+    it('keeps the Rust language', () => {
+      expect(createAndMergeSettings({ language: Language.Rust }).language).toBe(
+        Language.Rust
+      );
+    });
+
+    it('keeps the SeaORM language', () => {
+      expect(
+        createAndMergeSettings({ language: Language.SeaORM }).language
+      ).toBe(Language.SeaORM);
+    });
+
+    it('keeps the Swift language', () => {
+      expect(
+        createAndMergeSettings({ language: Language.Swift }).language
+      ).toBe(Language.Swift);
+    });
+
+    it('keeps the Zod language', () => {
+      expect(createAndMergeSettings({ language: Language.Zod }).language).toBe(
+        Language.Zod
+      );
+    });
+
+    it('keeps the JSONSchema language', () => {
+      expect(
+        createAndMergeSettings({ language: Language.JSONSchema }).language
+      ).toBe(Language.JSONSchema);
+    });
+
+    it('opens a language flag it does not know as GraphQL, as an editor older than the flag does', () => {
+      expect(
+        createAndMergeSettings({ language: Math.max(...LanguageList) * 2 })
+          .language
+      ).toBe(Language.GraphQL);
+    });
+
     it('ignores numbers outside the enum lists', () => {
       const settings = createAndMergeSettings({
         database: 999,
@@ -307,7 +435,99 @@ describe('createAndMergeSettings', () => {
     });
   });
 
+  describe('nameViewMode', () => {
+    it('keeps a name view mode it knows and locks it at what the file saved', () => {
+      const settings = createAndMergeSettings({
+        nameViewMode: NameViewMode.both,
+      });
+
+      expect(settings.nameViewMode).toBe(NameViewMode.both);
+      expect(settings.lockedValues.nameViewMode).toBe(NameViewMode.both);
+    });
+
+    it.each([
+      ['an unknown name', 'tree'],
+      ['a non-string', 2],
+    ])('opens %s at the physical names', (_label, nameViewMode) => {
+      expect(
+        createAndMergeSettings({ nameViewMode: nameViewMode as any })
+          .nameViewMode
+      ).toBe(NameViewMode.physical);
+    });
+  });
+
+  describe('ddlScripts', () => {
+    it('starts both scripts empty', () => {
+      expect(createAndMergeSettings().ddlScripts).toEqual({
+        before: '',
+        after: '',
+      });
+    });
+
+    it('keeps the two strings a document saved, as they were written', () => {
+      const ddlScripts = {
+        before: '\r\n  CREATE EXTENSION IF NOT EXISTS pgcrypto;  ',
+        after: 'GRANT SELECT ON member TO app;',
+      };
+
+      expect(createAndMergeSettings({ ddlScripts }).ddlScripts).toEqual(
+        ddlScripts
+      );
+    });
+
+    it('reads a script that is not a string, or is missing, as empty', () => {
+      expect(
+        createAndMergeSettings({
+          ddlScripts: { before: 12 as any, after: null as any },
+        }).ddlScripts
+      ).toEqual({ before: '', after: '' });
+      expect(
+        createAndMergeSettings({ ddlScripts: { after: 'SELECT 1;' } })
+          .ddlScripts
+      ).toEqual({ before: '', after: 'SELECT 1;' });
+      expect(
+        createAndMergeSettings({ ddlScripts: { before: ['x'] as any } })
+          .ddlScripts
+      ).toEqual({ before: '', after: '' });
+    });
+
+    it.each([
+      ['a number', 7],
+      ['null', null],
+      ['an array', ['SELECT 1;']],
+      ['a string', 'SELECT 1;'],
+    ])('ignores ddlScripts that are %s', (_label, ddlScripts) => {
+      expect(
+        createAndMergeSettings({ ddlScripts: ddlScripts as any }).ddlScripts
+      ).toEqual({ before: '', after: '' });
+    });
+
+    it('drops a key it does not know', () => {
+      const { ddlScripts } = createAndMergeSettings({
+        ddlScripts: { before: 'a', after: 'b', middle: 'c' } as any,
+      });
+
+      expect(ddlScripts).toEqual({ before: 'a', after: 'b' });
+      expect(ddlScripts).not.toHaveProperty('middle');
+    });
+
+    it('gives each parse a pair of its own', () => {
+      const first = createAndMergeSettings();
+      const second = createAndMergeSettings();
+
+      first.ddlScripts.before = 'changed';
+
+      expect(second.ddlScripts.before).toBe('');
+    });
+  });
+
   describe('columnOrder', () => {
+    it('holds every column type in the default order, where a parse finds the place of one an order lacks', () => {
+      expect(
+        [...createAndMergeSettings({}).columnOrder].sort((a, b) => a - b)
+      ).toEqual(ColumnTypeList);
+    });
+
     it('accepts a permutation of every column type', () => {
       const columnOrder = [...defaultColumnOrder].reverse();
       const settings = createAndMergeSettings({ columnOrder });
@@ -316,33 +536,166 @@ describe('createAndMergeSettings', () => {
       expect(settings.columnOrder).toBe(columnOrder);
     });
 
-    it('rejects an array with the wrong length', () => {
+    it('drops a column type it does not know and keeps the order of the rest', () => {
+      const columnOrder = [
+        ColumnType.columnComment,
+        512,
+        ColumnType.columnDefault,
+        ColumnType.columnAutoIncrement,
+        ColumnType.columnUnique,
+        ColumnType.columnNotNull,
+        ColumnType.columnDomain,
+        'columnName',
+        ColumnType.columnDataType,
+        ColumnType.columnName,
+        1.5,
+        ColumnType.columnLogicalName,
+      ];
+
+      expect(
+        createAndMergeSettings({ columnOrder: columnOrder as number[] })
+          .columnOrder
+      ).toEqual([...defaultColumnOrder].reverse());
+    });
+
+    it('keeps the first entry of a column type named twice', () => {
+      const columnOrder = [
+        ...[...defaultColumnOrder].reverse(),
+        ColumnType.columnComment,
+        ColumnType.columnName,
+      ];
+
+      expect(createAndMergeSettings({ columnOrder }).columnOrder).toEqual(
+        [...defaultColumnOrder].reverse()
+      );
+    });
+
+    it('puts a column type the order lacks just after the one before it in the default order', () => {
+      const columnOrder = [
+        ColumnType.columnComment,
+        ColumnType.columnDefault,
+        ColumnType.columnLogicalName,
+        ColumnType.columnName,
+        ColumnType.columnDataType,
+        ColumnType.columnDomain,
+        ColumnType.columnNotNull,
+        ColumnType.columnUnique,
+      ];
+
+      expect(createAndMergeSettings({ columnOrder }).columnOrder).toEqual([
+        ColumnType.columnComment,
+        ColumnType.columnDefault,
+        ColumnType.columnLogicalName,
+        ColumnType.columnName,
+        ColumnType.columnDataType,
+        ColumnType.columnDomain,
+        ColumnType.columnNotNull,
+        ColumnType.columnUnique,
+        ColumnType.columnAutoIncrement,
+      ]);
+    });
+
+    it('puts the first column type of the default order just before the nearest one after it the order holds', () => {
+      const columnOrder = [
+        ColumnType.columnComment,
+        ColumnType.columnDataType,
+        ColumnType.columnDomain,
+        ColumnType.columnName,
+        ColumnType.columnDefault,
+        ColumnType.columnNotNull,
+        ColumnType.columnUnique,
+        ColumnType.columnAutoIncrement,
+      ];
+
+      expect(createAndMergeSettings({ columnOrder }).columnOrder).toEqual([
+        ColumnType.columnComment,
+        ColumnType.columnDataType,
+        ColumnType.columnDomain,
+        ColumnType.columnLogicalName,
+        ColumnType.columnName,
+        ColumnType.columnDefault,
+        ColumnType.columnNotNull,
+        ColumnType.columnUnique,
+        ColumnType.columnAutoIncrement,
+      ]);
+    });
+
+    it('fills every column type around the one an order of a single entry names', () => {
       expect(
         createAndMergeSettings({ columnOrder: [ColumnType.columnName] })
           .columnOrder
       ).toEqual(defaultColumnOrder);
     });
 
-    it('rejects an array of the right length that is missing a member', () => {
-      const columnOrder = [
-        ColumnType.columnName,
-        ColumnType.columnName,
-        ColumnType.columnDataType,
-        ColumnType.columnNotNull,
-        ColumnType.columnUnique,
-        ColumnType.columnAutoIncrement,
-        ColumnType.columnDefault,
-      ];
-
-      expect(createAndMergeSettings({ columnOrder }).columnOrder).toEqual(
-        defaultColumnOrder
-      );
+    it.each([
+      ['no entry', []],
+      ['no column type it knows', [512, 'columnName', null]],
+    ])('reads an order of %s as the default', (_, columnOrder) => {
+      expect(
+        createAndMergeSettings({ columnOrder: columnOrder as number[] })
+          .columnOrder
+      ).toEqual(defaultColumnOrder);
     });
 
     it('rejects a non-array', () => {
       expect(
         createAndMergeSettings({ columnOrder: 'nope' as any }).columnOrder
       ).toEqual(defaultColumnOrder);
+    });
+
+    it('puts the logical name before the name and the domain after the data type into an order of seven', () => {
+      const columnOrder = [
+        ColumnType.columnComment,
+        ColumnType.columnDataType,
+        ColumnType.columnName,
+        ColumnType.columnDefault,
+        ColumnType.columnNotNull,
+        ColumnType.columnUnique,
+        ColumnType.columnAutoIncrement,
+      ];
+
+      expect(createAndMergeSettings({ columnOrder }).columnOrder).toEqual([
+        ColumnType.columnComment,
+        ColumnType.columnDataType,
+        ColumnType.columnDomain,
+        ColumnType.columnLogicalName,
+        ColumnType.columnName,
+        ColumnType.columnDefault,
+        ColumnType.columnNotNull,
+        ColumnType.columnUnique,
+        ColumnType.columnAutoIncrement,
+      ]);
+    });
+
+    it('reads the order of seven a document saved before the new column types as the default', () => {
+      const columnOrder = defaultColumnOrder.filter(
+        columnType =>
+          columnType !== ColumnType.columnLogicalName &&
+          columnType !== ColumnType.columnDomain
+      );
+
+      expect(createAndMergeSettings({ columnOrder }).columnOrder).toEqual(
+        defaultColumnOrder
+      );
+    });
+
+    it('keeps the order a later release saved for the column types it knows', () => {
+      const known = [
+        ColumnType.columnDataType,
+        ColumnType.columnDomain,
+        ColumnType.columnName,
+        ColumnType.columnLogicalName,
+        ColumnType.columnNotNull,
+        ColumnType.columnUnique,
+        ColumnType.columnAutoIncrement,
+        ColumnType.columnDefault,
+        ColumnType.columnComment,
+      ];
+      const columnOrder = [...known.slice(0, 5), 1024, ...known.slice(5), 512];
+
+      expect(createAndMergeSettings({ columnOrder }).columnOrder).toEqual(
+        known
+      );
     });
   });
 });
@@ -372,15 +725,21 @@ describe('the legacy scroll migration', () => {
   );
 
   it.each([0.5, 0.1, 1.5])(
-    'carries the legacy pair through the migration at zoom %s',
+    'keeps none of the legacy fields after the migration at zoom %s',
     zoomLevel => {
-      const json = legacy(zoomLevel);
-      const settings = createAndMergeSettings(json);
+      const settings = createAndMergeSettings(legacy(zoomLevel));
 
-      expect(settings.scrollLeft).toBe(json.scrollLeft);
-      expect(settings.scrollTop).toBe(json.scrollTop);
+      for (const field of ['width', 'height', 'scrollLeft', 'scrollTop']) {
+        expect(settings).not.toHaveProperty(field);
+      }
     }
   );
+
+  it('reads a missing scroll field at zero', () => {
+    expect(
+      createAndMergeSettings({ zoomLevel: 0.5, scrollLeft: 10 })
+    ).toMatchObject({ originX: 510, originY: 500 });
+  });
 
   it('migrates from the clamped box and zoom, not the raw json', () => {
     const settings = createAndMergeSettings({
@@ -391,10 +750,16 @@ describe('the legacy scroll migration', () => {
       scrollTop: 60,
     });
 
-    expect(settings.width).toBe(20_000);
-    expect(settings.height).toBe(2000);
     expect(settings.zoomLevel).toBe(1.5);
-    expect(settings).toMatchObject(migrateScrollToOrigin(settings));
+    expect(settings).toMatchObject(
+      migrateScrollToOrigin({
+        width: 20_000,
+        height: 2000,
+        zoomLevel: 1.5,
+        scrollLeft: 40,
+        scrollTop: 60,
+      })
+    );
   });
 
   it('keeps an origin pair the document carries and migrates nothing', () => {
@@ -406,8 +771,6 @@ describe('the legacy scroll migration', () => {
 
     expect(settings.originX).toBe(-11);
     expect(settings.originY).toBe(22.5);
-    expect(settings.scrollLeft).toBe(-137.25);
-    expect(settings.scrollTop).toBe(1234.5);
   });
 
   it.each([
@@ -418,6 +781,144 @@ describe('the legacy scroll migration', () => {
     const json = { ...legacy(0.5), ...origin };
     const settings = createAndMergeSettings(json);
 
-    expect(settings).toMatchObject(migrateScrollToOrigin(settings));
+    expect(settings).toMatchObject(migrateScrollToOrigin(legacy(0.5)));
   });
+});
+
+describe('a document saved before the locks', () => {
+  const saved = {
+    originX: -11,
+    originY: 22.5,
+    zoomLevel: 0.5,
+    canvasType: CanvasType.schemaSQL,
+    language: Language.Java,
+    tableNameCase: NameCase.snakeCase,
+    columnNameCase: NameCase.none,
+    bracketType: BracketType.doubleQuote,
+  };
+
+  it.each([
+    ['without a switch', saved],
+    ['that saved its view', { ...saved, ignoreSaveSettings: 0 }],
+    ['that saved none of it', { ...saved, ignoreSaveSettings: 3 }],
+  ])('locks every setting of a file %s', (_label, json) => {
+    expect(mergeSettings(json as DeepPartial<Settings>).lockSettings).toBe(
+      LOCK_ALL
+    );
+  });
+
+  it('opens its view and tab where a new document does and locks them there', () => {
+    const settings = mergeSettings(saved);
+    const start = {
+      originX: 0,
+      originY: 0,
+      zoomLevel: 1,
+      canvasType: CanvasType.ERD,
+    };
+
+    expect(settings).toMatchObject(start);
+    expect(settings.lockedValues).toMatchObject(start);
+  });
+
+  it('locks the code settings at what it saved', () => {
+    const { lockedValues, ...settings } = mergeSettings(saved);
+    const code = {
+      language: Language.Java,
+      tableNameCase: NameCase.snakeCase,
+      columnNameCase: NameCase.none,
+      bracketType: BracketType.doubleQuote,
+    };
+
+    expect(settings).toMatchObject(code);
+    expect(lockedValues).toMatchObject(code);
+  });
+
+  it('opens with the name view locked, as a file that names every other lock does', () => {
+    for (const json of [saved, { ...saved, lockSettings: LOCK_ALL }]) {
+      const { lockSettings } = mergeSettings(json);
+
+      expect(
+        isSettingLocked(lockSettings, LockSettingType.unlockNameViewMode)
+      ).toBe(true);
+    }
+  });
+
+  it('keeps everything a file that names its locks saved, unlocked or not', () => {
+    const settings = mergeSettings({ ...saved, lockSettings: 0 });
+
+    expect(settings.lockSettings).toBe(0);
+    expect(settings).toMatchObject(saved);
+    expect(settings.lockedValues).toEqual({
+      ...saved,
+      nameViewMode: NameViewMode.physical,
+    });
+  });
+});
+
+describe('the view and the tab a lock can hold', () => {
+  it.each([
+    ['an infinite originX', { originX: Infinity, originY: 0 }],
+    ['a NaN originY', { originX: 0, originY: NaN }],
+  ])('migrates the origin of %s rather than locking it', (_label, origin) => {
+    const settings = createAndMergeSettings({
+      ...origin,
+      scrollLeft: -10,
+      scrollTop: 20,
+    });
+
+    expect(Number.isFinite(settings.originX)).toBe(true);
+    expect(Number.isFinite(settings.originY)).toBe(true);
+    expect(settings).toMatchObject(
+      migrateScrollToOrigin(legacyBox({ scrollLeft: -10, scrollTop: 20 }))
+    );
+    expect(settings.lockedValues.originX).toBe(settings.originX);
+  });
+
+  it('opens a tab locked at Settings, which only a hand edit writes, on the ERD', () => {
+    const settings = mergeSettings({
+      canvasType: CanvasType.settings,
+      lockSettings: LockSettingType.canvasType,
+    });
+
+    expect(settings.canvasType).toBe(CanvasType.ERD);
+    expect(settings.lockedValues.canvasType).toBe(CanvasType.ERD);
+  });
+
+  it('keeps the Settings tab a file saved with its tab unlocked', () => {
+    const settings = mergeSettings({
+      canvasType: CanvasType.settings,
+      lockSettings: 0,
+    });
+
+    expect(settings.canvasType).toBe(CanvasType.settings);
+  });
+
+  it.each([
+    ['locked', LockSettingType.canvasType, CanvasType.ERD],
+    ['unlocked', 0, CanvasType.settings],
+  ])(
+    'keeps a bit no lock owns beside a tab %s at Settings',
+    (_label, bit, canvasType) => {
+      const lockSettings = 128 | bit;
+      const settings = mergeSettings({
+        canvasType: CanvasType.settings,
+        lockSettings,
+      });
+
+      expect(settings.lockSettings).toBe(lockSettings);
+      expect(settings.canvasType).toBe(canvasType);
+      expect(settings.lockedValues.canvasType).toBe(canvasType);
+    }
+  );
+
+  it.each([
+    [4.5, LockSettingType.language],
+    [NaN, 0],
+    [Infinity, 0],
+  ])(
+    'reads a lockSettings of %d as the int32 a bit test sees',
+    (value, bits) => {
+      expect(mergeSettings({ lockSettings: value }).lockSettings).toBe(bits);
+    }
+  );
 });

@@ -11,21 +11,29 @@ import {
 
 import {
   createTestAppContext,
+  createTestI18n,
   flush,
   mountAndFlush,
   Mounted,
+  provideI18n,
+  pseudoMessages,
 } from '@/__test-utils__/index';
 import { AppContext } from '@/components/appContext';
 import * as tabStyles from '@/components/erd/table-properties/table-properties-tabs/TablePropertiesTabs.styles';
 import TableProperties from '@/components/erd/table-properties/TableProperties';
 import * as styles from '@/components/erd/table-properties/TableProperties.styles';
 import { Open } from '@/constants/open';
+import { NameViewMode } from '@/constants/schema';
 import { changeOpenMapAction } from '@/engine/modules/editor/atom.actions';
+import { toNameViewModeAction } from '@/engine/modules/settings/atom.actions';
 import {
   addTableAction,
+  changeTableLogicalNameAction,
   changeTableNameAction,
 } from '@/engine/modules/table/atom.actions';
 import { addColumnAction } from '@/engine/modules/table-column/atom.actions';
+import { createI18n, I18n } from '@/i18n/translate';
+import { InternalEventType } from '@/utils/internalEvents';
 import { KeyBindingName } from '@/utils/keyboard-shortcut';
 
 const TABLE_A = 't1';
@@ -40,9 +48,17 @@ const dialogOf = (mounted: Mounted) =>
 const tableTabsOf = (mounted: Mounted) =>
   Array.from(
     mounted.container.querySelectorAll(
-      `.${String(styles.header)} > .${String(styles.tab)}`
+      `.${String(styles.header)} > .${String(styles.tables)} > .${String(styles.tableChip)}`
     )
   ) as HTMLElement[];
+
+const headerOf = (mounted: Mounted) =>
+  mounted.container.querySelector(`.${String(styles.header)}`) as HTMLElement;
+
+const closeButtonOf = (mounted: Mounted) =>
+  mounted.container.querySelector(
+    '.table-properties-close'
+  ) as HTMLButtonElement;
 
 const propertyTabsOf = (mounted: Mounted) =>
   Array.from(
@@ -61,17 +77,27 @@ function template(
   tableId = TABLE_A,
   tableIds = [TABLE_A, TABLE_B],
   onChange = vi.fn(),
-  isDarkMode = false
+  isDarkMode = false,
+  readonly = false
 ) {
   return html`
     <${TableProperties}
       isDarkMode=${isDarkMode}
+      readonly=${readonly}
       tableId=${tableId}
       tableIds=${tableIds}
       .onChange=${onChange}
     />
   `;
 }
+
+const readonlyTemplate = () =>
+  template(TABLE_A, [TABLE_A, TABLE_B], vi.fn(), false, true);
+
+const badgeOf = (mounted: Mounted) =>
+  mounted.container.querySelector(
+    `.${String(styles.readonlyBadge)}`
+  ) as HTMLElement | null;
 
 function seed(app: AppContext) {
   const { store } = app;
@@ -88,6 +114,11 @@ function seed(app: AppContext) {
 
 let app: AppContext;
 let mounted: Mounted | null = null;
+let focusEvents = 0;
+
+const countFocusEvent = () => {
+  focusEvents++;
+};
 
 // The Code Generator tab loads its generators on demand. Their first load here
 // transforms that module graph cold, which runs past a spec's wait; warm it once.
@@ -96,15 +127,128 @@ beforeAll(() => import('@/utils/generator-code'));
 beforeEach(() => {
   app = createTestAppContext();
   seed(app);
+  focusEvents = 0;
+  document.body.addEventListener(InternalEventType.focus, countFocusEvent);
 });
 
 afterEach(() => {
+  document.body.removeEventListener(InternalEventType.focus, countFocusEvent);
   mounted?.unmount();
   mounted = null;
   app.store.destroy();
 });
 
 describe('TableProperties', () => {
+  describe('frame', () => {
+    it('announces itself as a dialog named Table Properties', async () => {
+      mounted = await mountAndFlush(template(), app);
+      const dialog = dialogOf(mounted);
+
+      expect(dialog.getAttribute('role')).toBe('dialog');
+      expect(dialog.getAttribute('aria-label')).toBe('Table Properties');
+      expect(dialog.hasAttribute('aria-modal')).toBe(false);
+    });
+
+    it('heads the dialog with its title, the table chips and a close button, in that order', async () => {
+      mounted = await mountAndFlush(template(), app);
+      const header = headerOf(mounted);
+      const [title, tables, close] = Array.from(
+        header.children
+      ) as HTMLElement[];
+
+      expect(header.children).toHaveLength(3);
+      expect(title.textContent).toBe('Table Properties');
+      expect(title.classList.contains(String(styles.title))).toBe(true);
+      expect(tables.classList.contains(String(styles.tables))).toBe(true);
+      expect(tables.classList.contains('scrollbar')).toBe(true);
+      expect(close).toBe(closeButtonOf(mounted));
+    });
+
+    it('stands the header, the section tabs and the body one above the other', async () => {
+      mounted = await mountAndFlush(template(), app);
+
+      expect(
+        Array.from(dialogOf(mounted).children).map(child =>
+          child.classList.contains(String(styles.header))
+            ? 'header'
+            : child.classList.contains(String(tabStyles.tabs))
+              ? 'tabs'
+              : child.classList.contains(String(styles.scrollbarArea))
+                ? 'body'
+                : 'other'
+        )
+      ).toEqual(['header', 'tabs', 'body']);
+    });
+
+    it('names the close button and the chord that also closes the dialog', async () => {
+      mounted = await mountAndFlush(template(), app);
+      const close = closeButtonOf(mounted);
+
+      expect(close.tagName).toBe('BUTTON');
+      expect(close.getAttribute('type')).toBe('button');
+      expect(close.classList.contains(String(styles.close))).toBe(true);
+      expect(close.getAttribute('title')).toBe('Close (ESC)');
+      expect(close.querySelector('.icon svg')).toBeTruthy();
+    });
+
+    it('names the close button alone when no chord stops the editor', async () => {
+      app.keyBindingMap[KeyBindingName.stop] = [];
+      mounted = await mountAndFlush(template(), app);
+
+      expect(closeButtonOf(mounted).getAttribute('title')).toBe('Close');
+    });
+
+    it('puts no title on the frame that an e2e locator reads as a row', async () => {
+      mounted = await mountAndFlush(template(), app);
+      const titles = Array.from(
+        dialogOf(mounted).querySelectorAll('[title]')
+      ).map(el => el.getAttribute('title'));
+
+      expect(titles).not.toContain('Read Only');
+      expect(titles).not.toContain('Unique');
+      expect(titles.filter(title => title === 'Add Index')).toHaveLength(1);
+    });
+  });
+
+  describe('read only', () => {
+    it('shows no badge while the editor edits', async () => {
+      mounted = await mountAndFlush(template(), app);
+
+      expect(badgeOf(mounted)).toBeNull();
+      expect(
+        mounted.container.querySelector('[title="Add Index"]')
+      ).toBeTruthy();
+    });
+
+    it('says Read only right after the title, under a lock with no title', async () => {
+      mounted = await mountAndFlush(readonlyTemplate(), app);
+      const badge = badgeOf(mounted) as HTMLElement;
+      const [title, next] = Array.from(
+        headerOf(mounted).children
+      ) as HTMLElement[];
+
+      expect(title.textContent).toBe('Table Properties');
+      expect(next).toBe(badge);
+      expect(badge.textContent).toBe('Read only');
+      expect(badge.querySelector('.icon svg')).toBeTruthy();
+      expect(badge.querySelector('[title]')).toBeNull();
+      expect(badge.hasAttribute('title')).toBe(false);
+    });
+
+    it('hands the mode to the Indexes tab, which offers no edit', async () => {
+      mounted = await mountAndFlush(readonlyTemplate(), app);
+
+      expect(mounted.container.querySelector('[title="Add Index"]')).toBeNull();
+      expect(
+        Array.from(
+          mounted.container.querySelectorAll<HTMLInputElement>(
+            'input[type="checkbox"]'
+          )
+        ).every(input => input.disabled)
+      ).toBe(true);
+    });
+  });
+
   describe('table tabs', () => {
     it('renders one header tab per requested table id', async () => {
       mounted = await mountAndFlush(template(), app);
@@ -142,6 +286,44 @@ describe('TableProperties', () => {
       expect(onChange).toHaveBeenCalledExactlyOnceWith(TABLE_B);
     });
 
+    it('names each table as the name view does, following a switch', async () => {
+      app.store.dispatchSync(
+        changeTableLogicalNameAction({ id: TABLE_A, value: 'Users' }),
+        changeTableNameAction({ id: TABLE_B, value: 'orders' })
+      );
+      mounted = await mountAndFlush(template(), app);
+      const names = () =>
+        tableTabsOf(mounted!).map(tab => [
+          tab.textContent?.trim(),
+          tab.getAttribute('title'),
+        ]);
+      const switchTo = async (
+        mode: (typeof NameViewMode)[keyof typeof NameViewMode]
+      ) => {
+        app.store.dispatchSync(
+          toNameViewModeAction(app.store.state, mode, false)
+        );
+        await flush();
+      };
+
+      expect(names()).toEqual([
+        ['users', 'users'],
+        ['orders', 'orders'],
+      ]);
+
+      await switchTo(NameViewMode.logical);
+      expect(names()).toEqual([
+        ['Users', 'Users'],
+        ['orders', 'orders'],
+      ]);
+
+      await switchTo(NameViewMode.both);
+      expect(names()).toEqual([
+        ['Users (users)', 'Users (users)'],
+        ['orders', 'orders'],
+      ]);
+    });
+
     it('skips table ids that do not resolve to an entity', async () => {
       mounted = await mountAndFlush(
         template(TABLE_A, [TABLE_A, 'missing']),
@@ -160,6 +342,7 @@ describe('TableProperties', () => {
         propertyTabsOf(mounted).map(el => el.classList.contains('selected'))
       ).toEqual([true, false, false]);
       expect(scopeOf(mounted)).toBeTruthy();
+      expect(scopeOf(mounted)?.classList.contains('code')).toBe(false);
       expect(
         mounted.container.querySelector('input[type="checkbox"]')
       ).toBeTruthy();
@@ -178,6 +361,7 @@ describe('TableProperties', () => {
         null
       );
       expect(scopeOf(mounted)?.textContent).toContain('users');
+      expect(scopeOf(mounted)?.classList.contains('code')).toBe(true);
     });
 
     it('switches to the Code Generator tab', async () => {
@@ -196,6 +380,7 @@ describe('TableProperties', () => {
       await vi.waitFor(() =>
         expect(scopeOf(mounted!)?.textContent).toContain('type Users {')
       );
+      expect(scopeOf(mounted)?.classList.contains('code')).toBe(true);
     });
 
     it('returns to the Indexes tab', async () => {
@@ -213,6 +398,48 @@ describe('TableProperties', () => {
   });
 
   describe('closing', () => {
+    it('closes on the close button and hands the keyboard back to the editor', async () => {
+      mounted = await mountAndFlush(template(), app);
+
+      click(closeButtonOf(mounted));
+      expect(focusEvents).toBe(0);
+      await flush();
+
+      expect(app.store.state.editor.openMap[Open.tableProperties]).toBe(false);
+      expect(focusEvents).toBe(1);
+    });
+
+    it('keeps a Space on the close button from the editor, which would cancel the press', async () => {
+      mounted = await mountAndFlush(template(), app);
+      const reached: string[] = [];
+      mounted.container.addEventListener('keydown', event =>
+        reached.push(event.code)
+      );
+      const press = (code: string, key: string) =>
+        closeButtonOf(mounted as Mounted).dispatchEvent(
+          new KeyboardEvent('keydown', { code, key, bubbles: true })
+        );
+
+      press('Space', ' ');
+      press('Escape', 'Escape');
+      press('Enter', 'Enter');
+
+      expect(reached).toEqual(['Escape', 'Enter']);
+    });
+
+    it('hands the keyboard back on no other way out', async () => {
+      mounted = await mountAndFlush(template(), app);
+
+      app.shortcut$.next({
+        type: KeyBindingName.stop,
+        event: new KeyboardEvent('keydown', { key: 'Escape' }),
+      });
+      click(rootOf(mounted));
+      await flush();
+
+      expect(focusEvents).toBe(0);
+    });
+
     it('closes when the backdrop outside the dialog is clicked', async () => {
       mounted = await mountAndFlush(template(), app);
 
@@ -311,5 +538,69 @@ describe('TableProperties', () => {
       expect(outside).toHaveBeenCalledTimes(1);
       mounted.container.removeEventListener('click', outside);
     });
+  });
+});
+
+describe('TableProperties in the language the editor shows', () => {
+  let i18n: I18n;
+  let provider: ReturnType<typeof provideI18n> | null = null;
+
+  beforeEach(() => {
+    i18n = createTestI18n('de-DE', pseudoMessages('de'));
+    provider = provideI18n(document.body, i18n);
+  });
+
+  afterEach(() => {
+    provider?.destroy();
+    provider = null;
+  });
+
+  it('names the dialog, its badge, a blank table, the close button and the tabs in that language', async () => {
+    mounted = await mountAndFlush(readonlyTemplate(), app);
+
+    expect(dialogOf(mounted).getAttribute('aria-label')).toBe(
+      'de:Table Properties'
+    );
+    expect(headerOf(mounted).firstElementChild?.textContent).toBe(
+      'de:Table Properties'
+    );
+    expect(badgeOf(mounted)?.textContent).toBe('de:Read only');
+    expect(tableTabsOf(mounted).map(tab => tab.textContent?.trim())).toEqual([
+      'users',
+      'de:unnamed',
+    ]);
+    expect(closeButtonOf(mounted).getAttribute('title')).toBe('de:Close (ESC)');
+    expect(propertyTabsOf(mounted).map(tab => tab.textContent?.trim())).toEqual(
+      ['de:Indexes', 'de:Schema SQL', 'de:Code Generator']
+    );
+  });
+
+  it('reads them again once another language is put in, the tab picked staying', async () => {
+    mounted = await mountAndFlush(template(), app);
+    click(propertyTabsOf(mounted)[2]);
+    await flush();
+
+    Object.assign(i18n, createI18n('fr-FR', pseudoMessages('fr')));
+    await flush();
+
+    expect(dialogOf(mounted).getAttribute('aria-label')).toBe(
+      'fr:Table Properties'
+    );
+    const tabs = propertyTabsOf(mounted);
+    expect(tabs.map(tab => tab.textContent?.trim())).toEqual([
+      'fr:Indexes',
+      'fr:Schema SQL',
+      'fr:Code Generator',
+    ]);
+    expect(tabs[2].classList.contains('selected')).toBe(true);
+  });
+
+  it('lets each table chip take the direction of its own name', async () => {
+    mounted = await mountAndFlush(template(), app);
+
+    expect(tableTabsOf(mounted).map(tab => tab.getAttribute('dir'))).toEqual([
+      'auto',
+      'auto',
+    ]);
   });
 });

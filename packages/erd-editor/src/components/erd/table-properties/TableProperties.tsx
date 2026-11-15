@@ -1,5 +1,5 @@
 import { query } from '@dineug/erd-editor-schema';
-import { FC, observable, onMounted } from '@dineug/r-html';
+import { FC, nextTick, observable, onMounted } from '@dineug/r-html';
 
 import { useAppContext } from '@/components/appContext';
 import TablePropertiesIndexes from '@/components/erd/table-properties/table-properties-indexes/TablePropertiesIndexes';
@@ -7,17 +7,26 @@ import TablePropertiesTabs, {
   Tab,
 } from '@/components/erd/table-properties/table-properties-tabs/TablePropertiesTabs';
 import GeneratorCode from '@/components/generator-code/GeneratorCode';
+import { useI18n } from '@/components/localeContext';
+import Icon from '@/components/primitives/icon/Icon';
 import SchemaSQL from '@/components/schema-sql/SchemaSQL';
 import { Open } from '@/constants/open';
 import { changeOpenMapAction } from '@/engine/modules/editor/atom.actions';
+import {
+  nameLabelText,
+  toNameLabel,
+} from '@/engine/modules/editor/utils/nameView';
 import { useUnmounted } from '@/hooks/useUnmounted';
 import { onStop } from '@/utils/domEvent';
-import { KeyBindingName } from '@/utils/keyboard-shortcut';
+import { focusEvent } from '@/utils/internalEvents';
+import { KeyBindingName, toShortcutTitle } from '@/utils/keyboard-shortcut';
 
 import * as styles from './TableProperties.styles';
 
 export type TablePropertiesProps = {
   isDarkMode: boolean;
+  /** The editor's readonly mode, which the dialog shows and its controls follow; the store refuses the edits anyway. */
+  readonly?: boolean;
   tableId: string;
   tableIds: string[];
   onChange: (tableId: string) => void;
@@ -25,6 +34,7 @@ export type TablePropertiesProps = {
 
 const TableProperties: FC<TablePropertiesProps> = (props, ctx) => {
   const app = useAppContext(ctx);
+  const i18n = useI18n(ctx);
   const { addUnsubscribe } = useUnmounted();
 
   const state = observable({
@@ -34,6 +44,29 @@ const TableProperties: FC<TablePropertiesProps> = (props, ctx) => {
   const handleClose = () => {
     const { store } = app.value;
     store.dispatch(changeOpenMapAction({ [Open.tableProperties]: false }));
+  };
+
+  /**
+   * The close button held the keyboard, and it leaves with the dialog: the
+   * editor takes the focus back, or the keyboard falls to the page and every
+   * shortcut stops.
+   */
+  const handleCloseButton = () => {
+    handleClose();
+    nextTick(() => {
+      ctx.host.dispatchEvent(focusEvent());
+    });
+  };
+
+  /**
+   * Space is the hand tool's key wherever no caret is, and the editor cancels
+   * its keydown, which takes the click from a native button. Kept here, Space
+   * presses the button as Enter does; Escape still bubbles up to close.
+   */
+  const handleCloseKeydown = (event: KeyboardEvent) => {
+    if (event.code === 'Space') {
+      event.stopPropagation();
+    }
   };
 
   const handleOutsideClick = (event: MouseEvent) => {
@@ -59,9 +92,10 @@ const TableProperties: FC<TablePropertiesProps> = (props, ctx) => {
   });
 
   return () => {
-    const { store } = app.value;
-    const { collections } = store.state;
+    const { store, keyBindingMap } = app.value;
+    const { collections, settings } = store.state;
     const { tableIds } = props;
+    const { t } = i18n.value;
 
     const tables = query(collections)
       .collection('tableEntities')
@@ -76,33 +110,69 @@ const TableProperties: FC<TablePropertiesProps> = (props, ctx) => {
         on:wheel={onStop}
         on:click={handleOutsideClick}
       >
-        <div class={['table-properties', styles.container]}>
-          <div class={['scrollbar', styles.header]}>
-            {tables.map(table => (
-              <div
-                class={[styles.tab, { selected: table.id === props.tableId }]}
-                title={table.name}
-                on:click={() => props.onChange(table.id)}
-              >
-                <span>{table.name.trim() ? table.name : 'unnamed'}</span>
-              </div>
-            ))}
+        <div
+          class={['table-properties', styles.container]}
+          role="dialog"
+          aria-label={t('common.tableProperties')}
+        >
+          <div class={styles.header}>
+            <span class={styles.title}>{t('common.tableProperties')}</span>
+            {props.readonly ? (
+              <span class={styles.readonlyBadge}>
+                <Icon name="lock" size={12} />
+                <span>{t('tableProperties.readOnly')}</span>
+              </span>
+            ) : null}
+            <div class={['scrollbar', styles.tables]}>
+              {tables.map(table => {
+                const name = nameLabelText(toNameLabel(settings, table));
+                return (
+                  <div
+                    class={[
+                      styles.tableChip,
+                      { selected: table.id === props.tableId },
+                    ]}
+                    title={name}
+                    prop:dir="auto"
+                    on:click={() => props.onChange(table.id)}
+                  >
+                    <span>{name.trim() ? name : t('common.unnamed')}</span>
+                  </div>
+                );
+              })}
+            </div>
+            <button
+              class={['table-properties-close', styles.close]}
+              type="button"
+              title={toShortcutTitle(
+                keyBindingMap,
+                t('common.close'),
+                KeyBindingName.stop
+              )}
+              on:click={handleCloseButton}
+              on:keydown={handleCloseKeydown}
+            >
+              <Icon name="x" size={14} />
+            </button>
           </div>
           <TablePropertiesTabs value={state.tab} onChange={handleChangeTab} />
           <div class={['scrollbar', styles.scrollbarArea]}>
             {state.tab === Tab.Indexes ? (
               <div class={styles.scope}>
-                <TablePropertiesIndexes tableId={props.tableId} />
+                <TablePropertiesIndexes
+                  tableId={props.tableId}
+                  readonly={props.readonly}
+                />
               </div>
             ) : state.tab === Tab.SchemaSQL ? (
-              <div class={styles.scope}>
+              <div class={['code', styles.scope]}>
                 <SchemaSQL
                   isDarkMode={props.isDarkMode}
                   tableId={props.tableId}
                 />
               </div>
             ) : state.tab === Tab.GeneratorCode ? (
-              <div class={styles.scope}>
+              <div class={['code', styles.scope]}>
                 <GeneratorCode
                   isDarkMode={props.isDarkMode}
                   tableId={props.tableId}

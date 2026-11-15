@@ -1,19 +1,27 @@
 import { schemaV3Parser } from '@dineug/erd-editor-schema';
 import { describe, expect, it } from 'vite-plus/test';
 
-import { BracketType, ColumnOption, OrderType } from '@/constants/schema';
+import {
+  BracketType,
+  ColumnOption,
+  Database,
+  OrderType,
+} from '@/constants/schema';
 import { RootState } from '@/engine/state';
 import { createIndex } from '@/utils/collection/index.entity';
 import { createIndexColumn } from '@/utils/collection/indexColumn.entity';
 import { createRelationship } from '@/utils/collection/relationship.entity';
 import { createTable } from '@/utils/collection/table.entity';
 import { createColumn } from '@/utils/collection/tableColumn.entity';
+import { createSchemaSQL } from '@/utils/schema-sql';
 import {
   createSchema,
+  formatDropBlock,
+  formatHeader,
   formatIndex,
   formatTable,
 } from '@/utils/schema-sql/MSSQL';
-import { Name } from '@/utils/schema-sql/utils';
+import { createWrittenObjects, Name } from '@/utils/schema-sql/utils';
 
 function createState(): RootState {
   return {
@@ -142,6 +150,39 @@ function createFixture() {
   };
 }
 
+/**
+ * Adds an hr users table that posts also references, and an unnamed index on it
+ * that the document does not list yet. The table borrows the fixture's columns,
+ * which the DDL reads by id alone.
+ */
+function addHrUsers(
+  { state, posts, userId, postUserId }: ReturnType<typeof createFixture>,
+  {
+    name,
+    columnIds,
+    indexColumnId,
+  }: { name: string; columnIds: string[]; indexColumnId: string }
+) {
+  const hrUsers = createTable({ id: 't-hr-users', name, columnIds });
+  const hrRelationship = createRelationship({
+    id: 'r-hr',
+    start: { tableId: hrUsers.id, columnIds: [userId.id] },
+    end: { tableId: posts.id, columnIds: [postUserId.id] },
+  });
+  const hrIndex = createIndex({
+    id: 'i-hr',
+    name: '',
+    tableId: hrUsers.id,
+    indexColumnIds: [indexColumnId],
+  });
+  state.collections.tableEntities[hrUsers.id] = hrUsers;
+  state.collections.relationshipEntities[hrRelationship.id] = hrRelationship;
+  state.collections.indexEntities[hrIndex.id] = hrIndex;
+  state.doc.tableIds.push(hrUsers.id);
+  state.doc.relationshipIds.push(hrRelationship.id);
+  return hrIndex;
+}
+
 describe('MSSQL createSchema', () => {
   it('emits tables sorted by name, unique constraints, comments, FKs and indexes', () => {
     const { state } = createFixture();
@@ -171,15 +212,15 @@ describe('MSSQL createSchema', () => {
         'GO',
         '',
         "EXECUTE sys.sp_addextendedproperty 'MS_Description',",
-        "  'user table', 'user', dbo, 'table', 'users'",
+        "  N'user table', 'schema', 'dbo', 'table', 'users'",
         'GO',
         '',
         "EXECUTE sys.sp_addextendedproperty 'MS_Description',",
-        "  'user id', 'user', dbo, 'table', 'users', 'column', 'id'",
+        "  N'user id', 'schema', 'dbo', 'table', 'users', 'column', 'id'",
         'GO',
         '',
         "EXECUTE sys.sp_addextendedproperty 'MS_Description',",
-        "  'email address', 'user', dbo, 'table', 'users', 'column', 'email'",
+        "  N'email address', 'schema', 'dbo', 'table', 'users', 'column', 'email'",
         'GO',
         '',
         'ALTER TABLE posts',
@@ -236,7 +277,6 @@ describe('MSSQL createSchema', () => {
       end: { tableId: posts.id, columnIds: [postUserId.id] },
     });
     state.collections.relationshipEntities[second.id] = second;
-    state.doc.tableIds = [];
     state.doc.indexIds = [];
     state.doc.relationshipIds = ['r-1', 'r-2'];
 
@@ -246,19 +286,17 @@ describe('MSSQL createSchema', () => {
     expect(sql).toContain('  ADD CONSTRAINT FK_users_TO_posts1\n');
   });
 
-  it('skips relationships whose tables are missing', () => {
+  it('skips relationships whose tables are missing, blank line and all', () => {
     const { state } = createFixture();
     state.doc.tableIds = [];
     state.doc.indexIds = [];
     Reflect.deleteProperty(state.collections.tableEntities, 't-users');
 
-    expect(createSchema(state)).toBe('\n');
+    expect(createSchema(state)).toBe('');
   });
 
-  it('drops relationship columns that no longer exist', () => {
+  it('skips a relationship none of whose columns exist, blank line and all', () => {
     const { state } = createFixture();
-    state.doc.tableIds = [];
-    state.doc.indexIds = [];
     state.collections.relationshipEntities['r-1'].start.columnIds = [
       'missing-start',
     ];
@@ -266,17 +304,11 @@ describe('MSSQL createSchema', () => {
       'missing-end',
     ];
 
-    expect(createSchema(state)).toBe(
-      [
-        '',
-        'ALTER TABLE posts',
-        '  ADD CONSTRAINT FK_users_TO_posts',
-        '    FOREIGN KEY ()',
-        '    REFERENCES users ()',
-        'GO',
-        '',
-      ].join('\n')
-    );
+    const sql = createSchema(state);
+    state.doc.relationshipIds = [];
+
+    expect(sql).not.toContain('FOREIGN KEY');
+    expect(sql).toBe(createSchema(state));
   });
 
   it('qualifies a unique constraint with its table so two tables can share a column name', () => {
@@ -294,6 +326,350 @@ describe('MSSQL createSchema', () => {
 
     expect(sql).toContain('  ADD CONSTRAINT UQ_users_email UNIQUE (email)');
     expect(sql).toContain('  ADD CONSTRAINT UQ_posts_email UNIQUE (email)');
+  });
+
+  it('doubles the quotes of a description and of the names it points at', () => {
+    const { state, users, userId } = createFixture();
+    users.name = "o'users";
+    users.comment = "user's table";
+    userId.name = "user's id";
+    userId.comment = "it's the id";
+    state.doc.relationshipIds = [];
+    state.doc.indexIds = [];
+
+    const sql = createSchema(state);
+
+    expect(sql).toContain(
+      "  N'user''s table', 'schema', 'dbo', 'table', 'o''users'\nGO"
+    );
+    expect(sql).toContain(
+      "  N'it''s the id', 'schema', 'dbo', 'table', 'o''users', 'column', 'user''s id'\nGO"
+    );
+  });
+
+  // SQL Server refuses a property on a table named sales.users in schema dbo
+  // when its unquoted CREATE TABLE put a table users in schema sales.
+  it('names the schema of an unquoted dotted table name at level 0 and the table at level 1', () => {
+    const { state, users } = createFixture();
+    users.name = 'sales.users';
+    state.doc.tableIds = [users.id];
+    state.doc.relationshipIds = [];
+    state.doc.indexIds = [];
+
+    const sql = createSchema(state);
+
+    expect(sql).toContain('CREATE TABLE sales.users\n');
+    expect(sql).toContain(
+      "EXECUTE sys.sp_addextendedproperty 'MS_Description',\n" +
+        "  N'user table', 'schema', 'sales', 'table', 'users'\nGO"
+    );
+    expect(sql).toContain(
+      "EXECUTE sys.sp_addextendedproperty 'MS_Description',\n" +
+        "  N'user id', 'schema', 'sales', 'table', 'users', 'column', 'id'\nGO"
+    );
+  });
+
+  // The levels name no database, and a call acts on the database its procedure
+  // belongs to: shop's own finds shop.sales.users from any connected database.
+  it('runs the procedure of the database a three-part unquoted name gives', () => {
+    const { state, users } = createFixture();
+    users.name = 'shop.sales.users';
+    state.doc.tableIds = [users.id];
+    state.doc.relationshipIds = [];
+    state.doc.indexIds = [];
+
+    const sql = createSchema(state);
+
+    expect(sql).toContain('CREATE TABLE shop.sales.users\n');
+    expect(sql).toContain(
+      "EXECUTE shop.sys.sp_addextendedproperty 'MS_Description',\n" +
+        "  N'user table', 'schema', 'sales', 'table', 'users'\nGO"
+    );
+    expect(sql).toContain(
+      "EXECUTE shop.sys.sp_addextendedproperty 'MS_Description',\n" +
+        "  N'user id', 'schema', 'sales', 'table', 'users', 'column', 'id'\nGO"
+    );
+    expect(sql).not.toContain('EXECUTE sys.');
+  });
+
+  // The database part goes before the procedure as typed, where a space or a
+  // dot inside its brackets stays legal, and a server part before it is
+  // dropped, since CREATE TABLE refuses a four-part name.
+  it.each([
+    ['[my shop].[sales].[users]', '[my shop]', 'sales'],
+    ['"shop"."sales"."users"', '"shop"', 'sales'],
+    ['[my.db].sales.users', '[my.db]', 'sales'],
+    ['shop..users', 'shop', 'dbo'],
+    ['srv.shop.sales.users', 'shop', 'sales'],
+  ])(
+    'runs the procedure of the database the unquoted name %s gives',
+    (name, database, schema) => {
+      const { state, users } = createFixture();
+      users.name = name;
+      state.doc.tableIds = [users.id];
+      state.doc.relationshipIds = [];
+      state.doc.indexIds = [];
+
+      const sql = createSchema(state);
+
+      expect(sql).toContain(
+        `EXECUTE ${database}.sys.sp_addextendedproperty 'MS_Description',\n` +
+          `  N'user table', 'schema', '${schema}', 'table', 'users'\nGO`
+      );
+      expect(sql).toContain(
+        `EXECUTE ${database}.sys.sp_addextendedproperty 'MS_Description',\n` +
+          `  N'user id', 'schema', '${schema}', 'table', 'users', 'column', 'id'\nGO`
+      );
+    }
+  );
+
+  // Such a database part fails its CREATE TABLE too, and before the procedure
+  // it would open a quote or a bracket that swallows every later batch.
+  it.each([
+    ["o'shop.o'sales.users", "o''sales"],
+    ['[shop.sales.users', 'sales'],
+    ['my shop.sales.users', 'sales'],
+  ])(
+    'drops the database part of %s, which SQL Server reads as no one name',
+    (name, schema) => {
+      const { state, users } = createFixture();
+      users.name = name;
+      state.doc.tableIds = [users.id];
+      state.doc.relationshipIds = [];
+      state.doc.indexIds = [];
+
+      const sql = createSchema(state);
+
+      expect(sql).toContain(
+        "EXECUTE sys.sp_addextendedproperty 'MS_Description',\n" +
+          `  N'user table', 'schema', '${schema}', 'table', 'users'\nGO`
+      );
+      expect(sql).not.toContain('.sys.sp_addextendedproperty');
+    }
+  );
+
+  // SQL Server reads [sales].[users] and "sales"."users" as a table users in
+  // schema sales, a dot inside the pair as part of the name and a doubled
+  // closing character as one, so the literals naming it hold no delimiters.
+  it.each([
+    ['[sales].[users]', 'sales', 'users'],
+    ['"sales"."users"', 'sales', 'users'],
+    ['[sales].users', 'sales', 'users'],
+    ['[Order]', 'dbo', 'Order'],
+    ['[].users', 'dbo', 'users'],
+    ['[sales.v2].users', 'sales.v2', 'users'],
+    ['"sales.v2".users', 'sales.v2', 'users'],
+    ['[x.y.z]', 'dbo', 'x.y.z'],
+    ['[x]]y]', 'dbo', 'x]y'],
+    ['"x""y"', 'dbo', 'x"y'],
+  ])(
+    'takes one pair of brackets or quotes off each part of the unquoted name %s',
+    (name, schema, table) => {
+      const { state, users } = createFixture();
+      users.name = name;
+      state.doc.tableIds = [users.id];
+      state.doc.relationshipIds = [];
+      state.doc.indexIds = [];
+
+      const sql = createSchema(state);
+
+      expect(sql).toContain(
+        "EXECUTE sys.sp_addextendedproperty 'MS_Description',\n" +
+          `  N'user table', 'schema', '${schema}', 'table', '${table}'\nGO`
+      );
+      expect(sql).toContain(
+        "EXECUTE sys.sp_addextendedproperty 'MS_Description',\n" +
+          `  N'user id', 'schema', '${schema}', 'table', '${table}', 'column', 'id'\nGO`
+      );
+    }
+  );
+
+  it('keeps a quoted dotted table name whole, in the dbo schema its CREATE TABLE puts it in', () => {
+    const { state, users } = createFixture();
+    state.settings.bracketType = BracketType.doubleQuote;
+    users.name = 'sales.users';
+    state.doc.tableIds = [users.id];
+    state.doc.relationshipIds = [];
+    state.doc.indexIds = [];
+
+    const sql = createSchema(state);
+
+    expect(sql).toContain('CREATE TABLE "sales.users"\n');
+    expect(sql).toContain(
+      "  N'user table', 'schema', 'dbo', 'table', 'sales.users'\nGO"
+    );
+    expect(sql).toContain(
+      "  N'user id', 'schema', 'dbo', 'table', 'sales.users', 'column', 'id'\nGO"
+    );
+  });
+
+  // CREATE TABLE "[Order]" and "shop.sales.users" each make one dbo table of
+  // that whole name, brackets and dots included.
+  it.each(['[Order]', 'shop.sales.users'])(
+    'keeps the quoted table name %s whole, brackets and database part included',
+    name => {
+      const { state, users } = createFixture();
+      state.settings.bracketType = BracketType.doubleQuote;
+      users.name = name;
+      state.doc.tableIds = [users.id];
+      state.doc.relationshipIds = [];
+      state.doc.indexIds = [];
+
+      expect(createSchema(state)).toContain(
+        "EXECUTE sys.sp_addextendedproperty 'MS_Description',\n" +
+          `  N'user table', 'schema', 'dbo', 'table', '${name}'\nGO`
+      );
+    }
+  );
+
+  it('doubles the quotes of a schema it splits from the table name', () => {
+    const { state, users } = createFixture();
+    users.name = "o'sales.o'users";
+    state.doc.tableIds = [users.id];
+    state.doc.relationshipIds = [];
+    state.doc.indexIds = [];
+
+    expect(createSchema(state)).toContain(
+      "  N'user table', 'schema', 'o''sales', 'table', 'o''users'\nGO"
+    );
+  });
+});
+
+describe('MSSQL dotted table names', () => {
+  it('names constraints and indexes after the table part of an unquoted schema.table', () => {
+    const { state, users, posts, userId, userEmail } = createFixture();
+    users.name = 'sales.users';
+    posts.name = 'sales.posts';
+    users.comment = '';
+    userId.comment = '';
+    userEmail.comment = '';
+
+    expect(createSchema(state)).toBe(
+      [
+        '',
+        'CREATE TABLE sales.posts',
+        '(',
+        '  id      INT,',
+        '  user_id INT NOT NULL,',
+        '  CONSTRAINT PK_posts PRIMARY KEY (id)',
+        ')',
+        'GO',
+        '',
+        'CREATE TABLE sales.users',
+        '(',
+        '  id    INT          NOT NULL IDENTITY(1,1),',
+        "  email VARCHAR(255) NOT NULL DEFAULT 'a@b.c',",
+        "  name  VARCHAR(50)  DEFAULT 'guest',",
+        '  CONSTRAINT PK_users PRIMARY KEY (id)',
+        ')',
+        'GO',
+        '',
+        'ALTER TABLE sales.users',
+        '  ADD CONSTRAINT UQ_users_email UNIQUE (email)',
+        'GO',
+        '',
+        'ALTER TABLE sales.posts',
+        '  ADD CONSTRAINT FK_users_TO_posts',
+        '    FOREIGN KEY (user_id)',
+        '    REFERENCES sales.users (id)',
+        'GO',
+        '',
+        'CREATE INDEX IDX_posts',
+        '  ON sales.posts (user_id ASC)',
+        'GO',
+        '',
+        'CREATE UNIQUE INDEX IDX_EMAIL',
+        '  ON sales.users (email DESC)',
+        'GO',
+        '',
+      ].join('\n')
+    );
+  });
+
+  it('repeats the primary key and unique names in each schema and numbers the foreign key and index names', () => {
+    const fixture = createFixture();
+    const { state, users, posts, userId, userEmail, usersIndex } = fixture;
+    users.name = 'sales.users';
+    posts.name = 'hr.posts';
+    const hrIndex = addHrUsers(fixture, {
+      name: 'hr.users',
+      columnIds: [userId.id, userEmail.id],
+      indexColumnId: 'ic-2',
+    });
+    usersIndex.name = '';
+    state.doc.indexIds = [usersIndex.id, hrIndex.id];
+
+    const sql = createSchema(state);
+
+    expect(sql.match(/CONSTRAINT PK_users PRIMARY KEY/g)).toHaveLength(2);
+    expect(sql.match(/ADD CONSTRAINT UQ_users_email UNIQUE/g)).toHaveLength(2);
+    expect(sql).toContain('  ADD CONSTRAINT FK_users_TO_posts\n');
+    expect(sql).toContain('  ADD CONSTRAINT FK_users_TO_posts1\n');
+    expect(sql).toContain('CREATE UNIQUE INDEX IDX_users\n  ON sales.users');
+    expect(sql).toContain('CREATE INDEX IDX_users1\n  ON hr.users');
+  });
+
+  it('numbers a foreign key and an index name that repeat an earlier one but for case', () => {
+    const fixture = createFixture();
+    const { state, users, posts, userId, userEmail, usersIndex } = fixture;
+    users.name = 'sales.users';
+    posts.name = 'sales.posts';
+    const hrIndex = addHrUsers(fixture, {
+      name: 'hr.Users',
+      columnIds: [userId.id, userEmail.id],
+      indexColumnId: 'ic-2',
+    });
+    usersIndex.name = '';
+    state.doc.indexIds = [usersIndex.id, hrIndex.id];
+
+    const sql = createSchema(state);
+
+    expect(sql).toContain('  ADD CONSTRAINT FK_users_TO_posts\n');
+    expect(sql).toContain('  ADD CONSTRAINT FK_Users_TO_posts1\n');
+    expect(sql).toContain('CREATE UNIQUE INDEX IDX_users\n  ON sales.users');
+    expect(sql).toContain('CREATE INDEX IDX_Users1\n  ON hr.Users');
+  });
+
+  // The key names take the table part the MS_Description calls name at level
+  // 1, split outside brackets and quotes with one pair taken off.
+  it.each([
+    ['[sales].[users]', 'users'],
+    ['"sales"."users"', 'users'],
+    ['shop.sales.users', 'users'],
+    ['[sales.v2].[users]', 'users'],
+    ['[Order]', 'Order'],
+  ])(
+    'names constraints and indexes after the table part of the unquoted name %s',
+    (name, part) => {
+      const { state, users, usersIndex } = createFixture();
+      users.name = name;
+      usersIndex.name = '';
+
+      const sql = createSchema(state);
+
+      expect(sql).toContain(`  CONSTRAINT PK_${part} PRIMARY KEY (id)\n`);
+      expect(sql).toContain(
+        `  ADD CONSTRAINT UQ_${part}_email UNIQUE (email)\nGO`
+      );
+      expect(sql).toContain(`  ADD CONSTRAINT FK_${part}_TO_posts\n`);
+      expect(sql).toContain(
+        `CREATE UNIQUE INDEX IDX_${part}\n  ON ${name} (email DESC)\nGO`
+      );
+    }
+  );
+
+  it('keeps a quoted dotted name whole in every automatic name', () => {
+    const { state, users, posts } = createFixture();
+    users.name = 'sales.users';
+    posts.name = 'sales.posts';
+    state.settings.bracketType = BracketType.doubleQuote;
+
+    const sql = createSchema(state);
+
+    expect(sql).toContain('  CONSTRAINT "PK_sales.users" PRIMARY KEY ("id")');
+    expect(sql).toContain('  ADD CONSTRAINT "UQ_sales.users_email" UNIQUE');
+    expect(sql).toContain('  ADD CONSTRAINT "FK_sales.users_TO_sales.posts"');
+    expect(sql).toContain('CREATE INDEX "IDX_sales.posts"\n  ON "sales.posts"');
   });
 });
 
@@ -467,5 +843,257 @@ describe('MSSQL formatIndex', () => {
     formatIndex(state, { index: postsIndex, buffer, indexNames: [] });
 
     expect(buffer[1]).toBe('  ON posts (user_id )\nGO');
+  });
+});
+
+describe('MSSQL drop block', () => {
+  function written(fixture: ReturnType<typeof createFixture>) {
+    const objects = createWrittenObjects();
+    createSchema(fixture.state, undefined, {
+      statements: 'recreate',
+      written: objects,
+    });
+    return objects;
+  }
+
+  /** The fixture's users table alone, under this name, its relationship gone. */
+  function usersAlone(name: string) {
+    const fixture = createFixture();
+    fixture.users.name = name;
+    fixture.state.doc.tableIds = [fixture.users.id];
+    fixture.state.doc.relationshipIds = [];
+    return fixture;
+  }
+
+  /**
+   * The SELECT that collects the keys a table holds from the connected database
+   * catalog, its name as it reads inside a string literal.
+   */
+  function select(table: string) {
+    return [
+      `  SELECT @sql += N'ALTER TABLE ${table} DROP CONSTRAINT ' + QUOTENAME(name) + N';'`,
+      '    FROM sys.foreign_keys',
+      `    WHERE parent_object_id = OBJECT_ID(N'${table}', N'U')`,
+    ];
+  }
+
+  /** The block for these SELECTs and this DROP TABLE list. */
+  function dropBlock(selects: string[][], dropTable: string) {
+    return [
+      'BEGIN TRY',
+      '  BEGIN TRANSACTION',
+      '',
+      "  DECLARE @sql NVARCHAR(MAX) = N''",
+      ...selects.flat(),
+      '  EXECUTE sp_executesql @sql',
+      '',
+      `  DROP TABLE IF EXISTS ${dropTable}`,
+      '',
+      '  COMMIT TRANSACTION',
+      'END TRY',
+      'BEGIN CATCH',
+      '  IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION;',
+      '  THROW;',
+      'END CATCH',
+      'GO',
+    ].join('\n');
+  }
+
+  it('drops every foreign key the catalog finds each table holding, then the tables, naming no key', () => {
+    const fixture = createFixture();
+
+    const block = formatDropBlock(fixture.state, written(fixture));
+
+    expect(block).toBe(
+      dropBlock([select('posts'), select('users')], 'posts, users')
+    );
+    expect(block).not.toContain('FK_users_TO_posts');
+  });
+
+  it('writes the same catalog queries for tables that hold no foreign key', () => {
+    const fixture = createFixture();
+    fixture.state.doc.relationshipIds = [];
+
+    expect(formatDropBlock(fixture.state, written(fixture))).toBe(
+      dropBlock([select('posts'), select('users')], 'posts, users')
+    );
+  });
+
+  it('asks the catalog for each table written, its schema part as written', () => {
+    const fixture = createFixture();
+    addHrUsers(fixture, {
+      name: 'hr.users',
+      columnIds: [fixture.userId.id],
+      indexColumnId: 'ic-1',
+    });
+
+    expect(formatDropBlock(fixture.state, written(fixture))).toBe(
+      dropBlock(
+        [select('hr.users'), select('posts'), select('users')],
+        'hr.users, posts, users'
+      )
+    );
+  });
+
+  it('quotes the names as the tables are and doubles a quote in each literal', () => {
+    const fixture = createFixture();
+    fixture.posts.name = "o'posts";
+    fixture.state.settings.bracketType = BracketType.doubleQuote;
+
+    expect(formatDropBlock(fixture.state, written(fixture))).toBe(
+      dropBlock([select(`"o''posts"`), select('"users"')], `"o'posts", "users"`)
+    );
+  });
+
+  // OBJECT_ID finds a table of another database by its three-part name, and
+  // the id belongs to that database's catalog, which fails past the CATCH,
+  // leaving the transaction open, where no such database exists.
+  it.each([
+    ['shop.sales.users', 'shop'],
+    ['[my shop].[sales].[users]', '[my shop]'],
+  ])(
+    'reads the keys of %s from the catalog of the database it names, once OBJECT_ID finds it',
+    (name, database) => {
+      const fixture = usersAlone(name);
+
+      expect(formatDropBlock(fixture.state, written(fixture))).toBe(
+        dropBlock(
+          [
+            [
+              `  IF OBJECT_ID(N'${name}', N'U') IS NOT NULL`,
+              `    SELECT @sql += N'ALTER TABLE ${name} DROP CONSTRAINT ' + QUOTENAME(name) + N';'`,
+              `      FROM ${database}.sys.foreign_keys`,
+              `      WHERE parent_object_id = OBJECT_ID(N'${name}', N'U')`,
+            ],
+          ],
+          name
+        )
+      );
+    }
+  );
+
+  // Such a database part fails its CREATE TABLE too, and before the catalog it
+  // would open a quote or a bracket; inside the literals it is only text.
+  it.each([
+    ['my shop.sales.users', 'my shop.sales.users'],
+    ["o'shop.sales.users", "o''shop.sales.users"],
+  ])(
+    'reads the connected database catalog for %s, whose database part is no one name',
+    (name, literal) => {
+      const fixture = usersAlone(name);
+
+      expect(formatDropBlock(fixture.state, written(fixture))).toBe(
+        dropBlock([select(literal)], name)
+      );
+    }
+  );
+
+  it('keeps a quoted dotted name whole, reading the connected database catalog', () => {
+    const fixture = usersAlone('shop.sales.users');
+    fixture.state.settings.bracketType = BracketType.doubleQuote;
+
+    expect(formatDropBlock(fixture.state, written(fixture))).toBe(
+      dropBlock([select('"shop.sales.users"')], '"shop.sales.users"')
+    );
+  });
+
+  it('writes nothing without tables', () => {
+    expect(formatDropBlock(createState(), createWrittenObjects())).toBe('');
+  });
+});
+
+describe('MSSQL header', () => {
+  it('writes USE for use and CREATE DATABASE where DB_ID finds none first for createAndUse', () => {
+    const state = createState();
+
+    expect(formatHeader(state, 'use', 'shop')).toBe('USE shop\nGO');
+    state.settings.bracketType = BracketType.doubleQuote;
+    expect(formatHeader(state, 'createAndUse', 'shop')).toBe(
+      [
+        "IF DB_ID(N'shop') IS NULL",
+        '  CREATE DATABASE "shop"',
+        'GO',
+        '',
+        'USE "shop"',
+        'GO',
+      ].join('\n')
+    );
+  });
+
+  it('ends a script with GO unless its last line is GO already', () => {
+    const { state } = createFixture();
+    state.settings.databaseName = 'shop';
+    state.settings.ddlScripts = {
+      before: 'CREATE SCHEMA app\r\n',
+      after: 'EXEC a\ngo 2\n',
+    };
+
+    const sql = createSchemaSQL(state, Database.MSSQL, undefined, {
+      header: 'use',
+    });
+
+    expect(sql).toMatch(
+      /^\nUSE shop\nGO\n\nCREATE SCHEMA app\nGO\n\nCREATE TABLE posts\n/
+    );
+    expect(sql).toMatch(/\nGO\n\nEXEC a\ngo 2\n$/);
+  });
+});
+
+describe('MSSQL logical names as comments', () => {
+  it('takes the option in createSchema and writes MS_Description for a logical name where the comment is empty', () => {
+    const { state, users, posts, userId, postUserId } = createFixture();
+    users.logicalName = 'User';
+    posts.logicalName = 'Post';
+    userId.logicalName = 'User ID';
+    postUserId.logicalName = "Post's writer";
+
+    const written = createSchema(state, undefined, {
+      logicalNameAsComment: true,
+    });
+
+    expect(written).toContain(
+      [
+        "EXECUTE sys.sp_addextendedproperty 'MS_Description',",
+        "  N'Post', 'schema', 'dbo', 'table', 'posts'",
+        'GO',
+        '',
+        "EXECUTE sys.sp_addextendedproperty 'MS_Description',",
+        "  N'Post''s writer', 'schema', 'dbo', 'table', 'posts', 'column', 'user_id'",
+        'GO',
+      ].join('\n')
+    );
+    expect(written).toContain(
+      "  N'user table', 'schema', 'dbo', 'table', 'users'\n"
+    );
+    expect(written).toContain(
+      "  N'user id', 'schema', 'dbo', 'table', 'users', 'column', 'id'\n"
+    );
+    expect(written).not.toContain('User');
+    expect(createSchema(state)).not.toContain('Post');
+  });
+
+  // Under its default collation, SQL_Latin1_General_CP1_CI_AS, SQL Server 2022
+  // stored the Korean text of a plain literal as question marks.
+  it('writes each MS_Description as a national literal, so text outside the code page is kept', () => {
+    const { state, users, userId, userEmail } = createFixture();
+    users.comment = '';
+    users.logicalName = '회원';
+    userId.comment = '';
+    userId.logicalName = '회원 ID';
+    userEmail.comment = '로그인 주소';
+
+    const written = createSchema(state, undefined, {
+      logicalNameAsComment: true,
+    });
+
+    expect(written).toContain(
+      "  N'회원', 'schema', 'dbo', 'table', 'users'\nGO"
+    );
+    expect(written).toContain(
+      "  N'회원 ID', 'schema', 'dbo', 'table', 'users', 'column', 'id'\nGO"
+    );
+    expect(written).toContain(
+      "  N'로그인 주소', 'schema', 'dbo', 'table', 'users', 'column', 'email'\nGO"
+    );
   });
 });

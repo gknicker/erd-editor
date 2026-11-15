@@ -1,23 +1,61 @@
+import type { AnyAction } from '@dineug/r-html';
+
+import { Open } from '@/constants/open';
+import { LockSettingType } from '@/constants/schema';
+import type { Clock } from '@/engine/clock';
 import {
   pushStreamHistoryMap,
   pushUndoHistoryMap,
 } from '@/engine/history.actions';
-import type { ActionMap as EditorActionMap } from '@/engine/modules/editor/actions';
-import type { ActionMap as IndexActionMap } from '@/engine/modules/index/actions';
-import type { ActionMap as IndexColumnActionMap } from '@/engine/modules/index-column/actions';
-import type { ActionMap as MemoActionMap } from '@/engine/modules/memo/actions';
-import type { ActionMap as RelationshipActionMap } from '@/engine/modules/relationship/actions';
-import type { ActionMap as SettingsActionMap } from '@/engine/modules/settings/actions';
-import type { ActionMap as TableActionMap } from '@/engine/modules/table/actions';
-import type { ActionMap as TableColumnActionMap } from '@/engine/modules/table-column/actions';
+import {
+  ActionMap as DictionaryActionMap,
+  ActionType as DictionaryActionType,
+} from '@/engine/modules/dictionary/actions';
+import {
+  ActionMap as EditorActionMap,
+  ActionType as EditorActionType,
+} from '@/engine/modules/editor/actions';
+import {
+  ActionMap as IndexActionMap,
+  ActionType as IndexActionType,
+} from '@/engine/modules/index/actions';
+import {
+  ActionMap as IndexColumnActionMap,
+  ActionType as IndexColumnActionType,
+} from '@/engine/modules/index-column/actions';
+import {
+  ActionMap as MemoActionMap,
+  ActionType as MemoActionType,
+} from '@/engine/modules/memo/actions';
+import {
+  ActionMap as RelationshipActionMap,
+  ActionType as RelationshipActionType,
+} from '@/engine/modules/relationship/actions';
+import {
+  ActionMap as SettingsActionMap,
+  ActionType as SettingsActionType,
+  CodeSettingLocks,
+} from '@/engine/modules/settings/actions';
+import {
+  ActionMap as TableActionMap,
+  ActionType as TableActionType,
+} from '@/engine/modules/table/actions';
+import {
+  ActionMap as TableColumnActionMap,
+  ActionType as TableColumnActionType,
+} from '@/engine/modules/table-column/actions';
+import {
+  ActionMap as TableGroupActionMap,
+  ActionType as TableGroupActionType,
+} from '@/engine/modules/table-group/actions';
 import { arrayHas } from '@/utils/arrayHas';
 
 /*
- * The action classification lists, kept apart from the merged creator registry
- * in actions.ts. A store needs these strings to route what it dispatches, and
- * importing them from the registry's module evaluated every generator action,
- * the four schema importers behind them included, in any graph that built a
- * store: the export-png worker's among them.
+ * The action classification lists, kept apart from the creator barrels. A
+ * store needs these strings to route what it dispatches, and a module that
+ * also merged every creator evaluated each generator action, the four schema
+ * importers behind them included, in any graph that built a store: the
+ * export-png worker's among them.
  */
 
 export type RootActionMap = EditorActionMap &
@@ -27,7 +65,9 @@ export type RootActionMap = EditorActionMap &
   RelationshipActionMap &
   SettingsActionMap &
   IndexActionMap &
-  IndexColumnActionMap;
+  IndexColumnActionMap &
+  TableGroupActionMap &
+  DictionaryActionMap;
 
 export type ActionType = keyof RootActionMap;
 
@@ -40,7 +80,10 @@ export const ChangeActionTypes: ReadonlyArray<ActionType> = [
   'table.changeName',
   'table.changeComment',
   'table.changeColor',
+  'table.changeGroup',
   'table.sort',
+  'table.changeLogicalName',
+  'table.changeNameDerived',
   // column
   'column.add',
   'column.remove',
@@ -53,10 +96,16 @@ export const ChangeActionTypes: ReadonlyArray<ActionType> = [
   'column.changeUnique',
   'column.changeNotNull',
   'column.move',
+  'column.changeLogicalName',
+  'column.changeDomain',
+  'column.changeNameDerived',
   // relationship
   'relationship.add',
   'relationship.remove',
   'relationship.changeType',
+  'relationship.changeOnDelete',
+  'relationship.changeOnUpdate',
+  'relationship.changeColumns',
   // index
   'index.add',
   'index.remove',
@@ -75,6 +124,18 @@ export const ChangeActionTypes: ReadonlyArray<ActionType> = [
   'memo.changeValue',
   'memo.changeColor',
   'memo.resize',
+  // tableGroup
+  'tableGroup.add',
+  'tableGroup.move',
+  'tableGroup.moveTo',
+  'tableGroup.remove',
+  'tableGroup.resize',
+  'tableGroup.changeName',
+  'tableGroup.changeColor',
+  // dictionary
+  'dictionary.add',
+  'dictionary.update',
+  'dictionary.remove',
   // settings
   'settings.changeDatabaseName',
   'settings.changeZoomLevel',
@@ -89,13 +150,32 @@ export const ChangeActionTypes: ReadonlyArray<ActionType> = [
   'settings.changeColumnNameCase',
   'settings.changeBracketType',
   'settings.changeRelationshipDataTypeSync',
-  'settings.changeRelationshipOptimization',
   'settings.changeColumnOrder',
   'settings.changeMaxWidthComment',
-  'settings.changeIgnoreSaveSettings',
+  'settings.changeLockSettings',
+  'settings.changeDDLScript',
+  'settings.changeNameViewMode',
   // editor
   'editor.loadJson',
   'editor.clear',
+];
+
+/**
+ * What a replica reports as a change: every change, and the save switch the
+ * locks replaced, which changes nothing yet owes the hub that relayed it a save.
+ */
+export const ReplicaChangeActionTypes: ReadonlyArray<ActionType> = [
+  ...ChangeActionTypes,
+  'settings.changeIgnoreSaveSettings',
+];
+
+/**
+ * What a replica applies: what it reports, and the registers a window answers
+ * a join with, which change no saved byte and so owe no hub a save.
+ */
+export const ReplicaActionTypes: ReadonlyArray<ActionType> = [
+  ...ReplicaChangeActionTypes,
+  'editor.mergeLWW',
 ];
 
 const hasReadonlyIgnore = arrayHas([
@@ -109,25 +189,171 @@ const hasReadonlyIgnore = arrayHas([
   'settings.changeTableNameCase',
   'settings.changeColumnNameCase',
   'settings.changeBracketType',
+  'settings.changeNameViewMode',
 ]);
 
 export const ReadonlyIgnoreActionTypes: ReadonlyArray<ActionType> = [
   ...ChangeActionTypes.filter(type => !hasReadonlyIgnore(type)),
 ];
 
-const hasViewIgnorePass = arrayHas<ActionType>([
-  'editor.loadJson',
-  'editor.clear',
-]);
+/**
+ * The settings a readonly editor's reader turns on its own screen alone: the
+ * eleven readonly lets through and View Option's show bits, which reach no
+ * file, history, change event or peer while it reads (Tag.screen).
+ */
+export const ScreenSettingActionTypes: ReadonlyArray<ActionType> = [
+  'settings.changeZoomLevel',
+  'settings.streamZoomLevel',
+  'settings.scrollTo',
+  'settings.streamScrollTo',
+  'settings.changeShow',
+  'settings.changeDatabase',
+  'settings.changeCanvasType',
+  'settings.changeLanguage',
+  'settings.changeTableNameCase',
+  'settings.changeColumnNameCase',
+  'settings.changeBracketType',
+  'settings.changeNameViewMode',
+];
 
 /**
- * What a view keeps from the document while it is active: every edit a
- * readonly host refuses, less the host replacing the document outright, which
- * a view cannot stand in the way of and answers by closing.
+ * What a readonly editor also refuses, beside its edits: the actions that open
+ * a name or cell editor or start a relationship draw. Each one that closes them
+ * passes, so an editor that turns readonly can still end what stood open.
+ */
+export const EditStateOpenActionTypes: ReadonlyArray<ActionType> = [
+  'editor.editTable',
+  'editor.editMemo',
+  'editor.editTableGroup',
+  'editor.drawStartRelationship',
+  'editor.drawStartAddRelationship',
+];
+
+/** The open map's dialogs that write the document, which a readonly editor opens none of. */
+export const EDIT_OPEN_KEYS: ReadonlyArray<Open> = [
+  Open.mapColumns,
+  Open.automaticTablePlacement,
+  Open.timeTravel,
+];
+
+/**
+ * Whether the action opens one of those dialogs: an open map change that sets
+ * one of their keys true. Closing them, or opening one that only reads, as
+ * Table Properties, the diff viewer and the image export do, is not.
+ */
+export const opensEditDialog = ({ type, payload }: AnyAction): boolean =>
+  type === 'editor.changeOpenMap' &&
+  EDIT_OPEN_KEYS.some(key => payload?.[key] === true);
+
+/**
+ * What a view keeps from the document while it is active: every edit of it,
+ * named apart from the readonly lists, so a change to what readonly refuses
+ * never moves what a view lets through. A load or a clear passes; it closes the view.
  */
 export const ViewIgnoreActionTypes: ReadonlyArray<ActionType> = [
-  ...ReadonlyIgnoreActionTypes.filter(type => !hasViewIgnorePass(type)),
+  // table
+  'table.add',
+  'table.move',
+  'table.moveTo',
+  'table.remove',
+  'table.changeName',
+  'table.changeComment',
+  'table.changeColor',
+  'table.changeGroup',
+  'table.sort',
+  'table.changeLogicalName',
+  'table.changeNameDerived',
+  // column
+  'column.add',
+  'column.remove',
+  'column.changeName',
+  'column.changeComment',
+  'column.changeDataType',
+  'column.changeDefault',
+  'column.changeAutoIncrement',
+  'column.changePrimaryKey',
+  'column.changeUnique',
+  'column.changeNotNull',
+  'column.move',
+  'column.changeLogicalName',
+  'column.changeDomain',
+  'column.changeNameDerived',
+  // relationship
+  'relationship.add',
+  'relationship.remove',
+  'relationship.changeType',
+  'relationship.changeOnDelete',
+  'relationship.changeOnUpdate',
+  'relationship.changeColumns',
+  // index
+  'index.add',
+  'index.remove',
+  'index.changeName',
+  'index.changeUnique',
+  // indexColumn
+  'indexColumn.add',
+  'indexColumn.remove',
+  'indexColumn.move',
+  'indexColumn.changeOrderType',
+  // memo
+  'memo.add',
+  'memo.move',
+  'memo.moveTo',
+  'memo.remove',
+  'memo.changeValue',
+  'memo.changeColor',
+  'memo.resize',
+  // tableGroup
+  'tableGroup.add',
+  'tableGroup.move',
+  'tableGroup.moveTo',
+  'tableGroup.remove',
+  'tableGroup.resize',
+  'tableGroup.changeName',
+  'tableGroup.changeColor',
+  // dictionary
+  'dictionary.add',
+  'dictionary.update',
+  'dictionary.remove',
+  // settings
+  'settings.changeDatabaseName',
+  'settings.changeShow',
+  'settings.changeRelationshipDataTypeSync',
+  'settings.changeColumnOrder',
+  'settings.changeMaxWidthComment',
+  'settings.changeLockSettings',
+  'settings.changeDDLScript',
 ];
+
+/**
+ * The code setters under the lock of the setting each sets: while it holds, a
+ * change is the screen of the store that made it, which sends it to no peer,
+ * and a store that receives one not marked shared drops it.
+ */
+export const CodeSettingLockActionTypes: Readonly<
+  Partial<Record<ActionType, number>>
+> = {
+  'settings.changeLanguage': CodeSettingLocks.language,
+  'settings.changeTableNameCase': CodeSettingLocks.tableNameCase,
+  'settings.changeColumnNameCase': CodeSettingLocks.columnNameCase,
+  'settings.changeBracketType': CodeSettingLocks.bracketType,
+};
+
+/**
+ * The lock that holds each setting action out of the element's change event:
+ * while it is on, the action changes the screen and never the file.
+ */
+export const LockSettingActionTypes: Readonly<
+  Partial<Record<ActionType, number>>
+> = {
+  'settings.changeZoomLevel': LockSettingType.viewport,
+  'settings.streamZoomLevel': LockSettingType.viewport,
+  'settings.scrollTo': LockSettingType.viewport,
+  'settings.streamScrollTo': LockSettingType.viewport,
+  'settings.changeCanvasType': LockSettingType.canvasType,
+  ...CodeSettingLockActionTypes,
+  'settings.changeNameViewMode': LockSettingType.unlockNameViewMode,
+};
 
 export const SharedStreamActionTypes: ReadonlyArray<ActionType> = [
   'editor.sharedMouseTracker',
@@ -143,22 +369,83 @@ export const SharedActionTypes: ReadonlyArray<ActionType> = [
   'editor.mergeLWW',
 ];
 
+/**
+ * What moves the clock's counter: every change, whose version a register or
+ * a clock that hears it takes, and the register handshake, which carries the
+ * highest version its sender holds. Presence and the reader's own state do not.
+ */
+export const ClockActionTypes: ReadonlyArray<ActionType> = [
+  ...ChangeActionTypes,
+  'editor.getLWW',
+  'editor.mergeLWW',
+];
+
+const isClockActionType = arrayHas<string>(ClockActionTypes);
+
+const isOwnActionType = arrayHas<string>(
+  [
+    EditorActionType,
+    TableActionType,
+    TableColumnActionType,
+    MemoActionType,
+    RelationshipActionType,
+    SettingsActionType,
+    IndexActionType,
+    IndexColumnActionType,
+    TableGroupActionType,
+    DictionaryActionType,
+  ].flatMap(types => Object.values<string>(types))
+);
+
+/**
+ * Whether an action's version moves the clock: a clock type's does, and so
+ * does one of a type no module here declares, which a newer editor's change
+ * may be. A batch holding none takes the version the clock holds.
+ */
+export const movesClock = (type: string): boolean =>
+  isClockActionType(type) || !isOwnActionType(type);
+
+/**
+ * The version a batch stamps on each action without one: the next when some
+ * action of it moves the clock, else the version the clock holds.
+ */
+export const batchVersion = (
+  clock: Clock,
+  actions: ReadonlyArray<AnyAction>
+): number =>
+  actions.some(({ type }) => movesClock(type))
+    ? clock.getNextVersion()
+    : clock.getVersion();
+
+/** Merges into the clock the version of each action of a batch that moves it. */
+export function mergeBatchVersions(
+  clock: Clock,
+  actions: ReadonlyArray<AnyAction>
+): void {
+  actions.forEach(({ type, version }) => {
+    if (movesClock(type)) clock.merge(version);
+  });
+}
+
 export const SharedFollowingActionTypes: ReadonlyArray<ActionType> = [
   'settings.changeZoomLevel',
   'settings.streamZoomLevel',
   'settings.scrollTo',
   'settings.streamScrollTo',
   'settings.changeCanvasType',
+  'settings.changeNameViewMode',
 ];
 
 export const StreamRegroupMoveActionTypes: ReadonlyArray<ActionType> = [
   'table.move',
   'memo.move',
+  'tableGroup.move',
 ];
 
 export const StreamRegroupColorActionTypes: ReadonlyArray<ActionType> = [
   'table.changeColor',
   'memo.changeColor',
+  'tableGroup.changeColor',
 ];
 
 export const StreamRegroupScrollActionTypes: ReadonlyArray<ActionType> = [

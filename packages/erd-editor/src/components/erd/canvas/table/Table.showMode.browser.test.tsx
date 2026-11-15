@@ -2,9 +2,10 @@
 
 // AC-1, AC-2, AC-3, AC-5, AC-27, AC-44 and AC-45: what a table draws inside a
 // view, and what it refuses. The show mode picks the rows, the box is measured
-// for them, the type cell lights where the view does, and no cell is edited.
+// for them, the type cell shows on every card, and no cell is edited.
 
 import { createRef, useProvider } from '@dineug/r-html';
+import { whenDrawn } from '@dineug/r-html-konva';
 import type { Container } from 'konva/lib/Container';
 import type { Node as KonvaNode } from 'konva/lib/Node';
 import type { Stage } from 'konva/lib/Stage';
@@ -85,7 +86,10 @@ import {
   viewSetLayoutAction,
 } from '@/engine/modules/editor/view.actions';
 import { addRelationshipAction } from '@/engine/modules/relationship/atom.actions';
-import { changeCanvasTypeAction } from '@/engine/modules/settings/atom.actions';
+import {
+  changeCanvasTypeAction,
+  scrollToAction,
+} from '@/engine/modules/settings/atom.actions';
 import { addTableAction } from '@/engine/modules/table/atom.actions';
 import {
   addColumnAction,
@@ -93,9 +97,10 @@ import {
   changeColumnPrimaryKeyAction,
 } from '@/engine/modules/table-column/atom.actions';
 import type { Point } from '@/internal-types';
-import { whenDrawn } from '@/konva/batchDraw';
+import { getTableRect } from '@/konva/scene/metrics';
 import { renderScene } from '@/konva/scene/renderScene';
 import { getReachedTableIds } from '@/konva/scene/viewLayout';
+import { toScreenPoint } from '@/konva/scene/viewport';
 import type { Theme } from '@/themes/tokens';
 import { calcTableHeight, viewHeaderNameWidth } from '@/utils/calcTable';
 import type { GeometrySource } from '@/utils/draw-relationship/geometrySource';
@@ -189,12 +194,16 @@ type Mounted = { app: AppContext; stage: Stage };
  */
 async function mountScene(
   source: GeometrySource,
-  sceneTheme: Theme = createTestTheme()
+  sceneTheme: Theme = createTestTheme(),
+  documentOrigin = { originX: 0, originY: 0 }
 ): Promise<Mounted> {
   const app = createTestAppContext();
   seedDocument(app);
+  // The document's own origin goes in before the view opens: while a view is
+  // open, a scroll is redirected to the view's own placement.
   app.store.dispatchSync(
     changeViewportAction({ width: WIDTH, height: HEIGHT }),
+    scrollToAction(documentOrigin),
     changeCanvasTypeAction({ value: CanvasType.visualization }),
     changeVisualizationModeAction({ value: VisualizationMode.flow }),
     viewOpenAction({ kind: ViewKind.flow }),
@@ -238,7 +247,10 @@ async function mountScene(
  * The view standing on no centers, so it shows what its layout placed and
  * lights only what a hover reaches.
  */
-const mountViewScene = () => mountScene('flow');
+const mountViewScene = (documentOrigin?: {
+  originX: number;
+  originY: number;
+}) => mountScene('flow', undefined, documentOrigin);
 
 /** The same store and the same leaves under the document provider, which is the ERD tab's own. */
 const mountDocumentScene = (sceneTheme?: Theme) =>
@@ -388,25 +400,27 @@ describe('the rows a view draws', () => {
   });
 });
 
-describe('the type cell a view lights', () => {
-  it('draws it on the hovered table and its neighbours alone', async () => {
+// An owner decision of 2026-10-21: the types show on every card, at rest too,
+// where a hover once brought them up on the cards it lit alone.
+describe('the type cell a view draws', () => {
+  it('draws it on every card, lit or not, and takes a press on each', async () => {
     const { stage } = await mountViewScene();
+
+    expect(typeOpacityOf(stage, 'c')).toEqual([1, 1]);
 
     await hoverTable(stage, 'a');
 
     // Lit: a under the pointer, b across the first link and d across the
-    // third. What the hover does not reach, c and e, is shown and left dark.
+    // third. What the hover does not reach, c and e, draws its types as well.
     expect(typeOpacityOf(stage, 'a')).toEqual([1]);
     expect(typeOpacityOf(stage, 'b')).toEqual([1, 1, 1]);
-    expect(typeOpacityOf(stage, 'c')).toEqual([0, 0]);
-    expect(typeOpacityOf(stage, 'e')).toEqual([0]);
-    // A cell drawn at nothing takes no press either, so the dark half of a
-    // view cannot be focused through what it does not show.
-    expect(typeListeningOf(stage, 'c')).toEqual([false, false]);
+    expect(typeOpacityOf(stage, 'c')).toEqual([1, 1]);
+    expect(typeOpacityOf(stage, 'e')).toEqual([1]);
+    expect(typeListeningOf(stage, 'c')).toEqual([true, true]);
     expect(typeListeningOf(stage, 'b')).toEqual([true, true, true]);
   });
 
-  it('lights a neighbour whose only rows every field brings back', async () => {
+  it('draws the type of every row every field brings back', async () => {
     const { app, stage } = await mountViewScene();
     await hoverTable(stage, 'a');
 
@@ -415,10 +429,8 @@ describe('the type cell a view lights', () => {
     );
     await settle();
 
-    // d hangs off the hovered table and carries no key row, so the key row
-    // mode has nowhere to show that it is lit; every field gives it forty places.
     expect(typeOpacityOf(stage, 'd')).toEqual(WIDE_COLUMNS.map(() => 1));
-    expect(typeOpacityOf(stage, 'c')).toEqual([0, 0]);
+    expect(typeOpacityOf(stage, 'c')).toEqual([1, 1]);
   });
 
   it('lights the hovered table and what it reaches, at the same width', async () => {
@@ -433,7 +445,7 @@ describe('the type cell a view lights', () => {
     expect(typeOpacityOf(stage, 'e')).toEqual([1]);
   });
 
-  it('puts it out again once the pointer leaves', async () => {
+  it('keeps it once the pointer leaves', async () => {
     const { stage } = await mountViewScene();
 
     await hoverTable(stage, 'c');
@@ -442,8 +454,8 @@ describe('the type cell a view lights', () => {
     moveScenePointer(stage, WIDTH - 2, HEIGHT - 2);
     await settle();
 
-    expect(typeOpacityOf(stage, 'c')).toEqual([0, 0]);
-    expect(typeOpacityOf(stage, 'e')).toEqual([0]);
+    expect(typeOpacityOf(stage, 'c')).toEqual([1, 1]);
+    expect(typeOpacityOf(stage, 'e')).toEqual([1]);
   });
 
   /**
@@ -861,7 +873,7 @@ describe('the colour a view rests a connector at', () => {
  * different spans however the ticker is wound.
  */
 describe('the time a highlight takes', () => {
-  it('brings the border, the glow, the type cell, the tint and the connector up over three hundred milliseconds', async () => {
+  it('brings the border, the glow, the tint and the connector up over three hundred milliseconds, the types drawn throughout', async () => {
     const { stage } = await mountViewScene();
     // Read before the hover, since the grey a connector rests at is what the
     // walk starts from and the case never assumes which grey that is.
@@ -874,7 +886,7 @@ describe('the time a highlight takes', () => {
 
     // The commit the hover lands on draws the card as it was: the walk starts
     // here rather than a step in.
-    expect(typeOpacityOf(stage, 'b')).toEqual([0, 0, 0]);
+    expect(typeOpacityOf(stage, 'b')).toEqual([1, 1, 1]);
     expect(bodyOf(stage, 'b').getAttr('stroke')).toBe(theme.tableBorder);
     expect(glowOf(stage, 'b')).toHaveLength(0);
     expect(tintOf()).toBe(TRANSPARENT);
@@ -887,7 +899,7 @@ describe('the time a highlight takes', () => {
     // is what every paint here is scaled by.
     const half = 0.875;
     const halfStroke = mixColor(theme.tableBorder, theme.accentColor9, half);
-    expect(typeOpacityOf(stage, 'b')).toEqual([half, half, half]);
+    expect(typeOpacityOf(stage, 'b')).toEqual([1, 1, 1]);
     expect(bodyOf(stage, 'b').getAttr('stroke')).toBe(halfStroke);
     expect(glowOf(stage, 'b')[0].opacity()).toBe(half);
     expect(tintOf()).toBe(
@@ -915,7 +927,7 @@ describe('the time a highlight takes', () => {
     expect(transitions.frames()).toBeGreaterThan(asked);
   });
 
-  it('takes the same five back out over the same three hundred', async () => {
+  it('takes the same four back out over the same three hundred', async () => {
     const { stage } = await mountViewScene();
     const grey = routeOf(stage, 'r1');
     const tintOf = () => rowBackgroundOf(rowsOf(stage, 'b')[1]);
@@ -929,7 +941,7 @@ describe('the time a highlight takes', () => {
     await commit();
 
     const half = 1 - 0.875;
-    expect(typeOpacityOf(stage, 'b')).toEqual([half, half, half]);
+    expect(typeOpacityOf(stage, 'b')).toEqual([1, 1, 1]);
     expect(glowOf(stage, 'b')[0].opacity()).toBe(half);
     expect(bodyOf(stage, 'b').getAttr('stroke')).toBe(
       mixColor(theme.tableBorder, theme.accentColor9, half)
@@ -942,7 +954,7 @@ describe('the time a highlight takes', () => {
     transitions.step(TRANSITION_MS / 2);
     await commit();
 
-    expect(typeOpacityOf(stage, 'b')).toEqual([0, 0, 0]);
+    expect(typeOpacityOf(stage, 'b')).toEqual([1, 1, 1]);
     expect(glowOf(stage, 'b')).toHaveLength(0);
     expect(bodyOf(stage, 'b').getAttr('stroke')).toBe(theme.tableBorder);
     expect(tintOf()).toBe(TRANSPARENT);
@@ -1297,8 +1309,13 @@ const buttonOf = (stage: Stage, id: string, name: string) =>
  * names a press for the shape under the pointer and bubbles it from there, so
  * the card behind the button sees it go past, which is half of what it means.
  */
-async function pressButton(stage: Stage, id: string, name: string) {
-  const at = { clientX: 20, clientY: 20 };
+async function pressButton(
+  stage: Stage,
+  id: string,
+  name: string,
+  init: MouseEventInit = {}
+) {
+  const at = { clientX: 20, clientY: 20, ...init };
   const shape = buttonOf(stage, id, name)?.getChildren()[0];
   // A press on nothing reads like a button that did nothing, so an unhovered
   // card would pass the cases below for the wrong reason.
@@ -1417,18 +1434,61 @@ describe('the two buttons a view card header carries', () => {
     expect(app.store.state.editor.views.flow?.originX).toBe(0);
   });
 
-  /** AC-48. A table already on screen is swapped to and never scrolled to. */
-  it('swaps to the ERD tab without a scroll for a table already on screen', async () => {
+  /**
+   * AC-N5. With the document standing at (300, 300), the middle of a, at
+   * (482.5, 339), is in the middle half of the 1000 by 800 canvas, so the
+   * table is swapped to and never scrolled to.
+   */
+  it('swaps to the ERD tab without a scroll for a table whose middle is in the middle half', async () => {
+    const { app, stage } = await mountViewScene({ originX: 300, originY: 300 });
+    await enterTable(stage, 'a');
+    const types = recordActions(app);
+
+    await pressButton(stage, 'a', 'table-go-to-erd');
+
+    const { settings, editor } = app.store.state;
+    expect(settings.canvasType).toBe(CanvasType.ERD);
+    expect(Boolean(editor.selectedMap.a)).toBe(true);
+    expect(types.filter(type => type === 'settings.scrollTo')).toHaveLength(0);
+    expect(settings.originX).toBe(300);
+    expect(settings.originY).toBe(300);
+  });
+
+  /**
+   * AC-N6. At the document's own origin a shows whole, but its middle, at
+   * (182.5, 39), is off the middle half, so the one scroll stands it there.
+   */
+  it('scrolls a table on screen whose middle is off the middle half to the middle, once', async () => {
     const { app, stage } = await mountViewScene();
     await enterTable(stage, 'a');
     const types = recordActions(app);
 
     await pressButton(stage, 'a', 'table-go-to-erd');
 
-    expect(app.store.state.settings.canvasType).toBe(CanvasType.ERD);
-    expect(Boolean(app.store.state.editor.selectedMap.a)).toBe(true);
-    expect(types.filter(type => type === 'settings.scrollTo')).toHaveLength(0);
-    expect(app.store.state.settings.originX).toBe(0);
+    const { state } = app.store;
+    const rect = getTableRect(state, state.collections.tableEntities.a);
+    const middle = toScreenPoint(state.settings, {
+      x: rect.x + rect.width / 2,
+      y: rect.y + rect.height / 2,
+    });
+    expect(state.settings.canvasType).toBe(CanvasType.ERD);
+    expect(types.filter(type => type === 'settings.scrollTo')).toHaveLength(1);
+    expect(middle.x).toBeCloseTo(WIDTH / 2, 6);
+    expect(middle.y).toBeCloseTo(HEIGHT / 2, 6);
+  });
+
+  /** A right click is the context menu's, so neither button acts on one. */
+  it('narrows nothing and leaves the tab be on a right click of either button', async () => {
+    const { app, stage } = await mountViewScene();
+    await enterTable(stage, 'a');
+    const right = { button: 2 };
+
+    await pressButton(stage, 'a', 'table-related', right);
+    await pressButton(stage, 'a', 'table-go-to-erd', right);
+
+    expect(app.store.state.editor.views.flow?.centerIds).toEqual([]);
+    expect(app.store.state.settings.canvasType).not.toBe(CanvasType.ERD);
+    expect(Boolean(app.store.state.editor.selectedMap.a)).toBe(false);
   });
 });
 

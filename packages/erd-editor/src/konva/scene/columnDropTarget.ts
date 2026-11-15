@@ -1,7 +1,7 @@
 import { query } from '@dineug/erd-editor-schema';
 import { isEqual } from 'es-toolkit';
 
-import { TABLE_PADDING } from '@/constants/layout';
+import { COLUMN_DRAG_HANDLE_LANE, TABLE_PADDING } from '@/constants/layout';
 import type { DraggableColumn } from '@/engine/modules/editor/state';
 import type { RootState } from '@/engine/state';
 import type { Point } from '@/internal-types';
@@ -25,8 +25,8 @@ const APPEND_BAND = TABLE_PADDING;
 
 /**
  * The row a column drag would drop on, in canvas coordinates, or null over a
- * header and over bare canvas. A drop appends in a band under a card and
- * anywhere on a table with no rows. Arithmetic, never a hit canvas read.
+ * header and over bare canvas. The handle's lane left of a card counts as its
+ * rows, and a band under it appends, as anywhere on a table with no rows does.
  */
 export function findColumnDropTarget(
   state: RootState,
@@ -37,26 +37,31 @@ export function findColumnDropTarget(
   const cullingRect = getCullingRect(state, source);
 
   // Painted order, reversed: the row a pointer lands on belongs to whichever
-  // table is drawn over the others there.
+  // table is drawn over the others there, of equal ones the later in the list.
   const tables = query(collections)
     .collection('tableEntities')
     .selectByIds(getVisibleIds(state, source).tableIds)
     .filter(table => isTableVisible(cullingRect, state, table, source))
-    .sort((a, b) => b.ui.zIndex - a.ui.zIndex);
+    .sort((a, b) => a.ui.zIndex - b.ui.zIndex)
+    .reverse();
   const cards = tables.map(table => ({
     table,
     rect: getTableRect(state, table, source),
   }));
-  const within = (rect: Rect, band: number) =>
-    point.x >= rect.x &&
+  const within = (rect: Rect, band: number, lane: number) =>
+    point.x >= rect.x - lane &&
     point.x <= rect.x + rect.width &&
     point.y >= rect.y &&
     point.y <= rect.y + rect.height + band;
 
-  // A card under the pointer outranks the band under another one.
+  // A card under the pointer outranks the handle's lane beside another one,
+  // which outranks the band under a third.
   const card =
-    cards.find(({ rect }) => within(rect, 0)) ??
-    cards.find(({ rect }) => within(rect, APPEND_BAND));
+    cards.find(({ rect }) => within(rect, 0, 0)) ??
+    cards.find(({ rect }) => within(rect, 0, COLUMN_DRAG_HANDLE_LANE)) ??
+    cards.find(({ rect }) =>
+      within(rect, APPEND_BAND, COLUMN_DRAG_HANDLE_LANE)
+    );
   if (!card) return null;
 
   const { table } = card;

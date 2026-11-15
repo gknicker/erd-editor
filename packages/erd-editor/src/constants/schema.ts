@@ -1,5 +1,7 @@
 import { SchemaV3Constants } from '@dineug/erd-editor-schema';
 
+import { ValuesType } from '@/internal-types';
+
 export const CanvasType = SchemaV3Constants.CanvasType;
 export const CanvasTypeList = SchemaV3Constants.CanvasTypeList;
 export const Show = SchemaV3Constants.Show;
@@ -18,17 +20,29 @@ export const RelationshipTypeList = SchemaV3Constants.RelationshipTypeList;
 export const StartRelationshipType = SchemaV3Constants.StartRelationshipType;
 export const StartRelationshipTypeList =
   SchemaV3Constants.StartRelationshipTypeList;
+export const ReferentialAction = SchemaV3Constants.ReferentialAction;
+export const ReferentialActionList = SchemaV3Constants.ReferentialActionList;
 export const Direction = SchemaV3Constants.Direction;
 export const DirectionList = SchemaV3Constants.DirectionList;
 export const ColumnOption = SchemaV3Constants.ColumnOption;
 export const ColumnUIKey = SchemaV3Constants.ColumnUIKey;
 export const OrderType = SchemaV3Constants.OrderType;
 export const OrderTypeList = SchemaV3Constants.OrderTypeList;
-export const SaveSettingType = SchemaV3Constants.SaveSettingType;
+export const LockSettingType = SchemaV3Constants.LockSettingType;
+export const LockSettingTypeList = SchemaV3Constants.LockSettingTypeList;
+export const LockSettingFields = SchemaV3Constants.LockSettingFields;
+export const InvertedLockSettings = SchemaV3Constants.InvertedLockSettings;
+export const NameViewMode = SchemaV3Constants.NameViewMode;
+export const NameViewModeList: ReadonlyArray<ValuesType<typeof NameViewMode>> =
+  SchemaV3Constants.NameViewModeList;
 export const CANVAS_SIZE_MAX = SchemaV3Constants.CANVAS_SIZE_MAX;
 export const CANVAS_SIZE_MIN = SchemaV3Constants.CANVAS_SIZE_MIN;
 export const CANVAS_ZOOM_MAX = SchemaV3Constants.CANVAS_ZOOM_MAX;
 export const CANVAS_ZOOM_MIN = SchemaV3Constants.CANVAS_ZOOM_MIN;
+export const DDLScriptPosition = SchemaV3Constants.DDLScriptPosition;
+export const DDLScriptPositionList: ReadonlyArray<
+  ValuesType<typeof DDLScriptPosition>
+> = SchemaV3Constants.DDLScriptPositionList;
 
 export const BracketTypeMap: Record<number, string> = {
   [BracketType.none]: '',
@@ -37,12 +51,11 @@ export const BracketTypeMap: Record<number, string> = {
   [BracketType.singleQuote]: "'",
 };
 
-export const ColumnTypeToName: Record<number, string> = {
-  [ColumnType.columnName]: 'Name',
-  [ColumnType.columnDataType]: 'DataType',
-  [ColumnType.columnDefault]: 'Default',
-  [ColumnType.columnComment]: 'Comment',
-  [ColumnType.columnAutoIncrement]: 'Auto Increment',
-  [ColumnType.columnUnique]: 'Unique',
-  [ColumnType.columnNotNull]: 'Not Null',
+/** The clause each action writes after ON DELETE / ON UPDATE; none writes none. */
+export const ReferentialActionToSQL: Record<number, string> = {
+  [ReferentialAction.noAction]: 'NO ACTION',
+  [ReferentialAction.cascade]: 'CASCADE',
+  [ReferentialAction.setNull]: 'SET NULL',
+  [ReferentialAction.setDefault]: 'SET DEFAULT',
+  [ReferentialAction.restrict]: 'RESTRICT',
 };

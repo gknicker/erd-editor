@@ -24,8 +24,9 @@ import { createIndexColumn } from '@/utils/collection/indexColumn.entity';
 import { createRelationship } from '@/utils/collection/relationship.entity';
 import { createTable } from '@/utils/collection/table.entity';
 import { createColumn } from '@/utils/collection/tableColumn.entity';
-import { autoName, primaryKeyColumns } from '@/utils/schema-sql/utils';
+import { toReferentialAction } from '@/utils/referentialAction';
 import { findByName } from '@/utils/schema-sql-parser/utils';
+import { autoName, primaryKeyColumns } from '@/utils/tableName';
 import { textInRange, toSafeString } from '@/utils/validation';
 
 import { enumCommentSuffix, resolveDataType } from './dataType';
@@ -52,6 +53,8 @@ type RelationshipInput = {
   child: TableContext;
   childColumns: Column[];
   toMany: boolean;
+  onDelete: number;
+  onUpdate: number;
 };
 
 type IndexGroup = {
@@ -172,6 +175,7 @@ function convertEntity(
     ui: {
       widthName: textInRange(toWidth(name)),
       widthComment: textInRange(toWidth(comment)),
+      color: source.color,
     },
   });
   const context: TableContext = { source, table: newTable, columns: [] };
@@ -279,6 +283,8 @@ function convertRelationships(
       child,
       childColumns,
       toMany: relation.refCardinality === 'n',
+      onDelete: toReferentialAction(relation.onDelete),
+      onUpdate: toReferentialAction(relation.onUpdate),
     });
   });
 }
@@ -309,7 +315,15 @@ function appendRelationship(
   { doc, collections }: ERDEditorSchemaV3,
   { toWidth }: EngineContext,
   relationshipKeys: Set<string>,
-  { parent, parentColumns, child, childColumns, toMany }: RelationshipInput
+  {
+    parent,
+    parentColumns,
+    child,
+    childColumns,
+    toMany,
+    onDelete,
+    onUpdate,
+  }: RelationshipInput
 ) {
   const key = `${parent.table.id}:${child.table.id}:${childColumns
     .map(column => column.id)
@@ -349,6 +363,8 @@ function appendRelationship(
       : mandatory
         ? RelationshipType.OneOnly
         : RelationshipType.ZeroOne,
+    onDelete,
+    onUpdate,
     start: {
       tableId: parent.table.id,
       columnIds: parentColumns.map(column => column.id),
@@ -398,6 +414,7 @@ function appendJunctionTable(
       name,
       alias: '',
       comment,
+      color: '',
       attributes: [],
     },
     table: newTable,

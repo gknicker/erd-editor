@@ -13,16 +13,19 @@ const pkg = JSON.parse(readFileSync('package.json', { encoding: 'utf8' }));
 const browserSpecs = 'src/**/*.browser.test.{ts,tsx}';
 
 /**
- * What both projects carry and inherit from nowhere: Vitest reads neither
- * vite.config.ts nor the root config a project sits in. A missing define
- * leaves __APP_VERSION__ undefined and kills every spec reaching schema-gc.
+ * What both projects carry: each extends this file, which sets only projects
+ * and coverage, and Vitest reads no vite.config.ts beside it. A missing define
+ * leaves __APP_VERSION__ undefined and kills every spec reaching a worker.
  */
 const createSharedConfig = (): UserWorkspaceConfig => ({
   // The JSX transform repeats here or a .tsx spec reaches oxc with its JSX
   // intact. The HMR half is off, and the konva specifier is what a @jsxHost
   // konva spec compiles against; the plugin refuses the pragma without it.
   plugins: [
-    rHtml({ jsx: { konvaImportSource: '@/konva/host' }, refresh: false }),
+    rHtml({
+      jsx: { konvaImportSource: '@dineug/r-html-konva' },
+      refresh: false,
+    }),
   ],
   define: {
     __APP_VERSION__: JSON.stringify(pkg.version),
@@ -74,7 +77,10 @@ export default defineConfig({
           retry: process.env.CI ? 2 : 0,
           browser: {
             enabled: true,
-            provider: playwright(),
+            // An element with its locale picker on, or told to follow system,
+            // shows the browser's language, so the specs pin the one their
+            // English assertions read, as Playwright's own runner does.
+            provider: playwright({ contextOptions: { locale: 'en-US' } }),
             instances: [{ browser: 'chromium' }],
             headless: true,
           },
@@ -98,8 +104,11 @@ export default defineConfig({
         // of a production build and its consumer lives under e2e, which no
         // coverage run reaches.
         'src/konva/testHandle.ts',
-        // The umd build's spawn module; the es build and every spec use the url one.
-        'src/workers/spawn.inline.ts',
+        // The umd builds' spawn modules; the es build and every spec use the url ones.
+        'src/workers/*.spawn.inline.ts',
+        // The umd entries, which only re-export what their own modules' specs
+        // cover; a umd build alone evaluates one.
+        'src/umd/**',
       ],
       thresholds: {
         perFile: true,

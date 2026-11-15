@@ -1,0 +1,31 @@
+{
+  "name": "@dineug/uuid",
+  "version": "0.1.0",
+  "private": true,
+  "description": "UUIDv7 generation and the Uuid25 encoding",
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "sideEffects": false,
+  "license": "MIT",
+  "scripts": {
+    "test:dev": "vp test dev",
+    "test:coverage": "vp test run --coverage"
+  },
+  "devDependencies": {
+    "@typescript/typescript6": "catalog:",
+    "@vitest/coverage-v8": "catalog:",
+    "typescript": "catalog:",
+    "vite": "catalog:",
+    "vite-plugin-dts": "catalog:",
+    "vite-plus": "catalog:",
+    "vitest": "catalog:"
+  }
+}

@@ -1,4 +1,4 @@
-import { AnyAction } from '@dineug/r-html';
+import { AnyAction, render } from '@dineug/r-html';
 import {
   afterEach,
   beforeEach,
@@ -8,7 +8,13 @@ import {
   vi,
 } from 'vite-plus/test';
 
+import {
+  createTestI18n,
+  provideI18n,
+  pseudoMessages,
+} from '@/__test-utils__/index';
 import { AppContext } from '@/components/appContext';
+import type { I18n } from '@/i18n/translate';
 import { Emitter } from '@/utils/emitter';
 import {
   importAML,
@@ -19,6 +25,21 @@ import {
   importSchemaSQL,
   setImportFileCallback,
 } from '@/utils/file/importFile';
+import {
+  appendSchemaJSON,
+  appendSchemaPlaced,
+  importSchemaPlaced,
+} from '@/utils/file/importSchema';
+
+/**
+ * Where a schema file goes once read, which importSchema.test.ts holds to its
+ * placement; these specs hold only that the file reaches it.
+ */
+vi.mock('@/utils/file/importSchema', () => ({
+  appendSchemaJSON: vi.fn(),
+  appendSchemaPlaced: vi.fn(),
+  importSchemaPlaced: vi.fn(),
+}));
 
 type Harness = {
   app: AppContext;
@@ -68,6 +89,17 @@ function attachFile(input: HTMLInputElement, name: string, content: string) {
   input.files = dataTransfer.files;
 }
 
+/** What a toast emitted says once rendered, in the language given or in English. */
+function toastText(action: AnyAction, i18n?: I18n) {
+  const container = document.createElement('div');
+  const provider = i18n ? provideI18n(container, i18n) : null;
+  render(container, action.payload.message);
+  const text = container.textContent?.trim();
+  render(container, null);
+  provider?.destroy();
+  return text;
+}
+
 async function change(input: HTMLInputElement) {
   input.dispatchEvent(new Event('change'));
   for (let i = 0; i < 20; i++) {
@@ -85,6 +117,9 @@ describe('importFile', () => {
   afterEach(() => {
     setImportFileCallback(null);
     vi.restoreAllMocks();
+    vi.mocked(importSchemaPlaced).mockClear();
+    vi.mocked(appendSchemaPlaced).mockClear();
+    vi.mocked(appendSchemaJSON).mockClear();
   });
 
   describe('setImportFileCallback', () => {
@@ -187,6 +222,77 @@ describe('importFile', () => {
     });
   });
 
+  describe('Import and Add', () => {
+    it.each([
+      ['json', importJSON, '.json'],
+      ['sql', importSchemaSQL, '.sql'],
+      ['graphql', importGraphQL, '.graphql,.gql,.graphqls'],
+      ['dbml', importDBML, '.dbml'],
+      ['aml', importAML, '.aml'],
+    ] as const)(
+      'asks the host for a %s file to add, naming the mode',
+      (type, importFile, accept) => {
+        const callback = vi.fn();
+        setImportFileCallback(callback);
+
+        importFile(harness.app, 'append');
+
+        expect(callback).toHaveBeenCalledExactlyOnceWith({
+          type,
+          op: 'set',
+          accept,
+          mode: 'append',
+        });
+      }
+    );
+
+    it('names no mode to the host for a replace', () => {
+      const callback = vi.fn();
+      setImportFileCallback(callback);
+
+      importSchemaSQL(harness.app, 'replace');
+
+      expect(callback.mock.calls[0][0]).not.toHaveProperty('mode');
+    });
+
+    it('adds a json file read in to the document', async () => {
+      importJSON(harness.app, 'append');
+      const [input] = harness.inputs;
+      attachFile(input, 'schema.json', '{"version":"3.0.0"}');
+
+      await change(input);
+
+      expect(appendSchemaJSON).toHaveBeenCalledExactlyOnceWith(
+        harness.app,
+        '{"version":"3.0.0"}'
+      );
+      expect(harness.dispatch).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['sql', importSchemaSQL, 'dump.sql', 'CREATE TABLE a (id int);'],
+      ['graphql', importGraphQL, 'schema.gql', 'type A { id: ID! }'],
+      ['dbml', importDBML, 'schema.dbml', 'Table a {\n  id int\n}'],
+      ['aml', importAML, 'schema.aml', 'a\n  id int pk'],
+    ] as const)(
+      'adds a %s file read in, placed by its relationships',
+      async (type, importFile, name, content) => {
+        importFile(harness.app, 'append');
+        const [input] = harness.inputs;
+        attachFile(input, name, content);
+
+        await change(input);
+
+        expect(appendSchemaPlaced).toHaveBeenCalledExactlyOnceWith(
+          harness.app,
+          type,
+          content
+        );
+        expect(importSchemaPlaced).not.toHaveBeenCalled();
+      }
+    );
+  });
+
   describe('importJSON', () => {
     it('creates and clicks a .json file input', () => {
       importJSON(harness.app);
@@ -236,6 +342,9 @@ describe('importFile', () => {
       expect(harness.dispatch).not.toHaveBeenCalled();
       expect(harness.emitted).toHaveLength(1);
       expect(harness.emitted[0].type).toBe('openToast');
+      expect(toastText(harness.emitted[0])).toBe(
+        'Only json files can be imported'
+      );
     });
 
     it('ignores a non-string FileReader result', async () => {
@@ -275,15 +384,18 @@ describe('importFile', () => {
       expect(harness.clicks).toBe(1);
     });
 
-    it('dispatches loadSchemaSQLAction$ with the file text', async () => {
+    it('imports the file text, placed by its relationships', async () => {
       importSchemaSQL(harness.app);
       const [input] = harness.inputs;
       attachFile(input, 'dump.SQL', 'CREATE TABLE a (id int);');
 
       await change(input);
 
-      expect(harness.dispatch).toHaveBeenCalledTimes(1);
-      expect(typeof harness.dispatch.mock.calls[0][0]).toBe('function');
+      expect(importSchemaPlaced).toHaveBeenCalledExactlyOnceWith(
+        harness.app,
+        'sql',
+        'CREATE TABLE a (id int);'
+      );
       expect(harness.emitted).toHaveLength(0);
     });
 
@@ -292,7 +404,7 @@ describe('importFile', () => {
 
       await change(harness.inputs[0]);
 
-      expect(harness.dispatch).not.toHaveBeenCalled();
+      expect(importSchemaPlaced).not.toHaveBeenCalled();
       expect(harness.emitted).toHaveLength(0);
     });
 
@@ -303,11 +415,28 @@ describe('importFile', () => {
 
       await change(input);
 
-      expect(harness.dispatch).not.toHaveBeenCalled();
+      expect(importSchemaPlaced).not.toHaveBeenCalled();
       expect(harness.emitted).toHaveLength(1);
       expect(harness.emitted[0].type).toBe('openToast');
+      expect(toastText(harness.emitted[0])).toBe(
+        'Only sql files can be imported'
+      );
     });
 
+    it('says so in the language of the editor the toast renders in, the format as written', async () => {
+      importSchemaSQL(harness.app);
+      const [input] = harness.inputs;
+      attachFile(input, 'schema.json', '{}');
+
+      await change(input);
+
+      expect(
+        toastText(
+          harness.emitted[0],
+          createTestI18n('fa-IR', pseudoMessages('fa'))
+        )
+      ).toBe('fa:Only \u2068sql\u2069 files can be imported');
+    });
     it('ignores a non-string FileReader result', async () => {
       class FakeFileReader {
         result: unknown = null;
@@ -325,7 +454,7 @@ describe('importFile', () => {
 
       await change(input);
 
-      expect(harness.dispatch).not.toHaveBeenCalled();
+      expect(importSchemaPlaced).not.toHaveBeenCalled();
       vi.unstubAllGlobals();
     });
   });
@@ -343,7 +472,7 @@ describe('importFile', () => {
     });
 
     it.each(['schema.graphql', 'schema.GQL', 'schema.graphqls'])(
-      'dispatches loadSchemaGraphQLAction$ for %s',
+      'imports %s placed by its relationships',
       async name => {
         importGraphQL(harness.app);
         const [input] = harness.inputs;
@@ -351,8 +480,11 @@ describe('importFile', () => {
 
         await change(input);
 
-        expect(harness.dispatch).toHaveBeenCalledTimes(1);
-        expect(typeof harness.dispatch.mock.calls[0][0]).toBe('function');
+        expect(importSchemaPlaced).toHaveBeenCalledExactlyOnceWith(
+          harness.app,
+          'graphql',
+          sdl
+        );
         expect(harness.emitted).toHaveLength(0);
       }
     );
@@ -362,7 +494,7 @@ describe('importFile', () => {
 
       await change(harness.inputs[0]);
 
-      expect(harness.dispatch).not.toHaveBeenCalled();
+      expect(importSchemaPlaced).not.toHaveBeenCalled();
       expect(harness.emitted).toHaveLength(0);
     });
 
@@ -373,19 +505,22 @@ describe('importFile', () => {
 
       await change(input);
 
-      expect(harness.dispatch).not.toHaveBeenCalled();
+      expect(importSchemaPlaced).not.toHaveBeenCalled();
       expect(harness.emitted).toHaveLength(1);
       expect(harness.emitted[0].type).toBe('openToast');
+      expect(toastText(harness.emitted[0])).toBe(
+        'Only graphql files can be imported'
+      );
     });
 
-    it('dispatches whatever the file holds, as the SQL import does', async () => {
+    it('imports whatever the file holds, as the SQL import does', async () => {
       importGraphQL(harness.app);
       const [input] = harness.inputs;
       attachFile(input, 'query.graphql', 'query GetUser { user { id } }');
 
       await change(input);
 
-      expect(harness.dispatch).toHaveBeenCalledTimes(1);
+      expect(importSchemaPlaced).toHaveBeenCalledTimes(1);
       expect(harness.emitted).toHaveLength(0);
     });
 
@@ -411,7 +546,7 @@ describe('importFile', () => {
       await change(input);
 
       expect(readers).toHaveLength(1);
-      expect(harness.dispatch).not.toHaveBeenCalled();
+      expect(importSchemaPlaced).not.toHaveBeenCalled();
       vi.unstubAllGlobals();
     });
   });
@@ -429,7 +564,7 @@ describe('importFile', () => {
     });
 
     it.each(['schema.dbml', 'schema.DBML'])(
-      'dispatches loadSchemaDBMLAction$ for %s',
+      'imports %s placed by its relationships',
       async name => {
         importDBML(harness.app);
         const [input] = harness.inputs;
@@ -437,8 +572,11 @@ describe('importFile', () => {
 
         await change(input);
 
-        expect(harness.dispatch).toHaveBeenCalledTimes(1);
-        expect(typeof harness.dispatch.mock.calls[0][0]).toBe('function');
+        expect(importSchemaPlaced).toHaveBeenCalledExactlyOnceWith(
+          harness.app,
+          'dbml',
+          dbml
+        );
         expect(harness.emitted).toHaveLength(0);
       }
     );
@@ -448,7 +586,7 @@ describe('importFile', () => {
 
       await change(harness.inputs[0]);
 
-      expect(harness.dispatch).not.toHaveBeenCalled();
+      expect(importSchemaPlaced).not.toHaveBeenCalled();
       expect(harness.emitted).toHaveLength(0);
     });
 
@@ -459,9 +597,12 @@ describe('importFile', () => {
 
       await change(input);
 
-      expect(harness.dispatch).not.toHaveBeenCalled();
+      expect(importSchemaPlaced).not.toHaveBeenCalled();
       expect(harness.emitted).toHaveLength(1);
       expect(harness.emitted[0].type).toBe('openToast');
+      expect(toastText(harness.emitted[0])).toBe(
+        'Only dbml files can be imported'
+      );
     });
 
     it('rejects a name ending in dbml without the dot', async () => {
@@ -471,7 +612,7 @@ describe('importFile', () => {
 
       await change(input);
 
-      expect(harness.dispatch).not.toHaveBeenCalled();
+      expect(importSchemaPlaced).not.toHaveBeenCalled();
       expect(harness.emitted).toHaveLength(1);
     });
   });
@@ -489,7 +630,7 @@ describe('importFile', () => {
     });
 
     it.each(['schema.aml', 'schema.AML'])(
-      'dispatches loadSchemaAMLAction$ for %s',
+      'imports %s placed by its relationships',
       async name => {
         importAML(harness.app);
         const [input] = harness.inputs;
@@ -497,8 +638,11 @@ describe('importFile', () => {
 
         await change(input);
 
-        expect(harness.dispatch).toHaveBeenCalledTimes(1);
-        expect(typeof harness.dispatch.mock.calls[0][0]).toBe('function');
+        expect(importSchemaPlaced).toHaveBeenCalledExactlyOnceWith(
+          harness.app,
+          'aml',
+          aml
+        );
         expect(harness.emitted).toHaveLength(0);
       }
     );
@@ -508,7 +652,7 @@ describe('importFile', () => {
 
       await change(harness.inputs[0]);
 
-      expect(harness.dispatch).not.toHaveBeenCalled();
+      expect(importSchemaPlaced).not.toHaveBeenCalled();
       expect(harness.emitted).toHaveLength(0);
     });
 
@@ -519,9 +663,12 @@ describe('importFile', () => {
 
       await change(input);
 
-      expect(harness.dispatch).not.toHaveBeenCalled();
+      expect(importSchemaPlaced).not.toHaveBeenCalled();
       expect(harness.emitted).toHaveLength(1);
       expect(harness.emitted[0].type).toBe('openToast');
+      expect(toastText(harness.emitted[0])).toBe(
+        'Only aml files can be imported'
+      );
     });
 
     it('rejects a name ending in aml without the dot', async () => {
@@ -531,7 +678,7 @@ describe('importFile', () => {
 
       await change(input);
 
-      expect(harness.dispatch).not.toHaveBeenCalled();
+      expect(importSchemaPlaced).not.toHaveBeenCalled();
       expect(harness.emitted).toHaveLength(1);
     });
   });
@@ -578,6 +725,9 @@ describe('importFile', () => {
 
       expect(harness.emitted).toHaveLength(1);
       expect(harness.emitted[0].type).toBe('openToast');
+      expect(toastText(harness.emitted[0])).toBe(
+        'Only json files can be imported'
+      );
     });
 
     it('ignores a non-string FileReader result', async () => {

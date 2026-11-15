@@ -3,7 +3,14 @@ import path from 'node:path';
 
 import { describe, expect, it, test } from 'vite-plus/test';
 
-import { CreateTable, schemaSQLParser, SortType, StatementType } from '@/index';
+import {
+  CreateTable,
+  ReferentialAction,
+  schemaSQLParser,
+  SchemaSQLParserOptions,
+  SortType,
+  StatementType,
+} from '@/index';
 
 type TestCase = [string, string, string];
 const testCaseList: Array<TestCase> = [];
@@ -77,9 +84,32 @@ describe('public entry surface', () => {
           },
         ],
         indexes: [],
+        keys: [],
         foreignKeys: [],
       },
     ]);
+  });
+
+  // The document's database, when the caller knows it: Databricks alone reads
+  // its literals by Spark's escapes, wherever a statement takes a string.
+  it('reads the literals of a Databricks source by Spark escapes', () => {
+    const sql = String.raw`CREATE TABLE t (a STRING COMMENT 'a\\b') COMMENT 'o\'k \\';
+      COMMENT ON TABLE t IS 'C:\\';
+      COMMENT ON COLUMN t.a IS 'it\'s \\';`;
+    const comments = (database?: SchemaSQLParserOptions['database']) =>
+      schemaSQLParser(sql, { database }).map(statement =>
+        statement.type === StatementType.createTable
+          ? [statement.comment, statement.columns[0].comment]
+          : (statement as { comment: string }).comment
+      );
+
+    expect(comments('Databricks')).toEqual([
+      ["o'k \\", 'a\\b'],
+      'C:\\',
+      "it's \\",
+    ]);
+    expect(comments()).toEqual([["o'k \\\\", 'a\\\\b'], 'C:\\\\', "it's \\\\"]);
+    expect(schemaSQLParser(sql)).toEqual(schemaSQLParser(sql, {}));
   });
 
   it('re-exports the StatementType enum values', () => {
@@ -89,6 +119,9 @@ describe('public entry surface', () => {
       alterTableAddUnique: 'alter.table.add.unique',
       alterTableAddPrimaryKey: 'alter.table.add.primaryKey',
       alterTableAddForeignKey: 'alter.table.add.foreignKey',
+      alterTableAddDefault: 'alter.table.add.default',
+      alterTableAlterColumnAutoIncrement:
+        'alter.table.alter.column.autoIncrement',
       commentOnTable: 'comment.on.table',
       commentOnColumn: 'comment.on.column',
     });
@@ -96,6 +129,16 @@ describe('public entry surface', () => {
 
   it('re-exports the SortType enum values', () => {
     expect(SortType).toEqual({ asc: 'ASC', desc: 'DESC' });
+  });
+
+  it('re-exports the referential actions as their SQL spelling', () => {
+    expect(ReferentialAction).toEqual({
+      noAction: 'NO ACTION',
+      restrict: 'RESTRICT',
+      cascade: 'CASCADE',
+      setNull: 'SET NULL',
+      setDefault: 'SET DEFAULT',
+    });
   });
 
   it('produces statement types that all belong to StatementType', () => {
@@ -150,6 +193,26 @@ describe('data/sakila.sql', () => {
     expect(tables.flatMap(table => table.foreignKeys)).toHaveLength(22);
   });
 
+  it('keeps the referential actions of every foreign key', () => {
+    const foreignKeys = tables.flatMap(table => table.foreignKeys);
+
+    expect(
+      foreignKeys.filter(
+        ({ onDelete }) => onDelete === ReferentialAction.restrict
+      )
+    ).toHaveLength(21);
+    expect(
+      foreignKeys.filter(
+        ({ onDelete }) => onDelete === ReferentialAction.setNull
+      )
+    ).toHaveLength(1);
+    expect(
+      foreignKeys.every(
+        ({ onUpdate }) => onUpdate === ReferentialAction.cascade
+      )
+    ).toBe(true);
+  });
+
   it('keeps what the constraint items declare', () => {
     expect(
       table('staff')?.columns.find(column => column.name === 'password')
@@ -168,5 +231,40 @@ describe('data/sakila.sql', () => {
         { name: 'customer_id', sort: SortType.asc },
       ],
     });
+  });
+
+  // Read as plain SMALLINT, TINYINT and MEDIUMINT, they went back out signed.
+  it('keeps UNSIGNED in the type of the 36 columns that declare it', () => {
+    const unsigned = tables
+      .flatMap(table => table.columns)
+      .map(column => column.dataType)
+      .filter(dataType => dataType.endsWith(' UNSIGNED'));
+
+    expect(unsigned).toHaveLength(36);
+    expect(new Set(unsigned)).toEqual(
+      new Set(['SMALLINT UNSIGNED', 'TINYINT UNSIGNED', 'MEDIUMINT UNSIGNED'])
+    );
+    expect(
+      table('film')?.columns.find(column => column.name === 'film_id')
+    ).toMatchObject({
+      dataType: 'SMALLINT UNSIGNED',
+      autoIncrement: true,
+      nullable: false,
+    });
+  });
+
+  // Without their quotes the values went back out as ENUM(G,PG,PG-13,...),
+  // which no MySQL accepts.
+  it('keeps the quotes of the ENUM and SET values', () => {
+    const film = table('film')?.columns ?? [];
+
+    expect(film.find(column => column.name === 'rating')?.dataType).toBe(
+      "ENUM('G','PG','PG-13','R','NC-17')"
+    );
+    expect(
+      film.find(column => column.name === 'special_features')?.dataType
+    ).toBe(
+      "SET('Trailers','Commentaries','Deleted Scenes','Behind the Scenes')"
+    );
   });
 });

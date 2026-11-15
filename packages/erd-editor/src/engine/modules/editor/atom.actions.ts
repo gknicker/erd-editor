@@ -7,23 +7,35 @@ import {
   schemaV3Parser,
 } from '@dineug/erd-editor-schema';
 import { createAction } from '@dineug/r-html';
-import { isNil, isString, noop } from 'es-toolkit';
+import { isNil, isPlainObject, isString, noop } from 'es-toolkit';
 import { isEmpty, round } from 'es-toolkit/compat';
 
-import { CanvasType } from '@/constants/schema';
+import { CanvasType, Show } from '@/constants/schema';
 import {
   getOpeningOrigin,
   hasViewport,
+  landLoadedSettings,
+  rememberCanvasType,
 } from '@/engine/modules/settings/atom.actions';
+import { endScreenBaseline } from '@/engine/modules/settings/screenBaseline';
+import { settleDocument } from '@/engine/settle';
 import { RootState } from '@/engine/state';
 import { Tag } from '@/engine/tag';
 import { toScenePoint } from '@/konva/scene/viewport';
+import { arrayHas } from '@/utils/arrayHas';
 import { bHas } from '@/utils/bit';
 import { hasCanvasType } from '@/utils/validation';
 
 import { ActionMap, ActionType, ReducerType } from './actions';
 import { FocusType, MoveKey, SelectType } from './state';
 import { arrowDown, arrowLeft, arrowRight, arrowUp } from './utils/focus';
+import {
+  getColumnFocusTypes,
+  getTableFocusTypes,
+  keepFocusShown,
+  toShownFocusType,
+} from './utils/nameView';
+import { releaseHidden } from './utils/releaseHidden';
 import {
   appendSelectColumns,
   appendSelectRangeColumns,
@@ -41,8 +53,12 @@ export const changeHasHistoryAction = createAction<
 
 const changeHasHistory: ReducerType<typeof ActionType.changeHasHistory> = (
   { editor },
-  { payload: { hasRedo, hasUndo } }
+  { payload: { hasRedo, hasUndo, sheet } }
 ) => {
+  if (sheet) {
+    editor.dictionaryHistory[sheet] = { hasRedo, hasUndo };
+    return;
+  }
   editor.hasRedo = hasRedo;
   editor.hasUndo = hasUndo;
 };
@@ -54,6 +70,7 @@ export const selectAllAction = createAction<
 const selectAll: ReducerType<typeof ActionType.selectAll> = ({
   editor,
   doc,
+  settings,
 }) => {
   const tableSelectedMap = doc.tableIds.reduce<Record<string, SelectType>>(
     (acc, id) => {
@@ -62,7 +79,9 @@ const selectAll: ReducerType<typeof ActionType.selectAll> = ({
     },
     {}
   );
-  const memoSelectedMap = doc.memoIds.reduce<Record<string, SelectType>>(
+  // Hidden memos take no press, so select all leaves them out too.
+  const memoIds = bHas(settings.show, Show.hideMemo) ? [] : doc.memoIds;
+  const memoSelectedMap = memoIds.reduce<Record<string, SelectType>>(
     (acc, id) => {
       acc[id] = SelectType.memo;
       return acc;
@@ -92,11 +111,34 @@ export const selectAction = createAction<ActionMap[typeof ActionType.select]>(
   ActionType.select
 );
 
+/** The document list that names a live entity of each select type. */
+const SELECT_LISTS = {
+  [SelectType.table]: 'tableIds',
+  [SelectType.memo]: 'memoIds',
+  [SelectType.tableGroup]: 'tableGroupIds',
+} as const satisfies Record<SelectType, keyof RootState['doc']>;
+
+/**
+ * Selects only the ids the document lists for their type, never the collections, which keep removed
+ * entities: a select behind an add the readonly filter dropped then leaves nothing selected. Each
+ * list becomes one set per call, so a marquee naming every entity stays linear.
+ */
 const select: ReducerType<typeof ActionType.select> = (
-  { editor },
+  { doc, editor },
   { payload }
 ) => {
-  Object.assign(editor.selectedMap, payload);
+  const listed = new Map<SelectType, (id: string) => boolean>();
+
+  for (const [id, type] of Object.entries(payload)) {
+    let isListed = listed.get(type);
+    if (!isListed) {
+      isListed = arrayHas(doc[SELECT_LISTS[type]]);
+      listed.set(type, isListed);
+    }
+    if (isListed(id)) {
+      editor.selectedMap[id] = type;
+    }
+  }
 };
 
 export const changeViewportAction = createAction<
@@ -117,6 +159,8 @@ const changeViewport: ReducerType<typeof ActionType.changeViewport> = (
 
   if (state.editor.scrollPullPending) {
     pullScrollIntoRange(state);
+  } else if (hasViewport(state.editor.viewport)) {
+    state.editor.originShown = true;
   }
 };
 
@@ -124,12 +168,38 @@ export const clearAction = createAction<ActionMap[typeof ActionType.clear]>(
   ActionType.clear
 );
 
-const clear: ReducerType<typeof ActionType.clear> = state => {
+/** Whether a clear or a load carries the flag that keeps the dictionaries. */
+export const keepsDictionaries = (payload: unknown): boolean =>
+  isPlainObject(payload) && payload.keepDictionaries === true;
+
+/**
+ * Hands the store's words, terms and domains, and their own id lists, to the
+ * document that replaces it, so a membership set built on a list still holds.
+ */
+function keepDictionaries(
+  state: RootState,
+  { doc, collections }: Pick<RootState, 'doc' | 'collections'>
+) {
+  doc.wordIds = state.doc.wordIds;
+  doc.termIds = state.doc.termIds;
+  doc.domainIds = state.doc.domainIds;
+  collections.wordEntities = state.collections.wordEntities;
+  collections.termEntities = state.collections.termEntities;
+  collections.domainEntities = state.collections.domainEntities;
+}
+
+const clear: ReducerType<typeof ActionType.clear> = (state, { payload }) => {
   const { doc, collections } = schemaV3Parser({});
+  if (keepsDictionaries(payload)) {
+    keepDictionaries(state, { doc, collections });
+  }
   state.doc = doc;
   state.collections = collections;
   state.editor.scrollPullPending = false;
   clearViews(state.editor);
+  // A draw from the document held before would add a relationship from its
+  // tombstone; the editors stay open for whoever types in them.
+  state.editor.drawRelationship = null;
 };
 
 /**
@@ -142,6 +212,7 @@ function pullScrollIntoRange(state: RootState) {
 
   if (!hasViewport(editor.viewport)) {
     editor.scrollPullPending = true;
+    editor.originShown = false;
     return;
   }
 
@@ -150,26 +221,46 @@ function pullScrollIntoRange(state: RootState) {
   settings.originX = round(origin.x, 4);
   settings.originY = round(origin.y, 4);
   editor.scrollPullPending = false;
+  editor.originShown = true;
 }
 
 export const loadJsonAction = createAction<
   ActionMap[typeof ActionType.loadJson]
 >(ActionType.loadJson);
 
+/**
+ * Replaces the document while it is open, an import, an undo or a peer's load,
+ * the screen of every locked setting staying the reader's own. The registers
+ * stay, since the session goes on: a peer's older edit is still refused.
+ */
 const loadJson: ReducerType<typeof ActionType.loadJson> = (
   state,
-  { payload: { value } }
+  { payload, version: actionVersion, tags },
+  ctx
 ) => {
-  const { version, settings, doc, collections } = parser(value);
+  const { version, settings, doc, collections } = parser(payload.value);
   if (!hasCanvasType(settings.canvasType)) {
     settings.canvasType = CanvasType.ERD;
   }
+  if (keepsDictionaries(payload)) {
+    keepDictionaries(state, { doc, collections });
+  }
 
-  Object.assign(state.settings, settings);
+  rememberCanvasType(state);
+  landLoadedSettings(
+    state,
+    settings,
+    actionVersion ?? ctx.clock.getVersion(),
+    tags
+  );
   state.version = version;
   state.doc = doc;
   state.collections = collections;
+  rememberCanvasType(state);
   clearViews(state.editor);
+  releaseHidden(state);
+  keepFocusShown(state);
+  settleDocument(state, ctx);
   pullScrollIntoRange(state);
 };
 
@@ -177,32 +268,63 @@ export const initialClearAction = createAction<
   ActionMap[typeof ActionType.initialClear]
 >(ActionType.initialClear);
 
+/**
+ * Ends the relationship draw and closes the memo, group name and cell editors
+ * open over the document held before, whose targets the next one may lack or
+ * keep only as a tombstone, which a draw would still start a relationship from.
+ */
+function closeEdits(editor: RootState['editor']) {
+  editor.drawRelationship = null;
+  editor.editMemoId = null;
+  editor.editTableGroupId = null;
+  if (editor.focusTable) editor.focusTable.edit = false;
+}
+
+/**
+ * Empties the store ahead of the document a reseed or an initial value opens,
+ * so no view or edit of the one before outlives the load, even of a text that
+ * the load after it cannot read.
+ */
 const initialClear: ReducerType<typeof ActionType.initialClear> = state => {
   const { doc, collections } = schemaV3Parser({});
   state.doc = doc;
   state.collections = collections;
   state.editor.scrollPullPending = false;
   clearViews(state.editor);
+  closeEdits(state.editor);
 };
 
 export const initialLoadJsonAction = createAction<
   ActionMap[typeof ActionType.initialLoadJson]
 >(ActionType.initialLoadJson);
 
+/**
+ * Opens a document: the file's settings, and no register or screen baseline
+ * of the document held before, whose versions would refuse the edits of peers
+ * that opened the file afresh. A store already sharing asks its peers again.
+ */
 const initialLoadJson: ReducerType<typeof ActionType.initialLoadJson> = (
   state,
-  { payload: { value } }
+  { payload: { value } },
+  ctx
 ) => {
   const { version, settings, doc, collections } = parser(value);
   if (!hasCanvasType(settings.canvasType)) {
     settings.canvasType = CanvasType.ERD;
   }
 
+  rememberCanvasType(state);
   Object.assign(state.settings, settings);
   state.version = version;
   state.doc = doc;
   state.collections = collections;
+  state.lww = {};
+  state.editor.screenBaseline = null;
+  rememberCanvasType(state);
   clearViews(state.editor);
+  releaseHidden(state);
+  keepFocusShown(state);
+  settleDocument(state, ctx);
   pullScrollIntoRange(state);
 };
 
@@ -210,14 +332,29 @@ export const focusTableAction = createAction<
   ActionMap[typeof ActionType.focusTable]
 >(ActionType.focusTable);
 
+/**
+ * The header cell a focus asked for lands on: its own, or the cell of its pair
+ * while the name view hides its own, so a caller naming the name reaches the
+ * logical name the logical view draws in its place.
+ */
+const toShownTableFocus = (
+  settings: RootState['settings'],
+  focusType: FocusType
+): FocusType =>
+  toShownFocusType(settings, getTableFocusTypes(settings), focusType) ??
+  focusType;
+
 const focusTable: ReducerType<typeof ActionType.focusTable> = (
-  { editor, collections },
+  { editor, collections, settings },
   { payload }
 ) => {
   const collection = query(collections).collection('tableEntities');
 
   if (editor.focusTable?.tableId === payload.tableId && payload.focusType) {
-    editor.focusTable.focusType = payload.focusType;
+    editor.focusTable.focusType = toShownTableFocus(
+      settings,
+      payload.focusType
+    );
     editor.focusTable.columnId = null;
     editor.focusTable.prevSelectColumnId = null;
     editor.focusTable.selectColumnIds = [];
@@ -227,7 +364,7 @@ const focusTable: ReducerType<typeof ActionType.focusTable> = (
 
     editor.focusTable = {
       tableId: table.id,
-      focusType: payload.focusType,
+      focusType: toShownTableFocus(settings, payload.focusType),
       columnId: null,
       prevSelectColumnId: null,
       selectColumnIds: [],
@@ -239,7 +376,7 @@ const focusTable: ReducerType<typeof ActionType.focusTable> = (
 
     editor.focusTable = {
       tableId: table.id,
-      focusType: FocusType.tableName,
+      focusType: getTableFocusTypes(settings)[0],
       columnId: null,
       prevSelectColumnId: null,
       selectColumnIds: [],
@@ -253,10 +390,18 @@ export const focusColumnAction = createAction<
 >(ActionType.focusColumn);
 
 const focusColumn: ReducerType<typeof ActionType.focusColumn> = (
-  { editor, collections },
+  { editor, collections, settings },
   { payload }
 ) => {
   const collection = query(collections).collection('tableEntities');
+  // A caller naming the name or the type reaches the logical name or the
+  // domain the logical view draws in their place, and the other way round.
+  const focusType =
+    toShownFocusType(
+      settings,
+      getColumnFocusTypes(settings),
+      payload.focusType
+    ) ?? payload.focusType;
 
   if (editor.focusTable?.tableId === payload.tableId) {
     const table = collection.selectById(payload.tableId);
@@ -264,7 +409,7 @@ const focusColumn: ReducerType<typeof ActionType.focusColumn> = (
 
     const focusTable = editor.focusTable;
     focusTable.columnId = payload.columnId;
-    focusTable.focusType = payload.focusType;
+    focusTable.focusType = focusType;
 
     if (payload.$mod && payload.shiftKey) {
       focusTable.selectColumnIds = appendSelectRangeColumns(
@@ -295,7 +440,7 @@ const focusColumn: ReducerType<typeof ActionType.focusColumn> = (
 
     editor.focusTable = {
       tableId: table.id,
-      focusType: payload.focusType,
+      focusType,
       columnId: payload.columnId,
       prevSelectColumnId: payload.columnId,
       selectColumnIds: [payload.columnId],
@@ -390,6 +535,27 @@ const editMemoEnd: ReducerType<typeof ActionType.editMemoEnd> = ({
   editor.editMemoId = null;
 };
 
+export const editTableGroupAction = createAction<
+  ActionMap[typeof ActionType.editTableGroup]
+>(ActionType.editTableGroup);
+
+const editTableGroup: ReducerType<typeof ActionType.editTableGroup> = (
+  { editor },
+  { payload: { id } }
+) => {
+  editor.editTableGroupId = id;
+};
+
+export const editTableGroupEndAction = createAction<
+  ActionMap[typeof ActionType.editTableGroupEnd]
+>(ActionType.editTableGroupEnd);
+
+const editTableGroupEnd: ReducerType<typeof ActionType.editTableGroupEnd> = ({
+  editor,
+}) => {
+  editor.editTableGroupId = null;
+};
+
 export const scrollMemoAction = createAction<
   ActionMap[typeof ActionType.scrollMemo]
 >(ActionType.scrollMemo);
@@ -438,6 +604,7 @@ const drawStartRelationship: ReducerType<
     start: null,
     end: { x: 0, y: 0 },
   };
+  editor.drawTableGroup = false;
 };
 
 export const drawStartAddRelationshipAction = createAction<
@@ -539,9 +706,9 @@ export const changeHandToolAction = createAction<
 >(ActionType.changeHandTool);
 
 /**
- * The tool a press on the canvas is read as. Drawing a relationship is a third
- * thing the same press can mean, so taking the hand up ends a draw that was
- * still running rather than leaving two modes armed at once.
+ * The tool a press on the canvas is read as. Drawing a relationship or a table
+ * group is another thing the same press can mean, so taking the hand up ends a
+ * draw that was still running rather than leaving two modes armed at once.
  */
 const changeHandTool: ReducerType<typeof ActionType.changeHandTool> = (
   { editor },
@@ -549,6 +716,25 @@ const changeHandTool: ReducerType<typeof ActionType.changeHandTool> = (
 ) => {
   editor.handTool = value;
   if (value) {
+    editor.drawRelationship = null;
+    editor.drawTableGroup = false;
+  }
+};
+
+export const changeDrawTableGroupAction = createAction<
+  ActionMap[typeof ActionType.changeDrawTableGroup]
+>(ActionType.changeDrawTableGroup);
+
+/**
+ * Arms or ends the table group draw mode. Armed, it puts the hand down and ends
+ * a relationship draw, so the press it waits for means one thing alone.
+ */
+const changeDrawTableGroup: ReducerType<
+  typeof ActionType.changeDrawTableGroup
+> = ({ editor }, { payload: { value } }) => {
+  editor.drawTableGroup = value;
+  if (value) {
+    editor.handTool = false;
     editor.drawRelationship = null;
   }
 };
@@ -789,80 +975,6 @@ const dragSelectRect: ReducerType<typeof ActionType.dragSelectRect> = (
   editor.dragSelect = rect;
 };
 
-export const validationIdsAction = createAction<
-  ActionMap[typeof ActionType.validationIds]
->(ActionType.validationIds);
-
-const validationIds: ReducerType<typeof ActionType.validationIds> = ({
-  doc,
-  collections,
-}) => {
-  const tableCollection = query(collections).collection('tableEntities');
-  const tableColumnCollection = query(collections).collection(
-    'tableColumnEntities'
-  );
-  const indexCollection = query(collections).collection('indexEntities');
-  const indexColumnCollection = query(collections).collection(
-    'indexColumnEntities'
-  );
-  const relationshipCollection = query(collections).collection(
-    'relationshipEntities'
-  );
-  const memoCollection = query(collections).collection('memoEntities');
-
-  const invalidTableIds = doc.tableIds.filter(
-    id => !tableCollection.selectById(id)
-  );
-  const invalidRelationshipIds = doc.relationshipIds.filter(
-    id => !relationshipCollection.selectById(id)
-  );
-  const invalidIndexIds = doc.indexIds.filter(
-    id => !indexCollection.selectById(id)
-  );
-  const invalidMemoIds = doc.memoIds.filter(
-    id => !memoCollection.selectById(id)
-  );
-
-  doc.tableIds = doc.tableIds.filter(id => !invalidTableIds.includes(id));
-  doc.relationshipIds = doc.relationshipIds.filter(
-    id => !invalidRelationshipIds.includes(id)
-  );
-  doc.indexIds = doc.indexIds.filter(id => !invalidIndexIds.includes(id));
-  doc.memoIds = doc.memoIds.filter(id => !invalidMemoIds.includes(id));
-
-  tableCollection.selectAll().forEach(table => {
-    const invalidColumnIds = table.columnIds.filter(
-      id => !tableColumnCollection.selectById(id)
-    );
-    const invalidSeqColumnIds = table.seqColumnIds.filter(
-      id => !tableColumnCollection.selectById(id)
-    );
-
-    table.columnIds = table.columnIds.filter(
-      id => !invalidColumnIds.includes(id)
-    );
-    table.seqColumnIds = table.seqColumnIds.filter(
-      id => !invalidSeqColumnIds.includes(id)
-    );
-  });
-
-  indexCollection.selectAll().forEach(index => {
-    const invalidIndexColumnIds = index.indexColumnIds.filter(
-      id => !indexColumnCollection.selectById(id)
-    );
-    const invalidSeqIndexColumnIds = index.seqIndexColumnIds.filter(
-      id => !indexColumnCollection.selectById(id)
-    );
-
-    index.indexColumnIds = index.indexColumnIds.filter(
-      id => !invalidIndexColumnIds.includes(id)
-    );
-    index.seqIndexColumnIds = index.seqIndexColumnIds.filter(
-      id => !invalidSeqIndexColumnIds.includes(id)
-    );
-  });
-};
-
 export const getLWWAction = createAction<ActionMap[typeof ActionType.getLWW]>(
   ActionType.getLWW
 );
@@ -889,6 +1001,22 @@ const mergeLWW: ReducerType<typeof ActionType.mergeLWW> = (
   );
 };
 
+export const endScreenSettingsAction = createAction<
+  ActionMap[typeof ActionType.endScreenSettings]
+>(ActionType.endScreenSettings);
+
+/**
+ * Drops the baseline of each unit named, the screen standing for the
+ * document's value again: what a readonly editor turning writable sends once
+ * its screen has taken that value back.
+ */
+const endScreenSettings: ReducerType<typeof ActionType.endScreenSettings> = (
+  { editor },
+  { payload: { units } }
+) => {
+  endScreenBaseline(editor, ...units);
+};
+
 export const editorReducers = {
   [ActionType.changeHasHistory]: changeHasHistory,
   [ActionType.selectAll]: selectAll,
@@ -907,6 +1035,8 @@ export const editorReducers = {
   [ActionType.editTableEnd]: editTableEnd,
   [ActionType.editMemo]: editMemo,
   [ActionType.editMemoEnd]: editMemoEnd,
+  [ActionType.editTableGroup]: editTableGroup,
+  [ActionType.editTableGroupEnd]: editTableGroupEnd,
   [ActionType.scrollMemo]: scrollMemo,
   [ActionType.selectAllColumn]: selectAllColumn,
   [ActionType.drawStartRelationship]: drawStartRelationship,
@@ -917,6 +1047,7 @@ export const editorReducers = {
   [ActionType.hoverRelationshipMap]: hoverRelationshipMap,
   [ActionType.changeOpenMap]: changeOpenMap,
   [ActionType.changeHandTool]: changeHandTool,
+  [ActionType.changeDrawTableGroup]: changeDrawTableGroup,
   [ActionType.changeZenMode]: changeZenMode,
   [ActionType.dragstartColumn]: dragstartColumn,
   [ActionType.dragendColumn]: dragendColumn,
@@ -925,9 +1056,9 @@ export const editorReducers = {
   [ActionType.sharedSelectionTracker]: sharedSelectionTracker,
   [ActionType.sharedDragSelectTracker]: sharedDragSelectTracker,
   [ActionType.dragSelectRect]: dragSelectRect,
-  [ActionType.validationIds]: validationIds,
   [ActionType.getLWW]: getLWW,
   [ActionType.mergeLWW]: mergeLWW,
+  [ActionType.endScreenSettings]: endScreenSettings,
   ...viewReducers,
 };
 
@@ -949,6 +1080,8 @@ export const actions = {
   editTableEndAction,
   editMemoAction,
   editMemoEndAction,
+  editTableGroupAction,
+  editTableGroupEndAction,
   scrollMemoAction,
   selectAllColumnAction,
   drawStartRelationshipAction,
@@ -959,6 +1092,7 @@ export const actions = {
   hoverRelationshipMapAction,
   changeOpenMapAction,
   changeHandToolAction,
+  changeDrawTableGroupAction,
   changeZenModeAction,
   dragstartColumnAction,
   dragendColumnAction,
@@ -967,8 +1101,8 @@ export const actions = {
   sharedSelectionTrackerAction,
   sharedDragSelectTrackerAction,
   dragSelectRectAction,
-  validationIdsAction,
   getLWWAction,
   mergeLWWAction,
+  endScreenSettingsAction,
   ...viewActions,
 };

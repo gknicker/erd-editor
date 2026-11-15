@@ -28,7 +28,9 @@ describe.each([
   'engine/index.ts',
   'engine/store.ts',
   'engine/rx-store.ts',
-  'engine/shared-store.ts',
+  // engine/shared-store.ts is left out: it dispatches the load and screen
+  // generators itself, and only the element and peer.js build one, both of
+  // which reach the importers through their own import actions anyway.
 ])('%s', entry => {
   it('evaluates neither the creator registry nor a generator action', async () => {
     const files = await reach(entry);

@@ -5,7 +5,6 @@ import {
   MEMO_MIN_HEIGHT,
   MEMO_MIN_WIDTH,
   OrderType,
-  Show,
 } from '@dineug/erd-editor/peer.js';
 import { compositionActionsFlat } from '@dineug/r-html';
 import { afterAll, describe, expect, it } from 'vite-plus/test';
@@ -73,6 +72,32 @@ describe('the generators the tools add read the state defensively', () => {
   });
 });
 
+describe('the color tools', () => {
+  it('remove the color of a table and of a memo given an empty string', () => {
+    const peer = createSeededPeer();
+    const colorOf = () => [
+      peer.state.collections.tableEntities[SEED.users].ui.color,
+      peer.state.collections.memoEntities[SEED.memo].ui.color,
+    ];
+
+    runTool(peer, 'erd_change_table_color', {
+      tableId: SEED.users,
+      color: '#ff8800',
+    });
+    runTool(peer, 'erd_change_memo_color', {
+      memoId: SEED.memo,
+      color: '#336699',
+    });
+    expect(colorOf()).toEqual(['#ff8800', '#336699']);
+
+    runTool(peer, 'erd_change_table_color', { tableId: SEED.users, color: '' });
+    runTool(peer, 'erd_change_memo_color', { memoId: SEED.memo, color: '' });
+
+    expect(colorOf()).toEqual(['', '']);
+    peer.destroy();
+  });
+});
+
 describe('the memo and index tools read the state defensively', () => {
   it('recolors a memo that is gone from an empty previous color', () => {
     const [action] = emitOnEmpty('erd_change_memo_color', {
@@ -113,12 +138,6 @@ describe('the set tools skip a value that already holds', () => {
     ]).map(({ type }) => type);
 
   it.each([
-    [
-      'erd_set_show',
-      { show: Show.columnUnique, value: true },
-      { show: Show.columnUnique, value: false },
-      'settings.changeShow',
-    ],
     [
       'erd_set_index_unique',
       { indexId: SEED.index, value: true },
@@ -179,31 +198,6 @@ describe('cross argument rules', () => {
     ).toBe(
       'targetIndexColumnId must name a different index column than indexColumnId'
     );
-  });
-
-  it('refuses a column part moved onto itself', () => {
-    expect(
-      refused('erd_set_column_order', {
-        columnType: 'columnName',
-        targetColumnType: 'columnName',
-      })
-    ).toBe(
-      'targetColumnType must name a different column part than columnType'
-    );
-  });
-
-  it('takes a comment width of -1 or inside the range, and nothing else', () => {
-    for (const value of [-2, 59, 201]) {
-      expect(refused('erd_set_max_width_comment', { value })).toBe(
-        'value must be -1 for no limit, or from 60 to 200'
-      );
-    }
-    for (const value of [-1, 60, 200]) {
-      const run = runTool(peer, 'erd_set_max_width_comment', { value });
-
-      expect(run.batches, String(value)).toBe(1);
-      expect(peer.state.settings.maxWidthComment).toBe(value);
-    }
   });
 
   it('refuses a memo smaller than the resize handles allow', () => {

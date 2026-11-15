@@ -1,8 +1,20 @@
 import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
 
 import { createTestAppContext } from '@/__test-utils__';
-import { CanvasType, Direction, Show } from '@/constants/schema';
 import {
+  CanvasType,
+  Direction,
+  LockSettingType,
+  NameViewMode,
+  Show,
+} from '@/constants/schema';
+import {
+  addDictionaryAction,
+  removeDictionaryAction,
+  updateDictionaryAction,
+} from '@/engine/modules/dictionary/atom.actions';
+import {
+  CenterStep,
   ShowMode,
   ViewKind,
   VisualizationMode,
@@ -16,19 +28,34 @@ import {
   viewScrollToAction,
   viewSetCentersAction,
   viewSetLayoutAction,
+  viewStepCentersAction,
   viewStreamZoomLevelAction,
 } from '@/engine/modules/editor/view.actions';
-import { removeRelationshipAction } from '@/engine/modules/relationship/atom.actions';
+import {
+  addIndexAction,
+  changeIndexUniqueAction,
+} from '@/engine/modules/index/atom.actions';
+import { addIndexColumnAction } from '@/engine/modules/index-column/atom.actions';
+import {
+  addRelationshipAction,
+  changeRelationshipColumnsAction,
+  removeRelationshipAction,
+} from '@/engine/modules/relationship/atom.actions';
 import { hooks } from '@/engine/modules/relationship/hooks';
 import {
   changeCanvasTypeAction,
+  changeLockSettingsAction,
+  changeNameViewModeAction,
   changeShowAction,
 } from '@/engine/modules/settings/atom.actions';
 import {
   addTableAction,
+  changeTableLogicalNameAction,
   moveTableAction,
 } from '@/engine/modules/table/atom.actions';
 import {
+  changeColumnDomainAction,
+  changeColumnLogicalNameAction,
   changeColumnNameAction,
   changeColumnPrimaryKeyAction,
 } from '@/engine/modules/table-column/atom.actions';
@@ -152,6 +179,7 @@ describe('the view sort hook registration', () => {
     const [viewPattern, effect] = hooks[3];
 
     expect(typeof effect).toBe('function');
+    expect(documentPattern.map(String)).toContain('relationship.changeColumns');
     expect(viewPattern.map(String)).toEqual([
       ...documentPattern.map(String),
       'column.changePrimaryKey',
@@ -165,6 +193,7 @@ describe('the view sort hook registration', () => {
       'editor.viewSetLayout',
       'editor.viewChangeShowMode',
       'editor.viewSetCenters',
+      'editor.viewStepCenters',
     ]);
   });
 });
@@ -196,6 +225,21 @@ describe('the view sort hook on the view actions', () => {
     store.dispatchSync(action());
     await settle();
 
+    expect(sorts('flow')).toBe(1);
+    expect(sorts('document')).toBe(0);
+  });
+
+  it('runs one view sort and no document sort for a step back to the centers it stood on', async () => {
+    const store = createScene();
+    await openFocused(store);
+    store.dispatchSync(viewSetCentersAction({ tableIds: ['t2'] }));
+    await settle();
+    clearSorts();
+
+    store.dispatchSync(viewStepCentersAction({ step: CenterStep.previous }));
+    await settle();
+
+    expect(store.state.editor.views.flow!.centerIds).toEqual(['t1']);
     expect(sorts('flow')).toBe(1);
     expect(sorts('document')).toBe(0);
   });
@@ -374,6 +418,175 @@ describe('the view sort hook on the document actions', () => {
     expect(sorts('flow')).toBe(0);
   });
 
+  it('sorts no view for a logical name or a domain link in the physical view, which draws neither', async () => {
+    const store = createScene();
+    await openFocused(store);
+
+    store.dispatchSync(
+      shared(
+        changeColumnLogicalNameAction({ id: 'c-t1', tableId: 't1', value: 'y' })
+      ),
+      shared(changeTableLogicalNameAction({ id: 't1', value: 'Member' })),
+      shared(
+        changeColumnDomainAction({ id: 'c-t1', tableId: 't1', value: 'd1' })
+      )
+    );
+    await settle();
+
+    expect(sorts('flow')).toBe(0);
+    expect(sorts('document')).toBe(1);
+  });
+
+  it('sorts the view for a switch the store shows and an unlock of the name view, which pick the cells it draws', async () => {
+    const store = createScene();
+    await openFocused(store);
+
+    store.dispatchSync(
+      shared(
+        changeNameViewModeAction({
+          value: NameViewMode.both,
+          shared: true,
+          editorId: 'another',
+        })
+      )
+    );
+    await settle();
+    expect(sorts('flow')).toBe(1);
+    expect(sorts('document')).toBe(1);
+
+    clearSorts();
+    store.dispatchSync(
+      shared(
+        changeLockSettingsAction({
+          lockSettingType: LockSettingType.unlockNameViewMode,
+          value: false,
+          values: { nameViewMode: NameViewMode.logical },
+        })
+      )
+    );
+    await settle();
+    expect(sorts('flow')).toBe(1);
+
+    // Another reader's own switch, which the store drops, sorts nothing.
+    clearSorts();
+    store.dispatchSync(
+      shared(
+        changeNameViewModeAction({
+          value: NameViewMode.physical,
+          shared: false,
+          editorId: 'another',
+        })
+      )
+    );
+    await settle();
+    expect(sorts('flow')).toBe(0);
+    expect(sorts('document')).toBe(0);
+  });
+
+  it('sorts the view for a logical name or a domain link on a table it shows outside the physical view', async () => {
+    const store = createScene();
+    store.dispatchSync(
+      changeNameViewModeAction({
+        value: NameViewMode.logical,
+        shared: true,
+        editorId: store.state.editor.id,
+      })
+    );
+    await openFocused(store);
+
+    store.dispatchSync(
+      shared(
+        changeColumnLogicalNameAction({ id: 'c-t3', tableId: 't3', value: 'y' })
+      ),
+      shared(changeTableLogicalNameAction({ id: 't3', value: 'Order' }))
+    );
+    await settle();
+    expect(sorts('flow')).toBe(0);
+
+    store.dispatchSync(
+      shared(changeTableLogicalNameAction({ id: 't1', value: 'Member' }))
+    );
+    await settle();
+    expect(sorts('flow')).toBe(1);
+
+    clearSorts();
+    store.dispatchSync(
+      shared(
+        changeColumnDomainAction({ id: 'c-t2', tableId: 't2', value: 'd1' })
+      )
+    );
+    await settle();
+    expect(sorts('flow')).toBe(1);
+  });
+
+  it('lays no view out for a dictionary write in the physical view, and the document alone for a domain renamed', async () => {
+    const store = createScene();
+    await openFocused(store);
+
+    store.dispatchSync(
+      shared(
+        addDictionaryAction({ kind: 'word', id: 'w1', values: { name: 'w' } })
+      ),
+      shared(
+        updateDictionaryAction({
+          kind: 'domain',
+          id: 'd1',
+          values: { dataType: 'INT' },
+        })
+      )
+    );
+    await settle();
+    expect(sorts('flow')).toBe(0);
+    expect(sorts('document')).toBe(0);
+
+    store.dispatchSync(
+      shared(
+        updateDictionaryAction({
+          kind: 'domain',
+          id: 'd1',
+          values: { name: 'Amount' },
+        })
+      ),
+      shared(removeDictionaryAction({ kind: 'domain', id: 'd1' }))
+    );
+    await settle();
+    expect(sorts('flow')).toBe(0);
+    expect(sorts('document')).toBe(1);
+  });
+
+  it('lays the view out for a domain renamed in the view of both, and still for no word', async () => {
+    const store = createScene();
+    store.dispatchSync(
+      changeNameViewModeAction({
+        value: NameViewMode.both,
+        shared: true,
+        editorId: store.state.editor.id,
+      })
+    );
+    await openFocused(store);
+
+    store.dispatchSync(
+      shared(
+        addDictionaryAction({ kind: 'word', id: 'w1', values: { name: 'w' } })
+      )
+    );
+    await settle();
+    expect(sorts('flow')).toBe(0);
+
+    store.dispatchSync(
+      shared(
+        updateDictionaryAction({
+          kind: 'domain',
+          id: 'd1',
+          values: { name: 'Amount' },
+        })
+      )
+    );
+    await settle();
+    expect(sorts('flow')).toBe(1);
+    expect(sorts('document')).toBe(1);
+  });
+
   it('does not sort the view for a table added outside it', async () => {
     const store = createScene();
     await openFocused(store);
@@ -393,6 +606,106 @@ describe('the view sort hook on the document actions', () => {
 
     store.dispatchSync(
       shared(changeShowAction({ show: Show.tableComment, value: false }))
+    );
+    await settle();
+
+    expect(sorts('flow')).toBe(0);
+    expect(sorts('document')).toBe(1);
+  });
+
+  it.each([
+    [0, 0],
+    [Show.columnAlternateKey, 1],
+  ])(
+    'does not sort the view for an alternate key, whose mark a view never draws (show %i)',
+    async (show, documentSorts) => {
+      const store = createScene();
+      await openFocused(store);
+      store.state.settings.show = show;
+
+      store.dispatchSync(
+        shared(addIndexAction({ id: 'i1', tableId: 't1' })),
+        shared(
+          addIndexColumnAction({
+            id: 'ic1',
+            indexId: 'i1',
+            tableId: 't1',
+            columnId: 'c-t1',
+          })
+        ),
+        shared(
+          changeIndexUniqueAction({ id: 'i1', tableId: 't1', value: true })
+        )
+      );
+      await settle();
+
+      expect(sorts('flow')).toBe(0);
+      expect(sorts('document')).toBe(documentSorts);
+    }
+  );
+
+  /**
+   * A view on the key rows shows every column a relationship ends on, so a
+   * remap onto more columns of a shown table adds rows to its box.
+   */
+  it('sorts the view when a remap changes the key rows of a table it shows', async () => {
+    const store = createScene();
+    const { state } = store;
+    for (const id of ['t1', 't2']) {
+      state.collections.tableColumnEntities[`c-${id}-b`] = createColumn({
+        id: `c-${id}-b`,
+        tableId: id,
+        name: `c-${id}-b`,
+      });
+      state.collections.tableEntities[id].columnIds.push(`c-${id}-b`);
+    }
+    await openFocused(store);
+    const relationship = relationshipOf(store);
+    const before = getAnchors(relationship, 'flow').end.y;
+
+    store.dispatchSync(
+      shared(
+        changeRelationshipColumnsAction({
+          id: 'r12',
+          start: { tableId: 't1', columnIds: ['c-t1', 'c-t1-b'] },
+          end: { tableId: 't2', columnIds: ['c-t2', 'c-t2-b'] },
+        })
+      )
+    );
+    await settle();
+
+    expect(sorts('flow')).toBe(1);
+    expect(sorts('document')).toBe(1);
+    expect(getAnchors(relationship, 'flow').end.y).toBeGreaterThan(before);
+  });
+
+  it('does not sort the view for a remap between tables outside it', async () => {
+    const store = createScene();
+    const { state } = store;
+    state.collections.tableColumnEntities['c-t3-b'] = createColumn({
+      id: 'c-t3-b',
+      tableId: 't3',
+      name: 'c-t3-b',
+    });
+    state.collections.tableEntities.t3.columnIds.push('c-t3-b');
+    store.dispatchSync(
+      addRelationshipAction({
+        id: 'r33',
+        relationshipType: 4,
+        start: { tableId: 't3', columnIds: ['c-t3'] },
+        end: { tableId: 't3', columnIds: ['c-t3'] },
+      })
+    );
+    await openFocused(store);
+
+    store.dispatchSync(
+      shared(
+        changeRelationshipColumnsAction({
+          id: 'r33',
+          start: { tableId: 't3', columnIds: ['c-t3'] },
+          end: { tableId: 't3', columnIds: ['c-t3-b'] },
+        })
+      )
     );
     await settle();
 

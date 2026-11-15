@@ -31,12 +31,18 @@ export type BatchRun = {
   steps: BatchStep[];
   batches: number;
   historyEntries: number;
-  /** The operations whose tool the editor keeps no undo entry for. */
+  /**
+   * The operations one undo leaves in place: their tool keeps no undo entry,
+   * or they changed the document with none, as a short group move does.
+   */
   withoutUndo: number[];
 };
 
-/** What an operation's as may be, the name its $name references use. */
-export const OPERATION_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+/**
+ * What an operation's as may be, the name its $name references use. The u flag
+ * is what lets effect write the pattern into the schema tools/list shows.
+ */
+export const OPERATION_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/u;
 const REFERENCE = /^\$([A-Za-z_][A-Za-z0-9_]*)(?:\.(\d+|last))?$/;
 
 /**
@@ -175,7 +181,9 @@ function play(peer: PeerStore, operations: Checked[]): BatchRun {
     batch.createdIds.push(...run.createdIds);
     batch.batches += run.batches;
     batch.historyEntries += run.historyEntries;
-    if (!tool.undoable) batch.withoutUndo.push(at);
+    if (!tool.undoable || (run.batches && !run.historyEntries)) {
+      batch.withoutUndo.push(at);
+    }
     batch.steps.push({
       tool: tool.name,
       ...(as ? { as } : {}),
@@ -202,7 +210,7 @@ export function runBatch(peer: PeerStore, operations: unknown): BatchRun {
 
   const rehearsal = createPeerStore({ nickname: BATCH_TOOL, presence: false });
   try {
-    rehearsal.setInitialValue(peer.value);
+    rehearsal.setInitialValue(peer.runtimeValue);
     play(rehearsal, checked);
   } finally {
     rehearsal.destroy();

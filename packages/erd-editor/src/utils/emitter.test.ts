@@ -2,20 +2,26 @@ import { AnyAction, html } from '@dineug/r-html';
 import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
 
 import {
+  cancelElkPlacementAction,
   closeColorPickerAction,
   copyAction,
   dragendColumnAllAction,
+  duplicateDragCancelAction,
   duplicateDragStartAction,
   Emitter,
   mouseTrackerEndAction,
   mouseTrackerStartAction,
   openColorPickerAction,
   openDiffViewerAction,
+  openExportImageAction,
+  openFindReplaceAction,
+  openLocalePickerAction,
+  openMapColumnsAction,
   openTablePropertiesAction,
   openThemeBuilderAction,
   openToastAction,
   pasteAction,
-  schemaGCAction,
+  setLocaleOptionAction,
   setThemeOptionsAction,
   toggleSearchAction,
 } from '@/utils/emitter';
@@ -54,9 +60,9 @@ describe('Emitter', () => {
     const first = vi.fn();
     const second = vi.fn();
 
-    emitter.on({ schemaGC: first });
-    emitter.on({ schemaGC: second });
-    emitter.emit(schemaGCAction());
+    emitter.on({ toggleSearch: first });
+    emitter.on({ toggleSearch: second });
+    emitter.emit(toggleSearchAction());
 
     expect(first).toHaveBeenCalledOnce();
     expect(second).toHaveBeenCalledOnce();
@@ -64,14 +70,14 @@ describe('Emitter', () => {
 
   it('registers the same listener object only once', () => {
     const emitter = new Emitter();
-    const onSchemaGC = vi.fn();
-    const listeners = { schemaGC: onSchemaGC };
+    const onToggleSearch = vi.fn();
+    const listeners = { toggleSearch: onToggleSearch };
 
     emitter.on(listeners);
     emitter.on(listeners);
-    emitter.emit(schemaGCAction());
+    emitter.emit(toggleSearchAction());
 
-    expect(onSchemaGC).toHaveBeenCalledTimes(1);
+    expect(onToggleSearch).toHaveBeenCalledTimes(1);
   });
 
   it('ignores an action nobody listens for', () => {
@@ -88,15 +94,15 @@ describe('Emitter', () => {
 
   it('stops calling a listener after its unsubscribe is invoked', () => {
     const emitter = new Emitter();
-    const onSchemaGC = vi.fn();
+    const onToggleSearch = vi.fn();
 
-    const unsubscribe = emitter.on({ schemaGC: onSchemaGC });
-    emitter.emit(schemaGCAction());
+    const unsubscribe = emitter.on({ toggleSearch: onToggleSearch });
+    emitter.emit(toggleSearchAction());
     unsubscribe();
-    emitter.emit(schemaGCAction());
+    emitter.emit(toggleSearchAction());
     unsubscribe();
 
-    expect(onSchemaGC).toHaveBeenCalledTimes(1);
+    expect(onToggleSearch).toHaveBeenCalledTimes(1);
   });
 
   it('swallows a throwing listener and keeps notifying the others', () => {
@@ -137,13 +143,13 @@ describe('Emitter', () => {
 
   it('drops every observer on clear', () => {
     const emitter = new Emitter();
-    const onSchemaGC = vi.fn();
+    const onToggleSearch = vi.fn();
 
-    emitter.on({ schemaGC: onSchemaGC });
+    emitter.on({ toggleSearch: onToggleSearch });
     emitter.clear();
-    emitter.emit(schemaGCAction());
+    emitter.emit(toggleSearchAction());
 
-    expect(onSchemaGC).not.toHaveBeenCalled();
+    expect(onToggleSearch).not.toHaveBeenCalled();
   });
 });
 
@@ -181,11 +187,24 @@ describe('action creators', () => {
       type: 'paste',
       payload: { event: originEvent },
     });
-    expect(schemaGCAction()).toEqual({ type: 'schemaGC', payload: undefined });
     expect(toggleSearchAction()).toEqual({
       type: 'toggleSearch',
       payload: undefined,
     });
+    expect(openFindReplaceAction()).toEqual({
+      type: 'openFindReplace',
+      payload: undefined,
+    });
+    expect(openExportImageAction()).toEqual({
+      type: 'openExportImage',
+      payload: undefined,
+    });
+    expect(openMapColumnsAction({ mode: 'edit', relationshipId: 'r' })).toEqual(
+      {
+        type: 'openMapColumns',
+        payload: { mode: 'edit', relationshipId: 'r' },
+      }
+    );
     expect(openThemeBuilderAction()).toEqual({
       type: 'openThemeBuilder',
       payload: undefined,
@@ -193,6 +212,18 @@ describe('action creators', () => {
     expect(setThemeOptionsAction({ grayColor: 'slate' as any })).toEqual({
       type: 'setThemeOptions',
       payload: { grayColor: 'slate' },
+    });
+    expect(openLocalePickerAction()).toEqual({
+      type: 'openLocalePicker',
+      payload: undefined,
+    });
+    expect(setLocaleOptionAction({ locale: 'ko-KR' })).toEqual({
+      type: 'setLocaleOption',
+      payload: { locale: 'ko-KR' },
+    });
+    expect(setLocaleOptionAction({ locale: 'system' })).toEqual({
+      type: 'setLocaleOption',
+      payload: { locale: 'system' },
     });
     expect(mouseTrackerStartAction()).toEqual({
       type: 'mouseTrackerStart',
@@ -206,6 +237,10 @@ describe('action creators', () => {
       type: 'openDiffViewer',
       payload: { value: 'diff' },
     });
+    expect(cancelElkPlacementAction()).toEqual({
+      type: 'cancelElkPlacement',
+      payload: undefined,
+    });
     expect(
       duplicateDragStartAction({ tableIds: ['a'], memoIds: ['b'] })
     ).toEqual({
@@ -217,6 +252,10 @@ describe('action creators', () => {
   it('lets the duplicate drag start action be built without a payload', () => {
     expect(duplicateDragStartAction()).toEqual({
       type: 'duplicateDragStart',
+      payload: undefined,
+    });
+    expect(duplicateDragCancelAction()).toEqual({
+      type: 'duplicateDragCancel',
       payload: undefined,
     });
   });

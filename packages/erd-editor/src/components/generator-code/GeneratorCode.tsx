@@ -1,36 +1,61 @@
 import { query } from '@dineug/erd-editor-schema';
-import { FC, observable, onBeforeMount, watch } from '@dineug/r-html';
+import {
+  createRef,
+  FC,
+  nextTick,
+  observable,
+  onBeforeMount,
+  ref,
+  watch,
+} from '@dineug/r-html';
 
 import { useAppContext } from '@/components/appContext';
 import GeneratorCodeContextMenu from '@/components/generator-code/generator-code-context-menu/GeneratorCodeContextMenu';
+import GeneratorCodeOptions from '@/components/generator-code/generator-code-options/GeneratorCodeOptions';
+import { generatorCodeViewOf } from '@/components/generator-code/generatorCodeView';
+import { codeFileExtension } from '@/components/generator-code/languageSettings';
 import { loadGenerators } from '@/components/generator-code/loadGenerators';
+import { useI18n } from '@/components/localeContext';
 import CodeBlock from '@/components/primitives/code-block/CodeBlock';
 import { useContextMenuRootProvider } from '@/components/primitives/context-menu/context-menu-root/contextMenuRootContext';
-import Toast from '@/components/primitives/toast/Toast';
+import Icon from '@/components/primitives/icon/Icon';
+import { keepSpace } from '@/components/schema-sql/schema-sql-options/SchemaSQLOptions';
+import * as optionsStyles from '@/components/schema-sql/schema-sql-options/SchemaSQLOptions.styles';
+import * as styles from '@/components/schema-sql/SchemaSQL.styles';
+import { resolvePanel } from '@/components/schema-sql/schemaSQLView';
+import { reportCopy } from '@/components/toast-container/openStatusToast';
 import { LanguageToLangMap } from '@/constants/language';
 import { useUnmounted } from '@/hooks/useUnmounted';
 import { arrayHas } from '@/utils/arrayHas';
 import { copyToClipboard } from '@/utils/clipboard';
-import { openToastAction } from '@/utils/emitter';
-import { delay } from '@/utils/promise';
+import { exportCode } from '@/utils/file/exportFile';
 
-import * as styles from './GeneratorCode.styles';
-
+/**
+ * The settings the code is written from. A document edit writes it again only
+ * as the tab mounts, so the text stays the snapshot the reader is looking at.
+ */
 const hasPropName = arrayHas<string | number | symbol>([
   'language',
+  'database',
   'tableNameCase',
   'columnNameCase',
+  'bracketType',
 ]);
 
 export type GeneratorCodeProps = {
   isDarkMode: boolean;
+  /** One table's code, as Table Properties shows it, with no panel. */
   tableId?: string;
+  readonly?: boolean;
 };
 
 const GeneratorCode: FC<GeneratorCodeProps> = (props, ctx) => {
   const app = useAppContext(ctx);
+  const i18n = useI18n(ctx);
   const { addUnsubscribe } = useUnmounted();
   const contextMenu = useContextMenuRootProvider(ctx);
+  const root = createRef<HTMLDivElement>();
+  const showButton = createRef<HTMLButtonElement>();
 
   const state = observable({
     code: '',
@@ -72,15 +97,31 @@ const GeneratorCode: FC<GeneratorCodeProps> = (props, ctx) => {
   };
 
   const handleCopy = () => {
-    const { emitter } = app.value;
+    reportCopy(app.value.emitter, copyToClipboard(state.code));
+  };
 
-    copyToClipboard(state.code).then(() => {
-      emitter.emit(
-        openToastAction({
-          close: delay(2000),
-          message: <Toast title="Copied!" />,
-        })
-      );
+  const handleSave = () => {
+    const { settings } = app.value.store.state;
+    exportCode(
+      state.code,
+      codeFileExtension(settings.language),
+      settings.databaseName
+    );
+  };
+
+  const handleHide = () => {
+    generatorCodeViewOf(app.value).panel = 'closed';
+    // The button is the code block's tools, which it renders a tick after this
+    // component hands them over.
+    nextTick(() => nextTick(() => showButton.value?.focus()));
+  };
+
+  const handleShow = () => {
+    generatorCodeViewOf(app.value).panel = 'open';
+    nextTick(() => {
+      root.value
+        ?.querySelector<HTMLButtonElement>('.generator-code-options-hide')
+        ?.focus();
     });
   };
 
@@ -106,27 +147,76 @@ const GeneratorCode: FC<GeneratorCodeProps> = (props, ctx) => {
 
   return () => {
     const { store } = app.value;
-    const {
-      settings: { language },
-    } = store.state;
-    const lang = LanguageToLangMap[language];
+    const { t, dir } = i18n.value;
+    const lang = LanguageToLangMap[store.state.settings.language];
+    const full = !props.tableId;
+    const view = generatorCodeViewOf(app.value);
+    // The width is read only while the panel is unset, so a decided panel
+    // never renders again for a resize.
+    const panel = !full
+      ? 'unknown'
+      : view.panel === 'unset'
+        ? resolvePanel(view, store.state.editor.viewport.width)
+        : view.panel;
 
+    // The code stays left of the panel in every language; the panel and the
+    // menu read in the reader's direction.
     return (
-      <div
-        class={styles.root}
-        on:contextmenu={contextMenu.onContextmenu}
-        on:mousedown={contextMenu.onMousedown}
-      >
-        <CodeBlock
-          lang={lang}
-          theme={props.isDarkMode ? 'dark' : 'light'}
-          value={state.code}
-          onCopy={handleCopy}
-        />
+      <>
+        <div
+          use:ref={ref(root)}
+          class={styles.root}
+          prop:dir="ltr"
+          on:mousedown={contextMenu.onMousedown}
+        >
+          <div class={styles.code} on:contextmenu={contextMenu.onContextmenu}>
+            <CodeBlock
+              lang={lang}
+              theme={props.isDarkMode ? 'dark' : 'light'}
+              value={state.code}
+              onCopy={handleCopy}
+              tools={
+                panel === 'closed' ? (
+                  <button
+                    use:ref={ref(showButton)}
+                    type="button"
+                    class={[
+                      'generator-code-options-show',
+                      optionsStyles.icon,
+                      styles.show,
+                    ]}
+                    aria-label={t('code.showOptions')}
+                    title={t('code.showOptions')}
+                    aria-expanded="false"
+                    on:click={handleShow}
+                    on:keydown={keepSpace}
+                  >
+                    <Icon name="panel-right-open" size={16} />
+                  </button>
+                ) : null
+              }
+            />
+          </div>
+          {panel === 'open' ? (
+            <GeneratorCodeOptions
+              isDarkMode={props.isDarkMode}
+              readonly={Boolean(props.readonly)}
+              onHide={handleHide}
+              onSave={handleSave}
+              onCopy={handleCopy}
+            />
+          ) : null}
+        </div>
         {contextMenu.state.show ? (
-          <GeneratorCodeContextMenu onClose={handleContextmenuClose} />
+          <div prop:dir={dir}>
+            <GeneratorCodeContextMenu
+              full={full}
+              onSave={handleSave}
+              onClose={handleContextmenuClose}
+            />
+          </div>
         ) : null}
-      </div>
+      </>
     );
   };
 };

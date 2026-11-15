@@ -81,12 +81,24 @@ export const NON_EDIT_ACTIONS: ReadonlySet<unknown> = new Set([
   'settings.scrollTo',
   'settings.streamScrollTo',
   'settings.changeCanvasType',
+  'settings.changeNameViewMode',
   'editor.getLWW',
   'editor.mergeLWW',
 ]);
 
-const isEdit = (action: unknown) =>
-  !NON_EDIT_ACTIONS.has((action as { type?: unknown } | null)?.type);
+const NAME_VIEW_SWITCH = 'settings.changeNameViewMode';
+
+/**
+ * Whether the file may take the action: anything outside NON_EDIT_ACTIONS, and
+ * a name view switch only when shared, made while its lock was off, since any
+ * other shows on this tab alone.
+ */
+const isEdit = (action: unknown) => {
+  const { type, payload } =
+    (action as { type?: unknown; payload?: { shared?: unknown } } | null) ?? {};
+  if (type === NAME_VIEW_SWITCH) return payload?.shared === true;
+  return !NON_EDIT_ACTIONS.has(type);
+};
 
 /** Where the file stands; waiting-token is a load that found no token, which the session opens again. */
 export type DocumentPhase =
@@ -117,7 +129,10 @@ export type DocumentSnapshot = {
 
 /** The editor as the controller drives it: the element, or a headless peer store. */
 export type EditorAdapter = {
+  /** The document in the form a file holds, which Drive gets. */
   getValue(): string;
+  /** The document as the editor holds it, removed entities included, which seeds another editor. */
+  getRuntimeValue(): string;
   setInitialValue(value: string): void;
   /** The batches this editor sends, the shared store's own subscription. */
   subscribeLocal(listener: (actions: unknown[]) => void): () => void;
@@ -339,6 +354,12 @@ export function createDocumentController(deps: DocumentControllerDeps) {
   let canEdit = false;
   let epoch: string | null = null;
   let initialValue: string | null = null;
+  /**
+   * The document as an editor of this load held it, this tab's or the leader's,
+   * removed entities included, which the next editor starts from. Null after a
+   * load from Drive.
+   */
+  let initialRuntimeValue: string | null = null;
   let queue: SaveQueue | null = null;
 
   let adapter: EditorAdapter | null = null;
@@ -549,6 +570,7 @@ export function createDocumentController(deps: DocumentControllerDeps) {
     adoptMeta(file);
     epoch = createId();
     initialValue = text;
+    initialRuntimeValue = null;
     buffered = [];
     answering = false;
     announceReload = announce;
@@ -602,6 +624,8 @@ export function createDocumentController(deps: DocumentControllerDeps) {
     dropAdapter();
     epoch = message.epoch;
     initialValue = message.value;
+    // A leader on an older build sends the file form alone.
+    initialRuntimeValue = message.runtimeValue ?? null;
     name = message.name;
     canEdit = message.canEdit;
     followerStatus = message.saveState;
@@ -627,6 +651,7 @@ export function createDocumentController(deps: DocumentControllerDeps) {
     dropAdapter();
     epoch = message.epoch;
     initialValue = message.value;
+    initialRuntimeValue = null;
     name = message.name;
     canEdit = message.canEdit;
     buffered = [];
@@ -656,7 +681,7 @@ export function createDocumentController(deps: DocumentControllerDeps) {
     dropAdapter();
     // The order the shared store needs: the value, then the subscription whose
     // first handshake settles the LWW state, then what other tabs sent meanwhile.
-    next.setInitialValue(initialValue);
+    next.setInitialValue(initialRuntimeValue ?? initialValue);
     const offLocal = next.subscribeLocal(batch => {
       const actions = batch.filter(action => !isPresence(action));
       if (actions.length) channel.post({ type: 'actions', actions });
@@ -676,6 +701,7 @@ export function createDocumentController(deps: DocumentControllerDeps) {
       offInput();
       // The next editor of this load starts from this one's document, edits included.
       initialValue = next.getValue();
+      initialRuntimeValue = next.getRuntimeValue();
       adapter = null;
       answering = false;
       if (detachAdapter === detach) detachAdapter = null;
@@ -687,8 +713,7 @@ export function createDocumentController(deps: DocumentControllerDeps) {
 
   /**
    * A leader answers once its baseline is known: for a document fresh from
-   * Drive, one microtask after the load. The element collects old tombstones
-   * later still, which the Drive fingerprint never counts.
+   * Drive, one microtask after the load.
    */
   function startLeading(next: EditorAdapter, current: SaveQueue) {
     if (current.getBase().fingerprint !== null) {
@@ -735,6 +760,7 @@ export function createDocumentController(deps: DocumentControllerDeps) {
       type: 'snapshot',
       to,
       value: adapter.getValue(),
+      runtimeValue: adapter.getRuntimeValue(),
       baseModifiedTime: base.modifiedTime,
       baseFingerprint: base.fingerprint!,
       name,

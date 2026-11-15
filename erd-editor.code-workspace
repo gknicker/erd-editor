@@ -49,12 +49,24 @@
       "path": "packages/schema-sql-parser",
     },
     {
+      "name": "uuid",
+      "path": "packages/uuid",
+    },
+    {
       "name": "r-html",
       "path": "packages/r-html",
     },
     {
       "name": "vite-plugin-r-html",
       "path": "packages/vite-plugin-r-html",
+    },
+    {
+      "name": "r-html-konva",
+      "path": "packages/r-html-konva",
+    },
+    {
+      "name": "grid",
+      "path": "packages/grid",
     },
     {
       "name": "agent-hub",
@@ -67,6 +79,10 @@
     {
       "name": "mcp-server",
       "path": "packages/mcp-server",
+    },
+    {
+      "name": "erd-editor-yjs",
+      "path": "packages/erd-editor-yjs",
     },
     {
       "name": "monorepo",

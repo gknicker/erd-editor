@@ -15,7 +15,8 @@ const OWN = '(erd-editor)';
 const USAGE = `Usage: node scripts/measure-consumer-cost.mjs [options]
 
   (no options)         Print what each realm loads, by package.
-  --export <key>       The exports key the app imports. Default ".".
+  --export <key>       The exports key the app re-exports whole. Default
+                       "./erd-editor.js", the entry that defines the editor.
   --json <file>        Also write the measurement as JSON.
   --compare <file>     Print the change against an earlier --json file.
   --keep <dir>         Build into <dir> and leave it, to read the chunks.
@@ -28,7 +29,7 @@ one chunk here, so a package an app splits across dynamic imports, as shiki's
 grammars are, shows as one on-demand chunk rather than one per import.`;
 
 function parseArgs(argv) {
-  const options = { exportKey: '.', json: null, compare: null, keep: null };
+  const options = { exportKey: './erd-editor.js', json: null, compare: null, keep: null };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === '--help' || arg === '-h') options.help = true;
@@ -92,7 +93,8 @@ async function buildApp(entry, outDir) {
   const { build } = await import('vite-plus');
   const appDir = fs.mkdtempSync(path.join(os.tmpdir(), 'erd-consumer-'));
   const appEntry = path.join(appDir, 'main.js');
-  fs.writeFileSync(appEntry, `import ${JSON.stringify(entry)};\n`);
+  // Every export kept, so an entry marked free of side effects is weighed whole.
+  fs.writeFileSync(appEntry, `export * from ${JSON.stringify(entry)};\n`);
   // Hashed names keep two worker passes that split one package differently
   // from writing the same file; the realm walk, not the name, says who loads it.
   const output = (prefix = '') => ({
@@ -111,7 +113,12 @@ async function buildApp(entry, outDir) {
       emptyOutDir: true,
       minify: true,
       reportCompressedSize: false,
-      rolldownOptions: { input: appEntry, output: output() },
+      rolldownOptions: {
+        input: appEntry,
+        // An app build drops an entry's exports, which are what is weighed here.
+        preserveEntrySignatures: 'strict',
+        output: output(),
+      },
     },
     worker: { format: 'es', rolldownOptions: { output: output('w/') } },
   });

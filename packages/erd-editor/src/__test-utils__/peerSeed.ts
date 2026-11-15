@@ -4,6 +4,7 @@ import { cloneDeep } from 'es-toolkit';
 
 import { RelationshipType } from '@/constants/schema';
 import { createEngineContext } from '@/engine/context';
+import { addDictionaryAction } from '@/engine/modules/dictionary/atom.actions';
 import { changeViewportAction } from '@/engine/modules/editor/atom.actions';
 import { initialLoadJsonAction$ } from '@/engine/modules/editor/generator.actions';
 import { addIndexAction } from '@/engine/modules/index/atom.actions';
@@ -12,15 +13,21 @@ import { addMemoAction } from '@/engine/modules/memo/atom.actions';
 import { addRelationshipAction } from '@/engine/modules/relationship/atom.actions';
 import {
   addTableAction,
+  changeTableGroupAction,
   changeTableNameAction,
 } from '@/engine/modules/table/atom.actions';
 import {
   addColumnAction,
   changeColumnDataTypeAction,
+  changeColumnDomainAction,
   changeColumnNameAction,
   changeColumnNotNullAction,
   changeColumnPrimaryKeyAction,
 } from '@/engine/modules/table-column/atom.actions';
+import {
+  addTableGroupAction,
+  changeTableGroupNameAction,
+} from '@/engine/modules/table-group/atom.actions';
 import { createPeerStore, type PeerStore } from '@/engine/peer-store';
 import { createRxStore, type RxStore } from '@/engine/rx-store';
 import { createSharedStore, type SharedStore } from '@/engine/shared-store';
@@ -48,6 +55,11 @@ export const SEED = {
   indexColumn: 'orders_note_index_column',
   userIndexColumn: 'orders_user_id_index_column',
   memo: 'memo',
+  group: 'group',
+  memberWord: 'word_member',
+  nameWord: 'word_name',
+  term: 'term_member_name',
+  domain: 'domain_name',
 } as const;
 
 const column = (
@@ -84,9 +96,9 @@ function buildValue(...actions: AnyAction[][]): string {
 }
 
 /**
- * Two related tables, an empty one, a two column index and a memo: every
- * entity an edit can name, and one relationship and index for a removal to
- * cascade into. Built through the reducers, so it is a document they accept.
+ * Two related tables, an empty one, a two column index, a memo, a group holding
+ * users, two words, a term and a domain users.name links: every entity an edit
+ * can name, with a relationship and an index for a removal to cascade into.
  */
 export function createSeedValue(): string {
   return buildValue(
@@ -128,6 +140,47 @@ export function createSeedValue(): string {
         columnId: SEED.orderUser,
       }),
       addMemoAction({ id: SEED.memo, ui: { x: 900, y: 100, zIndex: 5 } }),
+      addTableGroupAction({
+        id: SEED.group,
+        ui: { x: 60, y: 60, width: 400, height: 200, zIndex: 1 },
+      }),
+      changeTableGroupNameAction({ id: SEED.group, value: 'accounts' }),
+      changeTableGroupAction({ id: SEED.users, value: SEED.group }),
+    ],
+    [
+      addDictionaryAction({
+        kind: 'word',
+        id: SEED.memberWord,
+        values: { name: 'Member', abbreviation: 'MBR', englishName: 'Member' },
+      }),
+      addDictionaryAction({
+        kind: 'word',
+        id: SEED.nameWord,
+        values: { name: 'Name', abbreviation: 'NM', englishName: 'Name' },
+      }),
+      addDictionaryAction({
+        kind: 'domain',
+        id: SEED.domain,
+        values: {
+          name: 'Short Text',
+          category: 'Text',
+          dataType: 'VARCHAR(255)',
+        },
+      }),
+      addDictionaryAction({
+        kind: 'term',
+        id: SEED.term,
+        values: {
+          name: 'Member Name',
+          physicalName: 'MBR_NM',
+          domainId: SEED.domain,
+        },
+      }),
+      changeColumnDomainAction({
+        id: SEED.userName,
+        tableId: SEED.users,
+        value: SEED.domain,
+      }),
     ]
   );
 }
@@ -246,23 +299,4 @@ export function createSession({
       user.destroy();
     },
   };
-}
-
-/**
- * A serialized document with each entity's meta dropped. Every replica stamps
- * createAt and updateAt from its own clock as its reducers run, and they are
- * never replicated, so two converged sides differ there and nowhere else.
- */
-export function comparable(value: string) {
-  const document = JSON.parse(value);
-
-  for (const entities of Object.values<Record<string, any>>(
-    document.collections
-  )) {
-    for (const entity of Object.values<any>(entities)) {
-      delete entity.meta;
-    }
-  }
-
-  return document;
 }

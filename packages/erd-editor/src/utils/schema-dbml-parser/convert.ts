@@ -8,6 +8,7 @@ import {
   ColumnOption,
   ColumnUIKey,
   OrderType,
+  ReferentialAction,
   RelationshipType,
 } from '@/constants/schema';
 import { EngineContext } from '@/engine/context';
@@ -18,12 +19,14 @@ import { createIndexColumn } from '@/utils/collection/indexColumn.entity';
 import { createRelationship } from '@/utils/collection/relationship.entity';
 import { createTable } from '@/utils/collection/table.entity';
 import { createColumn } from '@/utils/collection/tableColumn.entity';
-import { autoName, primaryKeyColumns } from '@/utils/schema-sql/utils';
+import { createTableGroup } from '@/utils/collection/tableGroup.entity';
+import { toReferentialAction } from '@/utils/referentialAction';
 import { findByName } from '@/utils/schema-sql-parser/utils';
+import { autoName, primaryKeyColumns } from '@/utils/tableName';
 import { textInRange, toSafeString } from '@/utils/validation';
 
 import { enumCommentSuffix, resolveDataType } from './dataType';
-import { DBMLEndpoint, DBMLModel, DBMLTable } from './types';
+import { DBMLEndpoint, DBMLModel, DBMLTable, DBMLTableName } from './types';
 
 const DEFAULT_SCHEMA = 'public';
 
@@ -39,6 +42,9 @@ type RelationshipInput = {
   child: TableContext;
   childColumns: Column[];
   toMany: boolean;
+  /** Only a standalone Ref carries settings; an inline one leaves these unset. */
+  onDelete?: number;
+  onUpdate?: number;
 };
 
 export function convertToSchema(
@@ -55,6 +61,7 @@ export function convertToSchema(
 
   convertRelationships(schema, ctx, contexts, model, findContext);
   convertIndexes(schema, contexts);
+  convertTableGroups(schema, model, findContext);
 
   return schema;
 }
@@ -88,7 +95,7 @@ function schemaKeyOf(schemaName: string): string {
 function createTableIndex(
   sources: DBMLTable[],
   contexts: TableContext[]
-): (endpoint: DBMLEndpoint) => TableContext | null {
+): (endpoint: DBMLTableName) => TableContext | null {
   const byKey = new Map<string, TableContext>();
 
   const set = (key: string, context: TableContext) => {
@@ -140,6 +147,7 @@ function convertTable(
     ui: {
       widthName: textInRange(toWidth(name)),
       widthComment: textInRange(toWidth(comment)),
+      color: source.color,
     },
   });
   const context: TableContext = { source, table: newTable, columns: [] };
@@ -219,7 +227,7 @@ function convertRelationships(
   ctx: EngineContext,
   contexts: TableContext[],
   model: DBMLModel,
-  findContext: (endpoint: DBMLEndpoint) => TableContext | null
+  findContext: (endpoint: DBMLTableName) => TableContext | null
 ) {
   const relationshipKeys = new Set<string>();
 
@@ -297,6 +305,8 @@ function convertRelationships(
       child: parentIsLeft ? right : left,
       childColumns: parentIsLeft ? rightColumns : leftColumns,
       toMany: ref.operator !== '-',
+      onDelete: toReferentialAction(ref.onDelete),
+      onUpdate: toReferentialAction(ref.onUpdate),
     });
   });
 }
@@ -320,7 +330,15 @@ function resolveColumns(
 function appendRelationship(
   { doc, collections }: ERDEditorSchemaV3,
   relationshipKeys: Set<string>,
-  { parent, parentColumns, child, childColumns, toMany }: RelationshipInput
+  {
+    parent,
+    parentColumns,
+    child,
+    childColumns,
+    toMany,
+    onDelete = ReferentialAction.none,
+    onUpdate = ReferentialAction.none,
+  }: RelationshipInput
 ) {
   if (parentColumns.length === 0 || childColumns.length === 0) return;
 
@@ -355,6 +373,8 @@ function appendRelationship(
       : mandatory
         ? RelationshipType.OneOnly
         : RelationshipType.ZeroOne,
+    onDelete,
+    onUpdate,
     start: {
       tableId: parent.table.id,
       columnIds: parentColumns.map(column => column.id),
@@ -404,6 +424,7 @@ function appendJunctionTable(
       name,
       alias: '',
       comment,
+      color: '',
       columns: [],
       indexes: [],
     },
@@ -510,5 +531,43 @@ function convertIndexes(
       doc.indexIds.push(newIndex.id);
       query(collections).collection('indexEntities').setOne(newIndex);
     });
+  });
+}
+
+/**
+ * Each TableGroup as a table group of the tables it names, resolved as a ref
+ * resolves them. A table stays in the first group naming it, and a group left
+ * with no table is not made. Where it stands is the placement's to decide.
+ */
+function convertTableGroups(
+  { doc, collections }: ERDEditorSchemaV3,
+  model: DBMLModel,
+  findContext: (name: DBMLTableName) => TableContext | null
+) {
+  const grouped = new Set<string>();
+
+  model.tableGroups.forEach(source => {
+    const members: Table[] = [];
+
+    source.tables.forEach(name => {
+      const context = findContext(name);
+      if (!context || grouped.has(context.table.id)) return;
+
+      grouped.add(context.table.id);
+      members.push(context.table);
+    });
+    if (!members.length) return;
+
+    const group = createTableGroup({
+      name: toSafeString(source.name),
+      color: source.color,
+      ui: { zIndex: doc.tableGroupIds.length + 1 },
+    });
+
+    members.forEach(table => {
+      table.groupId = group.id;
+    });
+    doc.tableGroupIds.push(group.id);
+    query(collections).collection('tableGroupEntities').setOne(group);
   });
 }

@@ -26,6 +26,11 @@ const meta = {
         'scala',
         'go',
         'python',
+        'mermaid',
+        'php',
+        'rust',
+        'swift',
+        'json',
       ],
     },
     theme: {

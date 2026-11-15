@@ -1,6 +1,7 @@
 import {
-  isAscValue,
+  isArrayDimensionToken,
   isAutoIncrementValue,
+  isByValue,
   isCharacterSet,
   isClusterBy,
   isCollateValue,
@@ -9,42 +10,63 @@ import {
   isConstraintState,
   isConstraintValue,
   isDefaultValue,
-  isDescValue,
   isEqualToken,
   isForeignValue,
+  isGeneratedValue,
   isIndexKind,
   isIndexValue,
   isKeyValue,
   isLeftParentToken,
   isNewStatement,
   isNotValue,
+  isNullFilter,
   isNullValue,
+  isOnValue,
   isPeriodToken,
   isPrimaryValue,
   isReferencesValue,
   isRightParentToken,
   isSemicolonToken,
+  isSignedValue,
   isStringToken,
+  isTableItemWord,
+  isTablespaceValue,
+  isTypeModifier,
   isUniqueValue,
+  isUsingValue,
+  isWhereValue,
   matchCreateTable,
   matchDataType,
+  matchKeyModifiers,
   matchNestedDataType,
   matchReferentialClause,
+  matchUserDataType,
+  requote,
+  unquoteTypeName,
 } from '@/parser/helper';
 import {
   Column,
   CreateTable,
   CreateTableColumns,
+  DatabaseVendor,
   ForeignKey,
   Index,
-  IndexColumn,
+  Key,
   RefPos,
-  SortType,
   StatementType,
 } from '@/parser/statement';
+import {
+  defaultExpressionParser,
+  isNextvalDefault,
+} from '@/parser/statement/default.expression';
+import { indexColumnsParser } from '@/parser/statement/index.columns';
 import { Token } from '@/parser/tokenizer';
 
-export function createTableParser(tokens: Token[], $pos: RefPos) {
+export function createTableParser(
+  tokens: Token[],
+  $pos: RefPos,
+  database?: DatabaseVendor
+) {
   const newStatement = isNewStatement(tokens);
   const isString = isStringToken(tokens);
   const isLeftParent = isLeftParentToken(tokens);
@@ -64,6 +86,7 @@ export function createTableParser(tokens: Token[], $pos: RefPos) {
     comment: '',
     columns: [],
     indexes: [],
+    keys: [],
     foreignKeys: [],
   };
 
@@ -143,12 +166,14 @@ export function createTableParser(tokens: Token[], $pos: RefPos) {
         continue;
       }
 
-      const { columns, indexes, foreignKeys } = createTableColumnsParser(
+      const { columns, indexes, keys, foreignKeys } = createTableColumnsParser(
         tokens,
-        $pos
+        $pos,
+        database
       );
       ast.columns = columns;
       ast.indexes = indexes;
+      ast.keys = keys;
       ast.foreignKeys = foreignKeys;
       hasColumns = true;
       continue;
@@ -202,12 +227,16 @@ export function createTableParser(tokens: Token[], $pos: RefPos) {
 
 function createTableColumnsParser(
   tokens: Token[],
-  $pos: RefPos
+  $pos: RefPos,
+  database?: DatabaseVendor
 ): CreateTableColumns {
   const isString = isStringToken(tokens);
   const isLeftParent = isLeftParentToken(tokens);
   const isRightParent = isRightParentToken(tokens);
   const isComma = isCommaToken(tokens);
+  const isSemicolon = isSemicolonToken(tokens);
+  const isPeriod = isPeriodToken(tokens);
+  const isArrayDimension = isArrayDimensionToken(tokens);
   const isConstraint = isConstraintValue(tokens);
   const isIndex = isIndexValue(tokens);
   const isPrimary = isPrimaryValue(tokens);
@@ -217,20 +246,49 @@ function createTableColumnsParser(
   const isNull = isNullValue(tokens);
   const isNot = isNotValue(tokens);
   const isDefault = isDefaultValue(tokens);
+  const isBy = isByValue(tokens);
+  const isGenerated = isGeneratedValue(tokens);
+  const nextvalDefault = isNextvalDefault(tokens);
+  const isOn = isOnValue(tokens);
   const isComment = isCommentValue(tokens);
-  const isDesc = isDescValue(tokens);
-  const isAsc = isAscValue(tokens);
   const isKey = isKeyValue(tokens);
+  const isReferences = isReferencesValue(tokens);
   const isEqual = isEqualToken(tokens);
   const characterSet = isCharacterSet(tokens);
   const isCollate = isCollateValue(tokens);
+  const isUsing = isUsingValue(tokens);
+  const isTablespace = isTablespaceValue(tokens);
+  const isWhere = isWhereValue(tokens);
+  const nullFilter = isNullFilter(tokens);
   const constraintState = isConstraintState(tokens);
   const dataType = matchDataType(tokens);
+  const userDataType = matchUserDataType(tokens);
   const nestedDataType = matchNestedDataType(tokens);
   const referentialClause = matchReferentialClause(tokens);
+  const keyModifiers = matchKeyModifiers(tokens);
   const indexKind = isIndexKind(tokens);
+  const tableItemWord = isTableItemWord(tokens);
+  const typeModifier = isTypeModifier(tokens);
+  const isSigned = isSignedValue(tokens);
 
   const isToken = () => $pos.value < tokens.length;
+
+  const isWords = (pos: number, words: string[]) =>
+    words.every(
+      (word, index) =>
+        !tokens[pos + index]?.quoted &&
+        tokens[pos + index]?.value.toUpperCase() === word
+    );
+
+  // Oracle's DEFAULT ON NULL [FOR INSERT ONLY | FOR INSERT AND UPDATE] expr:
+  // how many tokens the words before the expression span, which say when it
+  // applies and have no field to go in; 0 for any other DEFAULT.
+  const onNullSpan = (pos: number) => {
+    if (!isOn(pos) || !isNull(pos + 1)) return 0;
+    if (isWords(pos + 2, ['FOR', 'INSERT', 'ONLY'])) return 5;
+    if (isWords(pos + 2, ['FOR', 'INSERT', 'AND', 'UPDATE'])) return 6;
+    return 2;
+  };
 
   const opensConstraintItem = (pos: number) =>
     isConstraint(pos) ||
@@ -239,63 +297,12 @@ function createTableColumnsParser(
     isUnique(pos) ||
     isIndex(pos) ||
     isKey(pos) ||
-    indexKind(pos);
-
-  // Reads a key list from its ( through its ), each column with its sort.
-  const indexColumnsParser = () => {
-    const indexColumns: IndexColumn[] = [];
-    let indexColumn: IndexColumn = {
-      name: '',
-      sort: SortType.asc,
-    };
-    let expression = false;
-    $pos.value++;
-
-    while (isToken() && !isRightParent($pos.value)) {
-      // A prefix length, email(191), or a functional key part, ((a + b)), is a
-      // group of its own: its ) closes no list, and its words name no column.
-      if (isLeftParent($pos.value)) {
-        expression ||= !indexColumn.name;
-        let depth = 0;
-
-        while (isToken()) {
-          if (isLeftParent($pos.value)) {
-            depth++;
-          } else if (isRightParent($pos.value) && --depth === 0) {
-            break;
-          }
-
-          $pos.value++;
-        }
-      }
-      if (isString($pos.value) && !isDesc($pos.value) && !isAsc($pos.value)) {
-        indexColumn.name = tokens[$pos.value].value;
-      }
-      if (isDesc($pos.value)) {
-        indexColumn.sort = SortType.desc;
-      }
-      if (isComma($pos.value)) {
-        indexColumns.push(indexColumn);
-        indexColumn = {
-          name: '',
-          sort: SortType.asc,
-        };
-      }
-      $pos.value++;
-    }
-
-    if (indexColumn.name !== '') {
-      indexColumns.push(indexColumn);
-    }
-
-    $pos.value++;
-    // Without its expression the key is another one, and a unique key left
-    // with a single column would mark that column unique.
-    return expression ? [] : indexColumns;
-  };
+    indexKind(pos) ||
+    tableItemWord(pos);
 
   const columns: Column[] = [];
   const indexes: Index[] = [];
+  const keys: Key[] = [];
   const foreignKeys: ForeignKey[] = [];
   const primaryKeyColumnNames: string[] = [];
   const uniqueColumnNames: string[] = [];
@@ -313,9 +320,67 @@ function createTableColumnsParser(
   // Set while the item is a table constraint or index: until its comma no word
   // may become a column name or a data type -- USING BTREE, ON [PRIMARY].
   let constraintItem = false;
+  // The name a CONSTRAINT gives the item it opens, which a UNIQUE over several
+  // columns keeps unless it names its index itself.
+  let constraintName = '';
+  // Where that name ends: it names only the constraint right after it, never
+  // the PRIMARY KEY of id INT CONSTRAINT nn NOT NULL PRIMARY KEY.
+  let constraintEnd = -1;
+
+  // The key with no name the item has read. Oracle's USING INDEX after it
+  // reports it too: DBMS_METADATA may export its index on its own, as SYS_C...
+  let unnamedKey: Key | null = null;
+
+  // Oracle's USING INDEX, but not PostgreSQL's USING INDEX TABLESPACE, after
+  // which a CREATE INDEX over the key is an index of its own: DBMS_METADATA
+  // never writes TABLESPACE first, and Oracle refuses a second such index.
+  const oracleUsingIndex = (pos: number) =>
+    isUsing(pos) && isIndex(pos + 1) && !isTablespace(pos + 2);
+
+  const symbolAt = (pos: number) =>
+    pos === constraintEnd ? constraintName : '';
+
+  // The WHERE of the item at pos, -1 where none comes before its end: SQL
+  // Server filters INDEX n UNIQUE (...) [INCLUDE (...)] WHERE ... inline too.
+  const filterAt = (pos: number) => {
+    let depth = 0;
+
+    for (; pos < tokens.length && !isSemicolon(pos); pos++) {
+      if (isLeftParent(pos)) {
+        depth++;
+      } else if (isRightParent(pos)) {
+        if (depth-- === 0) return -1;
+      } else if (depth === 0 && isComma(pos)) {
+        return -1;
+      } else if (depth === 0 && isWhere(pos)) {
+        return pos;
+      }
+    }
+
+    return -1;
+  };
+
+  const addKey = (name: string, columnNames: string[]) => {
+    if (!columnNames.length) return;
+
+    if (name) {
+      keys.push({ name, columnNames });
+    } else {
+      unnamedKey = { name, columnNames };
+    }
+  };
+
+  // Where the column's type stands, right after its name: the one place a
+  // word the vendor lists lack is read as a type rather than an attribute.
+  let typePos = -1;
 
   while (isToken()) {
     let token = tokens[$pos.value];
+
+    if (unnamedKey && oracleUsingIndex($pos.value)) {
+      keys.push(unnamedKey);
+      unnamedKey = null;
+    }
 
     const nestedLength = nestedDataType($pos.value);
 
@@ -324,21 +389,60 @@ function createTableColumnsParser(
       const parts: string[] = [];
 
       while ($pos.value < end) {
-        parts.push(isComma($pos.value) ? ',' : tokens[$pos.value].value);
+        // A field's COMMENT and a backtick name keep their quotes, as a type
+        // argument does: STRUCT<name: STRING COMMENT 'x'>.
+        parts.push(
+          isComma($pos.value) ? ',' : requote(tokens[$pos.value], database)
+        );
         $pos.value++;
       }
 
+      // A quoted token ends before the colon or bracket written right after
+      // it, so a field name and its colon join back without a space.
       column.dataType = parts.reduce(
-        (acc, part) => (!acc || part === ',' ? acc + part : `${acc} ${part}`),
+        (acc, part) =>
+          !acc || /^[,:>]/.test(part) ? acc + part : `${acc} ${part}`,
         ''
       );
       continue;
     }
 
-    const referentialLength = referentialClause($pos.value);
+    const { span: referentialLength } = referentialClause($pos.value);
 
     if (referentialLength) {
       $pos.value += referentialLength;
+      continue;
+    }
+
+    // a_id INT REFERENCES a (id) ON DELETE CASCADE keys the column it ends.
+    // SQL Server and Snowflake may write FOREIGN KEY before the REFERENCES.
+    const inlineForeignKey =
+      isForeign($pos.value) &&
+      isKey($pos.value + 1) &&
+      isReferences($pos.value + 2);
+
+    if (
+      column.name &&
+      !constraintItem &&
+      (isReferences($pos.value) || inlineForeignKey)
+    ) {
+      if (inlineForeignKey) {
+        $pos.value += 2;
+      }
+
+      const foreignKey: ForeignKey = {
+        columnNames: [column.name],
+        refTableName: '',
+        refColumnNames: [],
+        onDelete: '',
+        onUpdate: '',
+      };
+      referencesParser(tokens, $pos, foreignKey);
+
+      if (foreignKey.refTableName && foreignKey.refColumnNames.length <= 1) {
+        foreignKeys.push(foreignKey);
+      }
+
       continue;
     }
 
@@ -359,7 +463,7 @@ function createTableColumnsParser(
       !constraintState($pos.value)
     ) {
       column.name = token.value;
-      $pos.value++;
+      typePos = ++$pos.value;
       continue;
     }
 
@@ -390,14 +494,23 @@ function createTableColumnsParser(
     if (isConstraint($pos.value)) {
       token = tokens[++$pos.value];
 
-      if (isString($pos.value)) {
+      // The symbol is optional: CONSTRAINT UNIQUE (a) names nothing.
+      if (
+        isString($pos.value) &&
+        !isUnique($pos.value) &&
+        !isPrimary($pos.value) &&
+        !isForeign($pos.value)
+      ) {
+        constraintName = token.value;
         $pos.value++;
       }
 
+      constraintEnd = $pos.value;
       continue;
     }
 
     if (isPrimary($pos.value)) {
+      const name = symbolAt($pos.value);
       token = tokens[++$pos.value];
 
       if (isKey($pos.value)) {
@@ -409,18 +522,17 @@ function createTableColumnsParser(
         }
 
         if (isLeftParent($pos.value)) {
-          token = tokens[++$pos.value];
+          const columnNames = indexColumnsParser(tokens, $pos).map(
+            indexColumn => indexColumn.name
+          );
 
-          while (isToken() && !isRightParent($pos.value)) {
-            if (isString($pos.value)) {
-              primaryKeyColumnNames.push(token.value.toUpperCase());
-            }
-            token = tokens[++$pos.value];
-          }
-
-          $pos.value++;
-        } else {
+          primaryKeyColumnNames.push(
+            ...columnNames.map(columnName => columnName.toUpperCase())
+          );
+          addKey(name, columnNames);
+        } else if (column.name) {
           column.primaryKey = true;
+          addKey(name, [column.name]);
         }
       }
 
@@ -444,8 +556,15 @@ function createTableColumnsParser(
         const name = token.value;
         token = tokens[++$pos.value];
 
+        // SQL Server's INDEX n UNIQUE (a, b) is a unique key the UNIQUE branch
+        // reads, under the index's name.
+        if (isUnique($pos.value)) {
+          constraintName = name;
+          continue;
+        }
+
         if (isLeftParent($pos.value)) {
-          const indexColumns = indexColumnsParser();
+          const indexColumns = indexColumnsParser(tokens, $pos);
 
           if (indexColumns.length) {
             indexes.push({
@@ -461,51 +580,59 @@ function createTableColumnsParser(
     }
 
     if (isUnique($pos.value)) {
+      const symbol = symbolAt($pos.value);
       token = tokens[++$pos.value];
-      const uniqueIndex = isIndex($pos.value);
 
-      if (isKey($pos.value) || uniqueIndex) {
+      if (isKey($pos.value) || isIndex($pos.value)) {
         token = tokens[++$pos.value];
       }
 
-      // Only a table constraint names its index. Inside a column definition the
-      // next word is another attribute -- NOT NULL, COMMENT, DEFAULT.
-      let name = '';
-
-      if (!column.name && isString($pos.value)) {
-        name = token.value;
-        token = tokens[++$pos.value];
-      }
-
-      // Several columns under one named UNIQUE INDEX are one composite key;
-      // marking each column unique would export a stricter one.
-      if (uniqueIndex && name && isLeftParent($pos.value)) {
-        const indexColumns = indexColumnsParser();
-
-        if (indexColumns.length > 1) {
-          indexes.push({ name, unique: true, columns: indexColumns });
-        } else {
-          uniqueColumnNames.push(
-            ...indexColumns.map(indexColumn => indexColumn.name.toUpperCase())
-          );
-        }
-
+      // A column's own UNIQUE has no name and no key list. What follows is
+      // another attribute, or Oracle's USING INDEX (...) the loop skips.
+      if (column.name) {
+        column.unique = true;
+        addKey(symbol, [column.name]);
         continue;
       }
 
-      if (isLeftParent($pos.value)) {
-        token = tokens[++$pos.value];
+      $pos.value += keyModifiers($pos.value);
 
-        while (isToken() && !isRightParent($pos.value)) {
-          if (isString($pos.value)) {
-            uniqueColumnNames.push(token.value.toUpperCase());
-          }
-          token = tokens[++$pos.value];
-        }
+      // Only a table constraint names its index.
+      let name = constraintName;
 
+      if (isString($pos.value)) {
+        name = tokens[$pos.value].value;
         $pos.value++;
-      } else {
-        column.unique = true;
+        $pos.value += keyModifiers($pos.value);
+      }
+
+      if (isLeftParent($pos.value)) {
+        const indexColumns = indexColumnsParser(tokens, $pos);
+        const columnNames = indexColumns.map(indexColumn => indexColumn.name);
+        const filter = filterAt($pos.value);
+
+        // A filter keys only the rows it picks, the rule CREATE UNIQUE INDEX
+        // reads its WHERE by: unconditioned that key would be a stricter one.
+        if (filter !== -1 && !nullFilter(filter, columnNames)) {
+          if (indexColumns.length) {
+            indexes.push({ name, unique: false, columns: indexColumns });
+          }
+        } else if (indexColumns.length > 1) {
+          // Several columns under one UNIQUE are one composite key, in whatever
+          // spelling; marking each column unique would export a stricter one.
+          indexes.push({ name, unique: true, columns: indexColumns });
+
+          // A name finds the index a dump exports for the key on its own; with
+          // none, only the USING INDEX that reports it in keys does.
+          if (!name) {
+            addKey(name, columnNames);
+          }
+        } else {
+          uniqueColumnNames.push(
+            ...columnNames.map(columnName => columnName.toUpperCase())
+          );
+          addKey(name, columnNames);
+        }
       }
 
       continue;
@@ -530,15 +657,23 @@ function createTableColumnsParser(
     }
 
     if (isDefault($pos.value)) {
-      token = tokens[++$pos.value];
+      // GENERATED BY DEFAULT AS IDENTITY gives no default: its IDENTITY makes
+      // the column autoIncrement, as GENERATED ALWAYS does.
+      const identity = isBy($pos.value - 1) && isGenerated($pos.value - 2);
+      $pos.value++;
 
-      // The default is a raw SQL expression. The lexer strips the quotes off a
-      // string literal, so they go back on -- PENDING would read as a name.
-      if (isString($pos.value)) {
-        column.default = token.quoted
-          ? `'${token.value.replaceAll("'", "''")}'`
-          : token.value;
-        $pos.value++;
+      if (!identity) {
+        $pos.value += onNullSpan($pos.value);
+        // A serial column's nextval('s') is its auto increment, which each export
+        // writes its own way; the sequence it calls has no place in the document.
+        const sequence = nextvalDefault($pos.value);
+        const value = defaultExpressionParser(tokens, $pos, database);
+
+        if (sequence) {
+          column.autoIncrement = true;
+        } else if (value) {
+          column.default = value;
+        }
       }
 
       continue;
@@ -592,7 +727,13 @@ function createTableColumnsParser(
       continue;
     }
 
-    const dataTypeLength = dataType($pos.value);
+    const knownLength = dataType($pos.value);
+    const userLength = $pos.value === typePos ? userDataType($pos.value) : 0;
+    // A name the lists lack is still the type in the type's place, mood or
+    // hstore, and so is a qualified one even when its schema is a type name.
+    const userDefined =
+      userLength > 0 && (!knownLength || isPeriod($pos.value + 1));
+    const dataTypeLength = userDefined ? userLength : knownLength;
 
     // A column keeps its first type: the BINARY of VARCHAR(40) BINARY is an
     // attribute, and a constraint item has no type at all.
@@ -616,15 +757,26 @@ function createTableColumnsParser(
           value += ')';
           depth--;
         } else if (depth) {
-          // A structured type spells its fields as words -- Snowflake's
-          // OBJECT(city VARCHAR). Gluing them together loses the field.
+          // A quoted argument goes back into its quotes: ENUM(a,b) is no
+          // valid DDL. A structured type spells its fields as words --
+          // Snowflake's OBJECT(city VARCHAR). Gluing them loses the field.
+          const text = requote(token, database);
           value +=
             isString($pos.value) &&
             (isString($pos.value - 1) || isRightParent($pos.value - 1))
-              ? ` ${token.value}`
-              : token.value;
+              ? ` ${text}`
+              : text;
+        } else if (isArrayDimension($pos.value)) {
+          value += requote(token);
         } else {
-          value += value ? ` ${token.value}` : token.value;
+          // A user type keeps its quotes, "MyType" being case sensitive and
+          // [dbo].[Order] naming a reserved word; a listed type drops them
+          // but for "char" and "bit".
+          const text = userDefined ? requote(token) : unquoteTypeName(token);
+          value +=
+            value && !isPeriod($pos.value) && !isPeriod($pos.value - 1)
+              ? ` ${text}`
+              : text;
         }
 
         $pos.value++;
@@ -633,6 +785,16 @@ function createTableColumnsParser(
       while (depth > 0) {
         value += ')';
         depth--;
+      }
+
+      // Dropping UNSIGNED or ZEROFILL would export the column signed, so they
+      // stay in the order and case written. SIGNED, the default, adds nothing
+      // MySQL keeps, and a generator reading TINYINT SIGNED finds no TINYINT.
+      while (typeModifier($pos.value)) {
+        if (!isSigned($pos.value)) {
+          value += ` ${tokens[$pos.value].value}`;
+        }
+        $pos.value++;
       }
 
       column.dataType = value;
@@ -654,6 +816,8 @@ function createTableColumnsParser(
         nullable: true,
       };
       constraintItem = false;
+      constraintName = '';
+      unnamedKey = null;
       $pos.value++;
       continue;
     }
@@ -683,6 +847,7 @@ function createTableColumnsParser(
   return {
     columns,
     indexes,
+    keys,
     foreignKeys,
   };
 }
@@ -694,8 +859,6 @@ export function parserForeignKeyParser(
   const isString = isStringToken(tokens);
   const isLeftParent = isLeftParentToken(tokens);
   const isRightParent = isRightParentToken(tokens);
-  const isReferences = isReferencesValue(tokens);
-  const isPeriod = isPeriodToken(tokens);
   const isKey = isKeyValue(tokens);
 
   const isToken = () => $pos.value < tokens.length;
@@ -704,6 +867,8 @@ export function parserForeignKeyParser(
     columnNames: [],
     refTableName: '',
     refColumnNames: [],
+    onDelete: '',
+    onUpdate: '',
   };
 
   let token = tokens[++$pos.value];
@@ -724,50 +889,86 @@ export function parserForeignKeyParser(
       token = tokens[++$pos.value];
     }
 
-    if (isReferences($pos.value)) {
-      token = tokens[++$pos.value];
+    referencesParser(tokens, $pos, foreignKey);
 
-      if (isString($pos.value)) {
-        foreignKey.refTableName = token.value;
-        $pos.value++;
-
-        // A three-part REFERENCES left a period unconsumed, so the column
-        // list was never reached: the whole key was dropped and the trailing
-        // segment became a column of the table being defined.
-        while (isPeriod($pos.value)) {
-          if (!isString($pos.value + 1)) {
-            $pos.value++;
-            break;
-          }
-
-          foreignKey.refTableName = tokens[$pos.value + 1].value;
-          $pos.value += 2;
-        }
-
-        token = tokens[$pos.value];
-
-        if (isLeftParent($pos.value)) {
-          token = tokens[++$pos.value];
-
-          while (isToken() && !isRightParent($pos.value)) {
-            if (isString($pos.value)) {
-              foreignKey.refColumnNames.push(token.value);
-            }
-            token = tokens[++$pos.value];
-          }
-
-          token = tokens[++$pos.value];
-        }
-      }
-    }
-
+    // No referenced column list names the referenced table's primary key.
     if (
       foreignKey.columnNames.length &&
-      foreignKey.columnNames.length === foreignKey.refColumnNames.length
+      foreignKey.refTableName &&
+      (!foreignKey.refColumnNames.length ||
+        foreignKey.columnNames.length === foreignKey.refColumnNames.length)
     ) {
       return foreignKey;
     }
   }
 
   return null;
+}
+
+/**
+ * Reads REFERENCES t (x, y) and the ON DELETE / ON UPDATE / MATCH clauses right
+ * after it into foreignKey, leaving $pos past them; anything else stays put.
+ */
+function referencesParser(
+  tokens: Token[],
+  $pos: RefPos,
+  foreignKey: ForeignKey
+) {
+  const isString = isStringToken(tokens);
+  const isLeftParent = isLeftParentToken(tokens);
+  const isRightParent = isRightParentToken(tokens);
+  const isReferences = isReferencesValue(tokens);
+  const isPeriod = isPeriodToken(tokens);
+  const referentialClause = matchReferentialClause(tokens);
+
+  const isToken = () => $pos.value < tokens.length;
+
+  if (!isReferences($pos.value)) return;
+
+  let token = tokens[++$pos.value];
+
+  if (!isString($pos.value)) return;
+
+  foreignKey.refTableName = token.value;
+  $pos.value++;
+
+  // A three-part REFERENCES left a period unconsumed, so the column list was
+  // never reached: the whole key was dropped and the trailing segment became a
+  // column of the table being defined.
+  while (isPeriod($pos.value)) {
+    if (!isString($pos.value + 1)) {
+      $pos.value++;
+      break;
+    }
+
+    foreignKey.refTableName = tokens[$pos.value + 1].value;
+    $pos.value += 2;
+  }
+
+  if (isLeftParent($pos.value)) {
+    token = tokens[++$pos.value];
+
+    while (isToken() && !isRightParent($pos.value)) {
+      if (isString($pos.value)) {
+        foreignKey.refColumnNames.push(token.value);
+      }
+      token = tokens[++$pos.value];
+    }
+
+    $pos.value++;
+  }
+
+  for (
+    let clause = referentialClause($pos.value);
+    clause.span;
+    clause = referentialClause($pos.value)
+  ) {
+    if (clause.event === 'DELETE' && clause.action) {
+      foreignKey.onDelete = clause.action;
+    } else if (clause.event === 'UPDATE' && clause.action) {
+      foreignKey.onUpdate = clause.action;
+    }
+
+    $pos.value += clause.span;
+  }
 }

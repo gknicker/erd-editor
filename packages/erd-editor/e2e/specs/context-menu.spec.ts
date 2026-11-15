@@ -3,17 +3,46 @@ import type { Locator } from '@playwright/test';
 import type { Box, ErdEditorPage, Point } from '../support/ErdEditorPage';
 import { expect, test } from '../support/fixtures';
 import {
+  createSchema,
   type ErdDocument,
   oneTable,
   RelationshipType,
   twoTables,
 } from '../support/schema';
+import { MOD_KEY } from '../support/shortcuts';
 
 // AC-I4. The menu itself stayed dom, so what the port has to prove is the
 // routing: a right click reaches the same three answers a closest chain gave —
 // the table under the pointer, the connector under it, or neither.
 
 const RELATIONSHIP_ID = 'users_posts';
+
+const MEMO_ID = 'note';
+
+/** twoTables with a memo beside them. */
+function tablesAndMemo(): ErdDocument {
+  const document = twoTables();
+  const { collections, doc } = createSchema({
+    memos: [{ id: MEMO_ID, value: 'a note', x: 160, y: 520 }],
+  });
+  document.collections.memoEntities = collections.memoEntities;
+  document.doc.memoIds = doc.memoIds;
+
+  return document;
+}
+
+/** A point on a memo's header strip, clear of its colour bar and remove button. */
+async function memoHeaderPoint(erd: ErdEditorPage) {
+  const box = await erd.sceneBox(`#memo-${MEMO_ID}`);
+  return { x: box.x + 20, y: box.y + 8 };
+}
+
+/** The last row of the open root menu, which holds Delete. */
+const lastRootRow = (erd: ErdEditorPage) =>
+  erd.host
+    .locator('.context-menu-content[data-id="root"]')
+    .locator(':scope > div:not(.context-menu-content)')
+    .last();
 
 /** twoTables with one connector between them, laid out side by side. */
 function linkedTables(): ErdDocument {
@@ -42,7 +71,6 @@ function linkedTables(): ErdDocument {
       y: 0,
       direction: 1,
     },
-    meta: { updateAt: 0, createAt: 0 },
   };
   document.doc.relationshipIds = [RELATIONSHIP_ID];
 
@@ -110,6 +138,169 @@ test.describe('context menu routing', () => {
 
     await erd.contextMenu.getByText('Color', { exact: true }).click();
     await expect(erd.host.locator('.color-picker')).toBeVisible();
+  });
+
+  test('right-clicking a selected row keeps the selection and keys every column in it', async ({
+    erd,
+  }) => {
+    await erd.seed(oneTable());
+    const idName = erd.cell(erd.columnEl('users_id'), 'columnName');
+    const nameName = erd.cell(erd.columnEl('users_name'), 'columnName');
+
+    await erd.focusCell(nameName);
+    await expect(erd.selectedColumns()).toHaveCount(1);
+
+    await erd.page.keyboard.down(MOD_KEY);
+    await erd.clickAt(await erd.centerOf(idName));
+    await erd.page.keyboard.up(MOD_KEY);
+    await expect(erd.selectedColumns()).toHaveCount(2);
+    await expect(erd.focusRing(idName)).toBeVisible();
+
+    await erd.clickAt(await erd.centerOf(nameName), { button: 'right' });
+
+    const item = erd.contextMenu.getByText('Primary Key on selected columns', {
+      exact: true,
+    });
+    await expect(item).toBeVisible();
+    await expect(erd.selectedColumns()).toHaveCount(2);
+    await expect(erd.focusRing(nameName)).toBeVisible();
+
+    await item.click();
+    await expect(erd.columnKey('users_id', 'pk')).toHaveCount(1);
+    await expect(erd.columnKey('users_name', 'pk')).toHaveCount(1);
+  });
+
+  test('right-clicking the key of a row outside the selection selects that row alone', async ({
+    erd,
+  }) => {
+    await erd.seed(oneTable());
+    await erd.focusCell(erd.cell(erd.columnEl('users_id'), 'columnName'));
+
+    const key = await erd.sceneBox(['#column-users_name', '.column-key']);
+    await erd.clickAt(
+      { x: key.x + key.width / 2, y: key.y + key.height / 2 },
+      { button: 'right' }
+    );
+
+    const item = erd.contextMenu.getByText('Primary Key', { exact: true });
+    await expect(item).toBeVisible();
+    await expect(erd.selectedColumns()).toHaveCount(1);
+    await expect(erd.columnEl('users_name')).toHaveAttribute('data-selected');
+
+    await item.click();
+    await expect(erd.columnKey('users_name', 'pk')).toHaveCount(1);
+    await expect(erd.columnKey('users_id', 'pk')).toHaveCount(0);
+  });
+
+  test('right-clicking a table ends its menu with Delete, which deletes that table', async ({
+    erd,
+  }) => {
+    await erd.seed(twoTables());
+
+    await erd.clickAt(await erd.tableHeaderPoint('users'), { button: 'right' });
+
+    const row = lastRootRow(erd);
+    await expect(row).toHaveText(/^\s*Delete\s*Delete\s*$/);
+    await expect(row.locator('.kbd')).toHaveText('Delete');
+
+    await row.click();
+    await expect.poll(() => erd.tableIds()).toEqual(['posts']);
+    await expect(erd.contextMenu).toHaveCount(0);
+  });
+
+  test('right-clicking a table in a selection deletes the whole selection', async ({
+    erd,
+  }) => {
+    await erd.seed(tablesAndMemo());
+
+    await erd.clickAt(await erd.tableHeaderPoint('users'));
+    await erd.modClickAt(await memoHeaderPoint(erd));
+    await erd.clickAt(await erd.tableHeaderPoint('users'), { button: 'right' });
+
+    const item = erd.contextMenu.getByText('Delete selected', { exact: true });
+    await expect(item).toBeVisible();
+    await item.click();
+
+    await expect.poll(() => erd.tableIds()).toEqual(['posts']);
+    expect(await erd.memoIds()).toEqual([]);
+  });
+
+  test('right-clicking the one selected row deletes that column', async ({
+    erd,
+  }) => {
+    await erd.seed(oneTable());
+    const nameName = erd.cell(erd.columnEl('users_name'), 'columnName');
+    await erd.focusCell(nameName);
+
+    await erd.clickAt(await erd.centerOf(nameName), { button: 'right' });
+
+    const item = erd.contextMenu.getByText('Delete column', { exact: true });
+    await expect(item).toBeVisible();
+    await item.click();
+
+    await expect.poll(() => erd.columnIds('users')).toEqual(['users_id']);
+    expect(await erd.tableIds()).toEqual(['users']);
+  });
+
+  test('right-clicking a row of a column selection deletes every selected column', async ({
+    erd,
+  }) => {
+    await erd.seed(oneTable());
+    const idName = erd.cell(erd.columnEl('users_id'), 'columnName');
+    const nameName = erd.cell(erd.columnEl('users_name'), 'columnName');
+
+    await erd.focusCell(nameName);
+    await erd.page.keyboard.down(MOD_KEY);
+    await erd.clickAt(await erd.centerOf(idName));
+    await erd.page.keyboard.up(MOD_KEY);
+    await expect(erd.selectedColumns()).toHaveCount(2);
+
+    await erd.clickAt(await erd.centerOf(nameName), { button: 'right' });
+
+    const item = erd.contextMenu.getByText('Delete columns', { exact: true });
+    await expect(item).toBeVisible();
+    await item.click();
+
+    await expect.poll(() => erd.columnIds('users')).toEqual([]);
+    expect(await erd.tableIds()).toEqual(['users']);
+  });
+
+  test('right-clicking a memo offers its own menu, whose Color opens the picker and Delete removes it', async ({
+    erd,
+  }) => {
+    await erd.seed(tablesAndMemo());
+
+    await erd.clickAt(await memoHeaderPoint(erd), { button: 'right' });
+
+    await expect(erd.contextMenu.first()).toBeVisible();
+    await expect(erd.contextMenuItem('New Table')).toHaveCount(0);
+    await expect(erd.contextMenuItem('Primary Key')).toHaveCount(0);
+    await erd.contextMenu.getByText('Color', { exact: true }).click();
+    await expect(erd.colorPicker).toBeVisible();
+
+    await erd.clickAt(await memoHeaderPoint(erd), { button: 'right' });
+    await expect(lastRootRow(erd)).toHaveText(/^\s*Delete\s*Delete\s*$/);
+    await lastRootRow(erd).click();
+
+    await expect.poll(() => erd.memoIds()).toEqual([]);
+    expect(await erd.tableIds()).toEqual(['users', 'posts']);
+  });
+
+  test('right-clicking a memo in a selection deletes the whole selection', async ({
+    erd,
+  }) => {
+    await erd.seed(tablesAndMemo());
+
+    await erd.clickAt(await erd.tableHeaderPoint('users'));
+    await erd.modClickAt(await memoHeaderPoint(erd));
+    await erd.clickAt(await memoHeaderPoint(erd), { button: 'right' });
+
+    const item = erd.contextMenu.getByText('Delete selected', { exact: true });
+    await expect(item).toBeVisible();
+    await item.click();
+
+    await expect.poll(() => erd.memoIds()).toEqual([]);
+    expect(await erd.tableIds()).toEqual(['posts']);
   });
 
   test('right-clicking a relationship offers its type and deletes it', async ({
@@ -206,6 +397,7 @@ type MenuBoxes = {
 /**
  * Samples every menu box on each animation frame until the call it returns
  * stops it, so a menu painted once where it opened before it moves is caught.
+ * Stopping waits a frame first, so the menu as the test left it is sampled too.
  */
 async function recordMenuFrames(erd: ErdEditorPage) {
   await erd.page.evaluate(() => {
@@ -229,7 +421,10 @@ async function recordMenuFrames(erd: ErdEditorPage) {
   });
 
   return async () => {
-    const frames = await erd.page.evaluate(() => {
+    const frames = await erd.page.evaluate(async () => {
+      // A menu that opened since the last frame has no sample yet. The tick
+      // asked for the next frame before this did, so it runs first.
+      await new Promise(resolve => requestAnimationFrame(resolve));
       const recorded = Reflect.get(window, '__menuFrames') as MenuBoxes[];
       Reflect.set(window, '__menuFrames', null);
       return recorded;
@@ -265,8 +460,11 @@ async function expectOnScreen(menu: Locator) {
 const rootMenu = (erd: ErdEditorPage) =>
   erd.host.locator('.context-menu-content[data-id="root"]');
 
+/** The row whose name is the whole of name, which New Table Group is not for New Table. */
 const rowOf = (menu: Locator, name: string) =>
-  menu.locator(':scope > div:not(.context-menu-content)', { hasText: name });
+  menu.locator(':scope > div:not(.context-menu-content)', {
+    has: menu.page().getByText(name, { exact: true }),
+  });
 
 test.describe('context menu at the window edge', () => {
   test.use({ viewport: EDGE_VIEWPORT });
@@ -358,7 +556,18 @@ test.describe('context menu at the window edge', () => {
   }) => {
     await erd.seed(oneTable());
 
-    const at = { x: 850, y: 258 };
+    // A press low enough pushes the menu to one place, its bottom on the
+    // window's, so a menu opened low first shows where New Table lands and the
+    // pointer goes there, whatever rows the menu holds.
+    const low = { x: 850, y: 500 };
+    await erd.hoverAt(low);
+    await erd.clickAt(low, { button: 'right' });
+    const pushed = await rowOf(rootMenu(erd), 'New Table').boundingBox();
+    if (!pushed) throw new Error('no New Table row');
+    await page.keyboard.press('Escape');
+    await expect(rootMenu(erd)).toHaveCount(0);
+
+    const at = { x: low.x, y: Math.round(pushed.y + pushed.height / 2) };
     await erd.hoverAt(at);
     await erd.clickAt(at, { button: 'right' });
     await expect(erd.contextMenuItem('New Table')).toBeVisible();
@@ -426,12 +635,20 @@ test.describe('context menu at the window edge', () => {
       if (!box) throw new Error('the menu has no box');
       const { originX, originY } = await erd.settings();
 
+      // One wheel past the whole overflow, whatever rows the menu holds.
+      const overflow = await menu.evaluate(
+        el => el.scrollHeight - el.clientHeight
+      );
+      expect(overflow).toBeGreaterThan(0);
+
       await page.mouse.move(box.x + box.width - 16, at.y, { steps: 4 });
-      await page.mouse.wheel(0, 200);
+      await page.mouse.wheel(0, overflow + 100);
 
       await expect
-        .poll(() => menu.evaluate(el => el.scrollTop))
-        .toBeGreaterThan(0);
+        .poll(() =>
+          menu.evaluate(el => el.scrollHeight - el.clientHeight - el.scrollTop)
+        )
+        .toBeLessThan(1);
       await erd.whenDrawn();
       expect(await erd.settings()).toMatchObject({ originX, originY });
 

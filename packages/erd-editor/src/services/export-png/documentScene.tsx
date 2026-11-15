@@ -1,18 +1,28 @@
 /** @jsxHost konva */
 
+import { whenDrawn } from '@dineug/r-html-konva';
 import { isNumber } from 'es-toolkit';
 import type { Stage } from 'konva/lib/Stage';
 
 import { appDestroy, createAppContext } from '@/components/appContext';
 import { initialLoadJsonAction$ } from '@/engine/modules/editor/generator.actions';
-import { changeZoomLevelAction } from '@/engine/modules/settings/atom.actions';
-import { whenDrawn } from '@/konva/batchDraw';
+import {
+  changeZoomLevelAction,
+  toNameViewModeAction,
+} from '@/engine/modules/settings/atom.actions';
+import { createI18n, type LocaleMessages } from '@/i18n/translate';
+import type { Settings } from '@/internal-types';
 import type { Rect } from '@/konva/scene/metrics';
 import { renderScene } from '@/konva/scene/renderScene';
 import type { Theme } from '@/themes/tokens';
 import { delay } from '@/utils/promise';
 
-import { getExportRect, getExportScale } from './exportBox';
+import {
+  EXPORT_ZOOM_LEVEL,
+  getExportRect,
+  getExportScale,
+  getStageSize,
+} from './exportBox';
 import ExportScene from './ExportScene';
 
 export type DocumentSceneOptions = {
@@ -20,10 +30,21 @@ export type DocumentSceneOptions = {
   theme: Theme;
   toWidth: (text: string) => number;
   /**
-   * The zoom to draw at, for a caller whose editor is at one the document does
-   * not carry. Left out, the document's own zoom is what the image is drawn at.
+   * The longest side the Stage may take, in pixels, which caps the scale below
+   * the export's zoom for a preview or for an svg read off the nodes. The store
+   * keeps that zoom all the same, so either holds the shapes the export does.
    */
-  zoomLevel?: number;
+  maxSide?: number;
+  /**
+   * The language and dictionary the scene's own words are drawn in, a table
+   * with no name say. Left out, the scene draws them in English.
+   */
+  i18n?: LocaleMessages;
+  /**
+   * The names the scene draws, the reader's view, which a lock never saved.
+   * Left out, the scene draws the view the document holds.
+   */
+  nameViewMode?: Settings['nameViewMode'];
 };
 
 export type DocumentScene = {
@@ -32,8 +53,6 @@ export type DocumentScene = {
   box: Rect;
   /** The factor between that box and the Stage the scene was drawn on. */
   scale: number;
-  /** The zoom that was asked for, which scale is that cut to what a canvas holds. */
-  zoomLevel: number;
   destroy: () => void;
 };
 
@@ -45,9 +64,9 @@ export type DocumentScene = {
 const SETTLE_MS = 32;
 
 /**
- * The whole document on a Stage of its own, off any screen. The store is built
- * here rather than borrowed, so the editor's scroll and selection cannot reach
- * the image and it holds the whole document however it was being looked at.
+ * The whole document on a Stage of its own, off any screen, at the export's
+ * zoom. The store is built here rather than borrowed, so the editor's zoom,
+ * scroll and selection cannot reach the image, which holds the whole document.
  *
  * @example
  * const scene = await renderDocumentScene({ doc, theme, toWidth });
@@ -56,16 +75,23 @@ export async function renderDocumentScene({
   doc,
   theme,
   toWidth,
-  zoomLevel,
+  maxSide,
+  i18n,
+  nameViewMode,
 }: DocumentSceneOptions): Promise<DocumentScene> {
   const app = createAppContext({ toWidth }, { devtools: false });
   app.store.dispatchSync(initialLoadJsonAction$(doc));
 
-  // Written into the store rather than carried beside it, because the layer's
-  // scale and the spelling a table is drawn in are read from the same field,
-  // and a document saved with the zoom left out arrives at 1 whatever the editor shows.
-  if (isNumber(zoomLevel)) {
-    app.store.dispatchSync(changeZoomLevelAction({ value: zoomLevel }));
+  // Written over the zoom the document was saved with, because whether a
+  // connector shows its referential action label reads this field.
+  app.store.dispatchSync(changeZoomLevelAction({ value: EXPORT_ZOOM_LEVEL }));
+
+  // Shown on this store alone, as a readonly reader's switch is, so the view
+  // reaches the scene whatever the document's lock holds.
+  if (nameViewMode) {
+    app.store.dispatchSync(
+      toNameViewModeAction(app.store.state, nameViewMode, true)
+    );
   }
 
   await delay(SETTLE_MS);
@@ -73,9 +99,12 @@ export async function renderDocumentScene({
   // Read once the load hooks have run, which is what stamps the connector
   // routes: a sort in another editor retires them while this one draws, and
   // then getRouteBBox answers the anchors inflated by MAX_STUB, a box the union holds.
-  const zoom = app.store.state.settings.zoomLevel;
   const box = getExportRect(app.store.state);
-  const scale = getExportScale(box, zoom);
+  const fitted = getExportScale(box);
+  const scale = isNumber(maxSide)
+    ? Math.min(fitted, maxSide / Math.max(box.width, box.height))
+    : fitted;
+  const stageSize = getStageSize(box, scale);
 
   // Detached on purpose: konva needs a container, and one outside the document
   // is never laid out, never painted and never reachable from the editor. No
@@ -84,9 +113,10 @@ export async function renderDocumentScene({
     app,
     container: document.createElement('div'),
     scene: <ExportScene box={box} scale={scale} />,
-    width: box.width * scale,
-    height: box.height * scale,
+    width: stageSize.width,
+    height: stageSize.height,
     theme,
+    i18n: i18n && createI18n(i18n.locale, i18n.messages),
   });
 
   await whenDrawn();
@@ -95,7 +125,6 @@ export async function renderDocumentScene({
     stage: rendered.stage,
     box,
     scale,
-    zoomLevel: zoom,
     destroy: () => {
       rendered.destroy();
       appDestroy(app);

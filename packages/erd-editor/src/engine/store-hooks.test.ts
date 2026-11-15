@@ -1,17 +1,43 @@
 import { query } from '@dineug/erd-editor-schema';
-import { describe, expect, it } from 'vite-plus/test';
+import { describe, expect, it, vi } from 'vite-plus/test';
 
 import { ColumnOption, ColumnUIKey, Direction } from '@/constants/schema';
 import { Clock } from '@/engine/clock';
+import {
+  initialLoadJsonAction$,
+  loadJsonAction$,
+} from '@/engine/modules/editor/generator.actions';
 import { addRelationshipAction } from '@/engine/modules/relationship/atom.actions';
+import { hooks as relationshipHooks } from '@/engine/modules/relationship/hooks';
 import { addTableAction } from '@/engine/modules/table/atom.actions';
+import { hooks as tableHooks } from '@/engine/modules/table/hooks';
 import {
   addColumnAction,
   changeColumnPrimaryKeyAction,
 } from '@/engine/modules/table-column/atom.actions';
+import { hooks as tableColumnHooks } from '@/engine/modules/table-column/hooks';
+import { createReplicationStore } from '@/engine/replication-store';
 import { createStore, Store } from '@/engine/store';
 import { createHooks } from '@/engine/store-hooks';
 import { bHas } from '@/utils/bit';
+
+/** What every store this file creates reduces, a replica's included. */
+const dispatched = vi.hoisted(() => [] as string[]);
+
+vi.mock('@/engine/store', async importOriginal => {
+  const actual = await importOriginal<typeof import('@/engine/store')>();
+
+  return {
+    ...actual,
+    createStore: (...args: Parameters<typeof actual.createStore>) => {
+      const store = actual.createStore(...args);
+      store.subscribe(actions =>
+        dispatched.push(...actions.map(({ type }) => type))
+      );
+      return store;
+    },
+  };
+});
 
 const settle = () => new Promise(resolve => setTimeout(resolve, 40));
 
@@ -157,6 +183,59 @@ describe('createHooks', () => {
     expect(bHas(column(store, 'c1')!.options, ColumnOption.notNull)).toBe(
       false
     );
+  });
+
+  /** A file holding a memo it no longer lists. */
+  const fileWithTombstone = () =>
+    JSON.stringify({
+      version: '3.0.0',
+      collections: { memoEntities: { removed: { id: 'removed' } } },
+    });
+
+  const loadIn = (load: typeof loadJsonAction$) => (value: string) =>
+    createStore({ toWidth: () => 0, clock: new Clock() }).dispatchSync(
+      load(value)
+    );
+
+  const loadReplica = (value: string) => {
+    const replica = createReplicationStore({ toWidth: () => 0 });
+    replica.setInitialValue(value);
+    replica.destroy();
+  };
+
+  it.each([
+    ['initialLoadJsonAction$', loadIn(initialLoadJsonAction$)],
+    ['loadJsonAction$', loadIn(loadJsonAction$)],
+    ['a replica load', loadReplica],
+  ])('wakes on %s no hook at all', (_, load) => {
+    // The load reducer writes what the document derives before it returns, and
+    // a replica measures its changes from there, so a hook on any action a load
+    // dispatches, its clear included, would read a pan on a stale file as an edit.
+    dispatched.length = 0;
+    load(fileWithTombstone());
+
+    const woken = [...tableHooks, ...tableColumnHooks, ...relationshipHooks]
+      .filter(([pattern]) =>
+        pattern.some(type => dispatched.includes(String(type)))
+      )
+      .map(([, hook]) => hook.name);
+
+    expect(dispatched).toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(/^editor\.(initialL|l)oadJson$/),
+      ])
+    );
+    expect(woken).toEqual([]);
+  });
+
+  it('keeps the record a replica load finds unlisted', () => {
+    const replica = createReplicationStore({ toWidth: () => 0 });
+    replica.setInitialValue(fileWithTombstone());
+
+    expect(
+      JSON.parse(replica.runtimeValue).collections.memoEntities
+    ).toHaveProperty('removed');
+    replica.destroy();
   });
 
   it('destroy is safe to call twice', () => {

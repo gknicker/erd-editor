@@ -1,34 +1,46 @@
 // @vitest-environment node
 
 import { toJson } from '@dineug/erd-editor-schema';
+import type { AnyAction } from '@dineug/r-html';
+import { cloneDeep } from 'es-toolkit';
 import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
 
 import {
   addColumn,
+  changeColumns,
   colorTable,
+  mapWithNewColumn,
   moveTable,
   play,
   renameTable,
   resizeMemo,
+  SEED_SCENARIOS,
   setColumnNotNull,
   setColumnPrimaryKey,
   setDatabase,
 } from '@/__test-utils__/peerScenarios';
 import {
-  comparable,
   createSeedValue,
   createSession,
   SEED,
   type Session,
   settle,
 } from '@/__test-utils__/peerSeed';
-import { Database } from '@/constants/schema';
+import { Database, ReferentialAction } from '@/constants/schema';
+import {
+  changeRelationshipColumnsAction,
+  changeRelationshipOnDeleteAction,
+  removeRelationshipAction,
+} from '@/engine/modules/relationship/atom.actions';
 import {
   changeTableColorAction,
   changeTableNameAction,
 } from '@/engine/modules/table/atom.actions';
+import { removeTableAction$ } from '@/engine/modules/table/generator.actions';
+import { removeColumnAction$ } from '@/engine/modules/table-column/generator.actions';
 import { createPeerStore, type PeerStore } from '@/engine/peer-store';
 import { HISTORY_LIMIT } from '@/engine/rx-store';
+import type { RootState } from '@/engine/state';
 
 const cleanups: Array<() => void> = [];
 
@@ -99,8 +111,8 @@ describe('peer undo reverts the peer’s last dispatch only (AC-E8)', () => {
     expect(
       user.rxStore.state.collections.tableEntities[SEED.empty].columnIds
     ).toEqual([]);
-    expect(comparable(peer.value)).toEqual(
-      comparable(toJson(user.rxStore.state))
+    expect(JSON.parse(peer.runtimeValue)).toEqual(
+      JSON.parse(toJson(user.rxStore.state))
     );
   });
 
@@ -290,6 +302,28 @@ describe('a reseed starts the history over', () => {
     });
     expect(tableName(peer, SEED.users)).toBe('users');
   });
+
+  it('forgets them on a reseed too, which takes the registers and version beside the value', async () => {
+    const author = seededPeer();
+    renameUsers(author, 'accounts');
+    const peer = seededPeer();
+    renameUsers(peer, 'members');
+    play(peer, addColumn(SEED.empty));
+    peer.undo();
+    await settle();
+    expect(peer.state.editor).toMatchObject({ hasUndo: true, hasRedo: true });
+
+    peer.reseed(author.runtimeValue, {
+      lww: author.getLWW(),
+      version: author.getVersion(),
+    });
+    await settle();
+
+    expect(peer.state.editor).toMatchObject({ hasUndo: false, hasRedo: false });
+    expect(peer.undo()).toEqual({ label: null, entries: 0, skipped: [] });
+    expect(peer.redo()).toEqual({ label: null, entries: 0, skipped: [] });
+    expect(tableName(peer, SEED.users)).toBe('accounts');
+  });
 });
 
 describe('the labels keep to what the history holds', () => {
@@ -403,7 +437,7 @@ describe('a group of dispatches is one undo unit', () => {
     expect(tableName(peer, SEED.users)).toBe('users');
   });
 
-  it('refuses undo, redo and a reseed inside a group, and keeps the group whole', () => {
+  it('refuses undo, redo and both reseeds inside a group, and keeps the group whole', () => {
     const peer = seededPeer();
 
     peer.group('batch', () => {
@@ -413,6 +447,12 @@ describe('a group of dispatches is one undo unit', () => {
       expect(() => peer.setInitialValue(createSeedValue())).toThrow(
         'setInitialValue cannot run inside a group'
       );
+      expect(() =>
+        peer.reseed(createSeedValue(), {
+          lww: peer.getLWW(),
+          version: peer.getVersion(),
+        })
+      ).toThrow('reseed cannot run inside a group');
     });
 
     expect(peer.undo()).toEqual({ label: 'batch', entries: 1, skipped: [] });
@@ -435,5 +475,239 @@ describe('a group of dispatches is one undo unit', () => {
     expect(() => peer.group('x', () => undefined)).toThrow(
       expect.objectContaining({ code: 'destroyed', operation: 'group' })
     );
+  });
+});
+
+describe('a peer’s undo of a mapping edit', () => {
+  const toOrders = (columnId: string) =>
+    changeColumns(
+      SEED.relationship,
+      { tableId: SEED.users, columnIds: [SEED.userId] },
+      { tableId: SEED.orders, columnIds: [columnId] }
+    );
+
+  const endOf = ({ collections }: Pick<RootState, 'collections'>) =>
+    collections.relationshipEntities[SEED.relationship].end.columnIds;
+
+  /** A held session whose two sides have heard each other's handshake. */
+  async function heldSession() {
+    const opened = createSession({ held: true });
+    cleanups.push(opened.destroy);
+    opened.deliver();
+    await settle();
+    return opened;
+  }
+
+  /** Delivers both ways and lets the hooks run. */
+  async function exchange({ deliver }: Session) {
+    deliver();
+    await settle();
+  }
+
+  const expectConverged = ({ peer, user }: Session) =>
+    expect(JSON.parse(peer.runtimeValue)).toEqual(
+      JSON.parse(toJson(user.rxStore.state))
+    );
+
+  it('records one entry for a link to existing columns and one for a mapping edit', () => {
+    const peer = seededPeer();
+
+    expect(play(peer, SEED_SCENARIOS.linkColumns()).historyEntries).toBe(1);
+    expect(play(peer, toOrders(SEED.orderNote)).historyEntries).toBe(1);
+  });
+
+  it('writes the mapping it replaced back over a later edit from the user, as the undo of any field does', async () => {
+    const opened = await heldSession();
+    const { peer, user } = opened;
+
+    play(peer, toOrders(SEED.orderNote));
+    await exchange(opened);
+    user.rxStore.dispatchSync(
+      changeRelationshipColumnsAction({
+        id: SEED.relationship,
+        start: { tableId: SEED.users, columnIds: [SEED.userId] },
+        end: { tableId: SEED.orders, columnIds: [SEED.orderId] },
+      })
+    );
+    await exchange(opened);
+    expect(endOf(peer.state)).toEqual([SEED.orderId]);
+
+    expect(peer.undo().entries).toBe(1);
+    await exchange(opened);
+
+    expect(endOf(peer.state)).toEqual([SEED.orderUser]);
+    expect(endOf(user.rxStore.state)).toEqual([SEED.orderUser]);
+    expectConverged(opened);
+  });
+
+  it('keeps the ON DELETE the user set after its edit, a field of its own', async () => {
+    const opened = await heldSession();
+    const { peer, user } = opened;
+
+    play(peer, toOrders(SEED.orderNote));
+    await exchange(opened);
+    user.rxStore.dispatchSync(
+      changeRelationshipOnDeleteAction({
+        id: SEED.relationship,
+        value: ReferentialAction.cascade,
+      })
+    );
+    await exchange(opened);
+
+    peer.undo();
+    await exchange(opened);
+
+    for (const { collections } of [peer.state, user.rxStore.state]) {
+      expect(collections.relationshipEntities[SEED.relationship]).toMatchObject(
+        {
+          onDelete: ReferentialAction.cascade,
+          end: { columnIds: [SEED.orderUser] },
+        }
+      );
+    }
+    expectConverged(opened);
+  });
+
+  it('spends its undo on a relationship the user removed, which stays removed', async () => {
+    const opened = await heldSession();
+    const { peer, user } = opened;
+
+    play(peer, toOrders(SEED.orderNote));
+    await exchange(opened);
+    user.rxStore.dispatchSync(
+      removeRelationshipAction({ id: SEED.relationship })
+    );
+    await exchange(opened);
+
+    expect(peer.undo()).toMatchObject({ label: 'changeColumns', entries: 1 });
+    await exchange(opened);
+
+    for (const state of [peer.state, user.rxStore.state]) {
+      expect(state.doc.relationshipIds).toEqual([]);
+      expect(endOf(state)).toEqual([SEED.orderUser]);
+    }
+    expect(peer.undo().entries).toBe(0);
+    expectConverged(opened);
+  });
+
+  it('takes back the new column a mapping added together with the relationship, in one undo', async () => {
+    const opened = await heldSession();
+    const { peer, user } = opened;
+    const relationshipIds = [...peer.state.doc.relationshipIds];
+
+    const report = play(
+      peer,
+      mapWithNewColumn(SEED.users, SEED.empty, [SEED.userId])
+    );
+    await exchange(opened);
+    expect(report.historyEntries).toBe(1);
+    expect(
+      peer.state.collections.tableEntities[SEED.empty].columnIds
+    ).toHaveLength(1);
+
+    expect(peer.undo().entries).toBe(1);
+    await exchange(opened);
+
+    for (const state of [peer.state, user.rxStore.state]) {
+      expect(state.collections.tableEntities[SEED.empty].columnIds).toEqual([]);
+      expect(state.doc.relationshipIds).toEqual(relationshipIds);
+    }
+    expectConverged(opened);
+  });
+});
+
+/**
+ * The undo of a removal adds the entity back by its id over whatever record a
+ * store still holds, so a peer brings a table back whole only when its seed
+ * carried the removed records: the runtime value does, the file form does not.
+ */
+describe('a peer that joins after removals its author then undoes', () => {
+  /** The users name column and the orders table removed, as one author did. */
+  function authorWithRemovals(): PeerStore {
+    const author = seededPeer();
+    author.dispatch([removeColumnAction$(SEED.users, [SEED.userName])], {
+      label: 'removeColumns',
+    });
+    author.dispatch([removeTableAction$(SEED.orders)], {
+      label: 'removeTable',
+    });
+    return author;
+  }
+
+  /** Joins on what seedOf hands over, then hears the author undo both removals. */
+  async function joinThenUndo(seedOf: (author: PeerStore) => string) {
+    const author = authorWithRemovals();
+    await settle();
+    const joiner = createPeerStore({ nickname: 'joiner', presence: false });
+    cleanups.push(joiner.destroy);
+    joiner.setInitialValue(seedOf(author));
+    const batches: AnyAction[][] = [];
+    cleanups.push(
+      author.subscribe(actions => batches.push(cloneDeep(actions)))
+    );
+
+    author.undo();
+    author.undo();
+    await settle();
+    batches.forEach(batch => joiner.receive(batch));
+    await settle();
+    return { author, joiner };
+  }
+
+  const restored = ({ state }: PeerStore) => {
+    const { tableEntities, tableColumnEntities } = state.collections;
+    return {
+      tableIds: state.doc.tableIds,
+      orders: {
+        name: tableEntities[SEED.orders].name,
+        columnIds: tableEntities[SEED.orders].columnIds,
+      },
+      usersColumnIds: tableEntities[SEED.users].columnIds,
+      userName: tableColumnEntities[SEED.userName].name,
+    };
+  };
+
+  it('carries the removed records and the column order in the runtime value alone', () => {
+    const author = authorWithRemovals();
+    const saved = JSON.parse(author.value).collections;
+    const held = JSON.parse(author.runtimeValue).collections;
+
+    expect(held.tableEntities[SEED.orders].name).toBe('orders');
+    expect(saved.tableEntities).not.toHaveProperty(SEED.orders);
+    expect(held.tableColumnEntities[SEED.userName].name).toBe('name');
+    expect(saved.tableColumnEntities).not.toHaveProperty(SEED.userName);
+    expect(held.tableEntities[SEED.users].seqColumnIds).toEqual([
+      SEED.userId,
+      SEED.userName,
+    ]);
+    expect(saved.tableEntities[SEED.users]).not.toHaveProperty('seqColumnIds');
+  });
+
+  it('brings the table back with its name and columns, and the column with its name, on a peer seeded from the runtime value', async () => {
+    const { author, joiner } = await joinThenUndo(
+      author => author.runtimeValue
+    );
+
+    expect(restored(joiner)).toEqual({
+      tableIds: [SEED.users, SEED.empty, SEED.orders],
+      orders: {
+        name: 'orders',
+        columnIds: [SEED.orderId, SEED.orderUser, SEED.orderNote],
+      },
+      usersColumnIds: [SEED.userId, SEED.userName],
+      userName: 'name',
+    });
+    expect(restored(joiner)).toEqual(restored(author));
+  });
+
+  it('brings back a nameless table with no columns, and a nameless column, on a peer seeded from the file form', async () => {
+    const { author, joiner } = await joinThenUndo(author => author.value);
+
+    expect(restored(joiner)).toMatchObject({
+      orders: { name: '', columnIds: [] },
+      usersColumnIds: [SEED.userId, SEED.userName],
+      userName: '',
+    });
+    expect(restored(author).orders.name).toBe('orders');
   });
 });

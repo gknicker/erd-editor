@@ -3,6 +3,7 @@ import {
   hostExportFileCommand,
   hostImportFileCommand,
   hostInitialCommand,
+  hostSaveLocaleCommand,
   hostSaveReplicationCommand,
   hostSaveThemeCommand,
   hostSaveValueCommand,
@@ -18,6 +19,7 @@ import {
   createExtensionContext,
   createWebview,
   createWorkspaceConfiguration,
+  env,
   fireConfigurationChange,
   resetVscodeMock,
   Uri,
@@ -153,16 +155,18 @@ describe('ErdEditor', () => {
   });
 
   describe('hostInitialCommand', () => {
-    it('answers the handshake with theme, readonly and value, in that order', async () => {
+    it('answers the handshake with theme, locale, readonly and value, in that order', async () => {
       workspace.getConfiguration.mockReturnValue(
         createWorkspaceConfiguration({
           values: {
             appearance: 'light',
             grayColor: 'sand',
             accentColor: 'ruby',
+            locale: 'ja-JP',
           },
         })
       );
+      env.language = 'ko';
       const { webview, others } = await bootstrap({
         content: '{"version":"3.0.0"}',
         siblings: 1,
@@ -182,6 +186,10 @@ describe('ErdEditor', () => {
             accentColor: 'ruby',
           },
         },
+        {
+          type: 'webviewUpdateLocaleCommand',
+          payload: { locale: 'ja-JP', systemLocale: 'ko' },
+        },
         { type: 'webviewUpdateReadonlyCommand', payload: false },
         {
           type: 'webviewInitialValueCommand',
@@ -198,11 +206,28 @@ describe('ErdEditor', () => {
       expect(webview.postMessage.mock.calls[0][0]).toEqual({
         type: 'webviewUpdateThemeCommand',
         payload: {
-          appearance: 'dark',
+          appearance: 'auto',
           grayColor: 'slate',
           accentColor: 'indigo',
         },
       });
+    });
+
+    it("sends auto with VS Code's display language when no locale is configured", async () => {
+      const config = createWorkspaceConfiguration();
+      workspace.getConfiguration.mockReturnValue(config);
+      const { webview } = await bootstrap();
+
+      webview.__receive(Bridge.executeCommand(hostInitialCommand, undefined));
+
+      expect(webview.postMessage.mock.calls[1][0]).toEqual({
+        type: 'webviewUpdateLocaleCommand',
+        payload: { locale: 'auto', systemLocale: 'en' },
+      });
+      expect(workspace.getConfiguration).toHaveBeenCalledWith(
+        'dineug.erd-editor'
+      );
+      expect(config.get).toHaveBeenCalledWith('locale', 'auto');
     });
 
     it('reports readonly for a git-scheme document — that file cannot be written', async () => {
@@ -212,13 +237,13 @@ describe('ErdEditor', () => {
 
       webview.__receive(Bridge.executeCommand(hostInitialCommand, undefined));
 
-      expect(webview.postMessage.mock.calls[1][0]).toEqual({
+      expect(webview.postMessage.mock.calls[2][0]).toEqual({
         type: 'webviewUpdateReadonlyCommand',
         payload: true,
       });
     });
 
-    it('reports the webview ready to the registry after the three answers, never before', async () => {
+    it('reports the webview ready to the registry after the four answers, never before', async () => {
       const { webview, document, registry } = await bootstrap();
       // Recorded, not asserted, inside: the bridge swallows a listener's throw.
       let postedFirst = -1;
@@ -228,9 +253,31 @@ describe('ErdEditor', () => {
 
       webview.__receive(Bridge.executeCommand(hostInitialCommand, undefined));
 
-      expect(postedFirst).toBe(3);
+      expect(postedFirst).toBe(4);
       expect(registry.onWebviewReady).toHaveBeenCalledTimes(1);
       expect(registry.onWebviewReady).toHaveBeenCalledWith(document, webview);
+    });
+
+    it('seeds the webview with the runtime value the last save carried, not the bytes it wrote', async () => {
+      const { webview, document } = await bootstrap({
+        content: '{"file":"as opened"}',
+      });
+      webview.__receive(
+        Bridge.executeCommand(hostSaveValueCommand, {
+          value: '{"file":"as saved"}',
+          changed: true,
+          runtimeValue: '{"runtime":"with removed entities"}',
+        })
+      );
+      await flush();
+
+      webview.__receive(Bridge.executeCommand(hostInitialCommand, undefined));
+
+      expect(document.content).toEqual(encoder.encode('{"file":"as saved"}'));
+      expect(webview.postMessage.mock.calls[3][0]).toEqual({
+        type: 'webviewInitialValueCommand',
+        payload: { value: '{"runtime":"with removed entities"}' },
+      });
     });
 
     it('decodes the stored bytes as utf-8, not latin-1', async () => {
@@ -240,7 +287,7 @@ describe('ErdEditor', () => {
 
       webview.__receive(Bridge.executeCommand(hostInitialCommand, undefined));
 
-      expect(webview.postMessage.mock.calls[2][0]).toEqual({
+      expect(webview.postMessage.mock.calls[3][0]).toEqual({
         type: 'webviewInitialValueCommand',
         payload: { value: '{"name":"주문 테이블"}' },
       });
@@ -253,7 +300,11 @@ describe('ErdEditor', () => {
       const update = vi.spyOn(document, 'update');
 
       webview.__receive(
-        Bridge.executeCommand(hostSaveValueCommand, { value: 'héllo' })
+        Bridge.executeCommand(hostSaveValueCommand, {
+          value: 'héllo',
+          changed: true,
+          runtimeValue: 'héllo',
+        })
       );
       await flush();
 
@@ -264,22 +315,105 @@ describe('ErdEditor', () => {
       expect(document.content).toEqual(encoder.encode('héllo'));
     });
 
+    it('keeps the runtime value in memory beside the bytes, writing only the value', async () => {
+      const { webview, document } = await bootstrap();
+
+      webview.__receive(
+        Bridge.executeCommand(hostSaveValueCommand, {
+          value: '{"saved":true}',
+          changed: true,
+          runtimeValue: '{"saved":true,"removed":["users"]}',
+        })
+      );
+      await flush();
+
+      expect(document.content).toEqual(encoder.encode('{"saved":true}'));
+      expect(document.runtimeValue).toBe('{"saved":true,"removed":["users"]}');
+    });
+
     it('tells the registry the replica saved once the content holds the value', async () => {
       const { webview, document, registry } = await bootstrap();
       let contentThen: Uint8Array | undefined;
+      let runtimeThen: string | undefined;
       registry.onValueSaved.mockImplementation(() => {
         contentThen = document.content;
+        runtimeThen = document.runtimeValue;
       });
 
       webview.__receive(
-        Bridge.executeCommand(hostSaveValueCommand, { value: 'saved' })
+        Bridge.executeCommand(hostSaveValueCommand, {
+          value: 'saved',
+          changed: true,
+          runtimeValue: 'held',
+        })
       );
       await flush();
 
       expect(contentThen).toEqual(encoder.encode('saved'));
+      expect(runtimeThen).toBe('held');
       expect(registry.onValueSaved).toHaveBeenCalledTimes(1);
       expect(registry.onValueSaved).toHaveBeenCalledWith(document, webview);
     });
+
+    it('leaves content and the tab as they are for a save that changed nothing, keeps its runtime value and still reports it', async () => {
+      const { webview, document, registry } = await bootstrap({
+        content: '{"written":"by an older release"}',
+      });
+      const update = vi.spyOn(document, 'update');
+      const dirtied = vi.fn();
+      document.onDidChangeContent(dirtied);
+
+      webview.__receive(
+        Bridge.executeCommand(hostSaveValueCommand, {
+          value: '{"written":"by this replica"}',
+          changed: false,
+          runtimeValue: '{"written":"by this replica","zIndex":3}',
+        })
+      );
+      await flush();
+
+      expect(update).not.toHaveBeenCalled();
+      expect(dirtied).not.toHaveBeenCalled();
+      expect(document.content).toEqual(
+        encoder.encode('{"written":"by an older release"}')
+      );
+      expect(document.runtimeValue).toBe(
+        '{"written":"by this replica","zIndex":3}'
+      );
+      expect(registry.onValueSaved).toHaveBeenCalledTimes(1);
+      expect(registry.onValueSaved).toHaveBeenCalledWith(document, webview);
+    });
+
+    it.each(['git', 'conflictResolution'])(
+      'never dirties a read-only %s view, even for a save that changed the value, and keeps its runtime value and reports it',
+      async scheme => {
+        const { webview, document, registry } = await bootstrap({
+          uri: Uri.parse(`${scheme}:/workspace/sample.erd`),
+          content: '{"scrollTop":0}',
+        });
+        const update = vi.spyOn(document, 'update');
+        const dirtied = vi.fn();
+        document.onDidChangeContent(dirtied);
+
+        // A scroll in a view of a file whose viewport is unlocked: the value
+        // changed, but nothing can write such a view back.
+        webview.__receive(
+          Bridge.executeCommand(hostSaveValueCommand, {
+            value: '{"scrollTop":120}',
+            changed: true,
+            runtimeValue: '{"scrollTop":120}',
+          })
+        );
+        await flush();
+
+        expect(update).not.toHaveBeenCalled();
+        expect(dirtied).not.toHaveBeenCalled();
+        expect(document.content).toEqual(encoder.encode('{"scrollTop":0}'));
+        expect(document.runtimeValue).toBe('{"scrollTop":120}');
+        expect(registry.onValueSaved).toHaveBeenCalledTimes(1);
+        expect(registry.onValueSaved).toHaveBeenCalledWith(document, webview);
+      }
+    );
   });
 
   describe('hostSaveReplicationCommand', () => {
@@ -439,6 +573,36 @@ describe('ErdEditor', () => {
           type: 'dbml',
           op: 'set',
           value: 'Table users { id int [pk] }',
+        },
+      });
+    });
+
+    it('relays the mode of an Import and Add back with the file', async () => {
+      const { webview } = await bootstrap();
+      window.showOpenDialog.mockResolvedValue([
+        Uri.file('/workspace/schema.sql'),
+      ]);
+      workspace.fs.readFile.mockResolvedValue(
+        encoder.encode('CREATE TABLE a (id int);')
+      );
+
+      webview.__receive(
+        Bridge.executeCommand(hostImportFileCommand, {
+          type: 'sql',
+          op: 'set',
+          accept: '.sql',
+          mode: 'append',
+        })
+      );
+      await flush();
+
+      expect(webview.postMessage).toHaveBeenCalledWith({
+        type: 'webviewImportFileCommand',
+        payload: {
+          type: 'sql',
+          op: 'set',
+          value: 'CREATE TABLE a (id int);',
+          mode: 'append',
         },
       });
     });
@@ -763,6 +927,30 @@ describe('ErdEditor', () => {
     });
   });
 
+  describe('hostSaveLocaleCommand', () => {
+    it('persists the picked display language through the configuration api', async () => {
+      const config = createWorkspaceConfiguration();
+      workspace.getConfiguration.mockReturnValue(config);
+      const { webview } = await bootstrap();
+
+      webview.__receive(
+        Bridge.executeCommand(hostSaveLocaleCommand, { locale: 'he-IL' })
+      );
+      webview.__receive(
+        Bridge.executeCommand(hostSaveLocaleCommand, { locale: 'auto' })
+      );
+
+      expect(workspace.getConfiguration).toHaveBeenCalledWith(
+        'dineug.erd-editor'
+      );
+      expect(config.update.mock.calls).toEqual([
+        ['locale', 'he-IL', ConfigurationTarget.Global],
+        ['locale', 'auto', ConfigurationTarget.Global],
+      ]);
+      expect(webview.postMessage).not.toHaveBeenCalled();
+    });
+  });
+
   describe('configuration changes', () => {
     it('pushes a fresh theme when a theme key changes', async () => {
       const { webview } = await bootstrap();
@@ -789,7 +977,39 @@ describe('ErdEditor', () => {
       });
     });
 
-    it('asks about every theme key, scoped to the document uri', async () => {
+    it('pushes the display language when the locale setting changes, and no theme', async () => {
+      const { webview } = await bootstrap();
+      workspace.getConfiguration.mockReturnValue(
+        createWorkspaceConfiguration({ values: { locale: 'ar-SA' } })
+      );
+      env.language = 'de';
+
+      fireConfigurationChange(['dineug.erd-editor.locale']);
+
+      expect(webview.postMessage.mock.calls).toEqual([
+        [
+          {
+            type: 'webviewUpdateLocaleCommand',
+            payload: { locale: 'ar-SA', systemLocale: 'de' },
+          },
+        ],
+      ]);
+    });
+
+    it('pushes the theme and then the display language for an event that changes both', async () => {
+      const { webview } = await bootstrap();
+
+      fireConfigurationChange([
+        'dineug.erd-editor.locale',
+        'dineug.erd-editor.theme.accentColor',
+      ]);
+
+      expect(
+        webview.postMessage.mock.calls.map(([action]) => action.type)
+      ).toEqual(['webviewUpdateThemeCommand', 'webviewUpdateLocaleCommand']);
+    });
+
+    it('asks about every theme key and the locale, scoped to the document uri', async () => {
       const { document } = await bootstrap();
       const affectsConfiguration = vi.fn(
         (_section: string, _scope?: unknown) => false
@@ -806,6 +1026,7 @@ describe('ErdEditor', () => {
         ['dineug.erd-editor.theme.grayColor', document.uri],
         ['dineug.erd-editor.theme.accentColor', document.uri],
         ['workbench.colorTheme', document.uri],
+        ['dineug.erd-editor.locale', document.uri],
       ]);
     });
 
@@ -844,13 +1065,14 @@ describe('ErdEditor', () => {
       expect(webview.postMessage).not.toHaveBeenCalled();
     });
 
-    it('stops pushing theme updates on configuration changes', async () => {
+    it('stops pushing theme and locale updates on configuration changes', async () => {
       const { webview, disposable } = await bootstrap();
 
       disposable.dispose();
       fireConfigurationChange([
         'workbench.colorTheme',
         'dineug.erd-editor.theme.appearance',
+        'dineug.erd-editor.locale',
       ]);
 
       expect(webview.postMessage).not.toHaveBeenCalled();
@@ -862,6 +1084,8 @@ describe('ErdEditor', () => {
       const bridge = bridgeOf(editor);
       const save = Bridge.executeCommand(hostSaveValueCommand, {
         value: 'ignored',
+        changed: true,
+        runtimeValue: 'ignored',
       });
 
       bridge.executeAction(save);

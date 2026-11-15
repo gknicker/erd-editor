@@ -1,15 +1,29 @@
-import { nanoid } from 'nanoid';
+import type { ERDEditorSchemaV3 } from '@dineug/erd-editor-schema';
+import { uuid25 } from '@dineug/uuid';
 
 import { DEFAULT_HEIGHT, DEFAULT_WIDTH } from '@/constants/layout';
+import { CanvasType } from '@/constants/schema';
+import type { DictionaryKind } from '@/engine/modules/dictionary/actions';
 import { Point, ValuesType } from '@/internal-types';
 import { arrayHas } from '@/utils/arrayHas';
 import { Rect } from '@/utils/dragSelect';
+
+/** Whether a history can undo and redo. */
+export type HasHistory = {
+  hasUndo: boolean;
+  hasRedo: boolean;
+};
 
 export type Editor = {
   id: string;
   selectedMap: Record<string, SelectType>;
   hasUndo: boolean;
   hasRedo: boolean;
+  /**
+   * Whether each dictionary sheet's own history can undo and redo: the Dictionary
+   * tab's edits go there, never into the document's (hasUndo, hasRedo).
+   */
+  dictionaryHistory: Record<DictionaryKind, HasHistory>;
   viewport: Viewport;
   /**
    * Whether a loaded origin still waits to be pulled into the content's travel
@@ -17,9 +31,17 @@ export type Editor = {
    * first changeViewport that reports one applies the pull and clears this.
    */
   scrollPullPending: boolean;
+  /**
+   * Whether a measured screen has shown the origin the settings hold. A load
+   * that finds none clears it until the first measure, and a clear, which moves
+   * no origin, leaves it; a rejoin keeping the screen keeps the origin by it.
+   */
+  originShown: boolean;
   focusTable: FocusTable | null;
   /** The memo whose body an overlay editor is open on, and null while none is. */
   editMemoId: string | null;
+  /** The table group whose name an overlay editor is open on, and null while none is. */
+  editTableGroupId: string | null;
   /**
    * How far down its body each memo is shown from, by memo id. The scene and
    * the overlay editor both read it, so the lines a body shows survive the
@@ -32,6 +54,11 @@ export type Editor = {
   openMap: Record<string, boolean>;
   /** Whether the pointer pans the canvas instead of reaching the scene under it. */
   handTool: boolean;
+  /**
+   * Whether the next main press on the canvas draws a table group instead of
+   * reaching the scene under it. Local to this client, never the file or a peer.
+   */
+  drawTableGroup: boolean;
   /** Whether the editor is drawn without its scrollbars, its map and its toolbar. */
   zenMode: boolean;
   draggableColumn: DraggableColumn | null;
@@ -49,7 +76,50 @@ export type Editor = {
   views: EditorViews;
   /** Which of its two modes the visualization tab shows. Remembered for the session. */
   visualizationMode: VisualizationMode;
+  /**
+   * The last tab the reader left for another, Settings never among them: the
+   * one a canvas type lock taken on the Settings tab holds.
+   */
+  lastCanvasType: string;
+  /**
+   * The document's own value of each setting a readonly reader turned on its
+   * screen, null while none is held. Local to this client, never the file, the
+   * history or a peer.
+   */
+  screenBaseline: ScreenBaseline | null;
 };
+
+type Settings = ERDEditorSchemaV3['settings'];
+
+/** The placement fields a screen turns as one, since one saved alone opens elsewhere. */
+export type ScreenViewport = Pick<
+  Settings,
+  'originX' | 'originY' | 'zoomLevel'
+>;
+
+/**
+ * Each setting the document holds under a reader's screen, by unit, recorded
+ * by the first screen turn of that unit and dropped once the document's value
+ * may show again.
+ */
+export type ScreenBaseline = Partial<
+  Pick<
+    Settings,
+    | 'canvasType'
+    | 'nameViewMode'
+    | 'show'
+    | 'database'
+    | 'language'
+    | 'tableNameCase'
+    | 'columnNameCase'
+    | 'bracketType'
+  >
+> & {
+  viewport?: ScreenViewport;
+};
+
+/** A unit of the baseline: the viewport, or one setting of its own. */
+export type ScreenUnit = keyof ScreenBaseline;
 
 export type Viewport = {
   width: number;
@@ -113,6 +183,7 @@ export type SharedDragSelectTracker = Rect & {
 export const SelectType = {
   table: 'table',
   memo: 'memo',
+  tableGroup: 'tableGroup',
 } as const;
 export type SelectType = ValuesType<typeof SelectType>;
 
@@ -134,6 +205,13 @@ export const VisualizationMode = {
 } as const;
 export type VisualizationMode = ValuesType<typeof VisualizationMode>;
 
+/** Which way a view steps through the centers it has stood on. */
+export const CenterStep = {
+  previous: 'previous',
+  next: 'next',
+} as const;
+export type CenterStep = ValuesType<typeof CenterStep>;
+
 /**
  * A scene drawn over the document in its own coordinates: the tables it places
  * by id, the placement it is looked at through, and what it shows of each
@@ -148,6 +226,10 @@ export type SceneView = {
   zoomLevel: number;
   /** The tables the view narrows to, and none while it shows the whole document. */
   centerIds: string[];
+  /** The centers it stood on before these, the latest last, which a step back returns to. */
+  previousCenterIds: string[][];
+  /** The centers a step back left, the latest last, which a step forward returns to. */
+  nextCenterIds: string[][];
 };
 
 export type EditorViews = {
@@ -164,6 +246,9 @@ export const FocusType = {
   columnAutoIncrement: 'columnAutoIncrement',
   columnDefault: 'columnDefault',
   columnComment: 'columnComment',
+  tableLogicalName: 'tableLogicalName',
+  columnLogicalName: 'columnLogicalName',
+  columnDomain: 'columnDomain',
 } as const;
 export type FocusType = ValuesType<typeof FocusType>;
 
@@ -186,31 +271,41 @@ export const isEditingMemo = ({ editMemoId }: Editor): boolean =>
   Boolean(editMemoId);
 
 /**
- * Whether a live text editor owns the keyboard. A memo body and a table cell
- * both open a real input over the scene, so a canvas shortcut stands down for
- * either of them rather than for the cell alone.
+ * Whether a live text editor owns the keyboard. A memo body, a table cell and a
+ * table group's name each open a real input over the scene, so a canvas
+ * shortcut stands down for any of them rather than for the cell alone.
  */
 export const isEditingText = (editor: Editor): boolean =>
-  isEditingMemo(editor) || Boolean(editor.focusTable?.edit);
+  isEditingMemo(editor) ||
+  Boolean(editor.focusTable?.edit) ||
+  Boolean(editor.editTableGroupId);
 
 export const createEditor = (): Editor => ({
-  id: nanoid(),
+  id: uuid25(),
   selectedMap: {},
   hasUndo: false,
   hasRedo: false,
+  dictionaryHistory: {
+    word: { hasUndo: false, hasRedo: false },
+    term: { hasUndo: false, hasRedo: false },
+    domain: { hasUndo: false, hasRedo: false },
+  },
   viewport: {
     width: DEFAULT_WIDTH,
     height: DEFAULT_HEIGHT,
   },
   scrollPullPending: false,
+  originShown: false,
   focusTable: null,
   editMemoId: null,
+  editTableGroupId: null,
   memoScrollTopMap: {},
   drawRelationship: null,
   hoverColumnMap: {},
   hoverRelationshipMap: {},
   openMap: {},
   handTool: false,
+  drawTableGroup: false,
   zenMode: false,
   draggableColumn: null,
   draggingColumnMap: {},
@@ -221,4 +316,6 @@ export const createEditor = (): Editor => ({
   dragSelect: null,
   views: { flow: null },
   visualizationMode: VisualizationMode.graph,
+  lastCanvasType: CanvasType.ERD,
+  screenBaseline: null,
 });

@@ -1,5 +1,5 @@
+import { uuid25 } from '@dineug/uuid';
 import { isNil, isNumber, isPlainObject, isString } from 'es-toolkit';
-import { nanoid } from 'nanoid';
 
 import { ValuesType } from '@/internal-types';
 import { arrayHas } from '@/utils/arrayHas';
@@ -24,11 +24,17 @@ export type PayloadKind = ValuesType<typeof PayloadKind>;
 
 const hasPayloadKind = arrayHas<string>(Object.values(PayloadKind));
 
+/**
+ * A copied table. Its logical name and derived flag, like a column's logical
+ * name and domain, are absent from a copy made before the dictionaries.
+ */
 export type ClipboardTable = {
   sourceId: string;
   name: string;
+  logicalName?: string;
   comment: string;
   columnIds: string[];
+  nameDerived?: boolean;
   ui: {
     x: number;
     y: number;
@@ -47,6 +53,12 @@ export type ClipboardColumn = {
   dataType: string;
   default: string;
   options: number;
+  logicalName?: string;
+  /**
+   * The domain the column linked where it was copied, which a paste keeps
+   * only while the document it lands in lists it.
+   */
+  domainId?: string;
   ui: {
     keys: number;
     widthName: number;
@@ -76,6 +88,9 @@ export type ClipboardRelationshipPoint = {
 
 export type ClipboardRelationship = {
   relationshipType: number;
+  /** Absent from a copy an editor made before the referential actions. */
+  onDelete?: number;
+  onUpdate?: number;
   start: ClipboardRelationshipPoint;
   end: ClipboardRelationshipPoint;
 };
@@ -126,7 +141,7 @@ type CreatePayloadConfig = {
 
 export function createPayload({
   kind,
-  copyId = nanoid(),
+  copyId = uuid25(),
   tables = [],
   columns = [],
   memos = [],

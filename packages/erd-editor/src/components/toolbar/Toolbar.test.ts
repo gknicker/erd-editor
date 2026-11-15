@@ -1,11 +1,24 @@
-import { html } from '@dineug/r-html';
+import { FC, html, observable } from '@dineug/r-html';
 import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
 
-import { flush, mountAndFlush, Mounted } from '@/__test-utils__/index';
+import { iconNameOf } from '@/__test-utils__/icon';
+import {
+  createTestI18n,
+  flush,
+  mountAndFlush,
+  Mounted,
+  provideI18n,
+  pseudoMessages,
+} from '@/__test-utils__/index';
+import { dictionaryViewOf } from '@/components/dictionary/dictionaryView';
+import { DictionarySheet } from '@/components/dictionary/sheets';
+import { layoutOf } from '@/components/erd-editor/viewportLayout';
+import { explorerViewOf } from '@/components/explorer/explorerView';
 import Toolbar from '@/components/toolbar/Toolbar';
 import * as styles from '@/components/toolbar/Toolbar.styles';
 import { Open } from '@/constants/open';
 import { CanvasType } from '@/constants/schema';
+import { addDictionaryAction } from '@/engine/modules/dictionary/atom.actions';
 import {
   changeOpenMapAction,
   selectAction,
@@ -21,9 +34,20 @@ import {
   viewCloseAction,
   viewOpenAction,
 } from '@/engine/modules/editor/view.actions';
-import { changeCanvasTypeAction } from '@/engine/modules/settings/atom.actions';
+import {
+  changeCanvasTypeAction,
+  changeDatabaseNameAction,
+} from '@/engine/modules/settings/atom.actions';
 import { addTableAction } from '@/engine/modules/table/atom.actions';
-import { openThemeBuilderAction, toggleSearchAction } from '@/utils/emitter';
+import { attachActionTag, Tag } from '@/engine/tag';
+import { createI18n } from '@/i18n/translate';
+import {
+  openLocalePickerAction,
+  openThemeBuilderAction,
+  toggleSearchAction,
+} from '@/utils/emitter';
+import { KeyBindingName, toShortcutTitle } from '@/utils/keyboard-shortcut';
+import { TAKEOVERS } from '@/utils/takeover';
 
 let mounted: Mounted | null = null;
 
@@ -34,16 +58,19 @@ afterEach(() => {
 
 type Options = {
   enableThemeBuilder?: boolean;
+  enableLocalePicker?: boolean;
   readonly?: boolean;
 };
 
 async function setup({
   enableThemeBuilder = false,
+  enableLocalePicker,
   readonly = false,
 }: Options = {}) {
   mounted = await mountAndFlush(
     html`<${Toolbar}
       enableThemeBuilder=${enableThemeBuilder}
+      enableLocalePicker=${enableLocalePicker}
       readonly=${readonly}
     />`
   );
@@ -102,6 +129,88 @@ describe('Toolbar', () => {
       expect(input('zoom level')).toBeNull();
     });
 
+    it('lets the database name take the direction of what is typed into it', async () => {
+      await setup();
+
+      expect(input('database name').getAttribute('dir')).toBe('auto');
+      expect(input('database name').placeholder).toBe('database name');
+      expect(input('database name').getAttribute('spellcheck')).toBe('false');
+      expect(input('database name').type).toBe('text');
+    });
+
+    it('reads every title in the language shown, following a switch', async () => {
+      const i18n = createTestI18n('en');
+      const provider = provideI18n(document.body, i18n);
+
+      try {
+        const { app } = await setup({ enableThemeBuilder: true });
+        app.store.dispatchSync(addTable('t1'));
+        Object.assign(i18n, createI18n('ko-KR', pseudoMessages('ko')));
+        await flush();
+
+        const titles = Array.from(
+          root().querySelectorAll<HTMLElement>('[title]')
+        ).map(el => el.title);
+        expect(titles).toEqual([
+          'ko:database name',
+          'ko:Entity Relationship Diagram',
+          'ko:Visualization',
+          'ko:Schema SQL',
+          'ko:Code Generator',
+          'ko:Dictionary',
+          'ko:Settings',
+          toShortcutTitle(
+            app.keyBindingMap,
+            'ko:Search',
+            KeyBindingName.search
+          ),
+          toShortcutTitle(
+            app.keyBindingMap,
+            'ko:Explorer',
+            KeyBindingName.findReplace
+          ),
+          'ko:Theme',
+          toShortcutTitle(app.keyBindingMap, 'ko:Undo', KeyBindingName.undo),
+          toShortcutTitle(app.keyBindingMap, 'ko:Redo', KeyBindingName.redo),
+          'ko:Time Travel',
+        ]);
+        expect(input('ko:database name').placeholder).toBe('ko:database name');
+      } finally {
+        provider.destroy();
+      }
+    });
+
+    it('mirrors the undo and redo arrows for a right-to-left reader, following a switch', async () => {
+      const i18n = createTestI18n('en');
+      const provider = provideI18n(document.body, i18n);
+      const arrows = () =>
+        Array.from(root().querySelectorAll('.undo-redo'), iconNameOf);
+
+      try {
+        await setup();
+        expect(arrows()).toEqual(['undo-2', 'redo-2', 'rotate-ccw-clock']);
+
+        Object.assign(i18n, createI18n('ar-SA', pseudoMessages('ar')));
+        await flush();
+        expect(arrows()).toEqual(['redo-2', 'undo-2', 'rotate-ccw-clock']);
+      } finally {
+        provider.destroy();
+      }
+    });
+
+    it('offers the Explorer in a read-only editor too, in the language shown', async () => {
+      const i18n = createTestI18n('ko-KR', pseudoMessages('ko'));
+      const provider = provideI18n(document.body, i18n);
+
+      try {
+        await setup({ readonly: true });
+
+        expect(menu('ko:Explorer')).not.toBeNull();
+      } finally {
+        provider.destroy();
+      }
+    });
+
     it('reflects seeded settings in the inputs', async () => {
       const { app } = await setup();
       app.store.dispatchSync(
@@ -120,18 +229,16 @@ describe('Toolbar', () => {
       ).toHaveLength(3);
     });
 
-    it('counts the tables in the document', async () => {
+    /** The owner's request of 2026-10-14: the Explorer counts the tables, so the bar does not. */
+    it('leaves the table count to the Explorer', async () => {
       const { app } = await setup();
-      expect(
-        root().querySelector(`.${String(styles.tableCount)}`)?.textContent
-      ).toContain('Table: 0');
-
       app.store.dispatchSync(addTable('t1'), addTable('t2'));
       await flush();
 
-      expect(
-        root().querySelector(`.${String(styles.tableCount)}`)?.textContent
-      ).toContain('Table: 2');
+      expect(root().textContent).not.toContain('Table');
+      expect(root().lastElementChild?.getAttribute('title')).toBe(
+        'Time Travel'
+      );
     });
   });
 
@@ -141,8 +248,22 @@ describe('Toolbar', () => {
       ['Visualization', CanvasType.visualization],
       ['Schema SQL', CanvasType.schemaSQL],
       ['Code Generator', CanvasType.generatorCode],
+      ['Dictionary', CanvasType.dictionary],
       ['Settings', CanvasType.settings],
     ];
+
+    it('draws a glyph per tab, the Dictionary book between Code Generator and Settings', async () => {
+      await setup();
+
+      expect(cases.map(([title]) => iconNameOf(menu(title)))).toEqual([
+        'workflow',
+        'share-2',
+        'database',
+        'code',
+        'book-type',
+        'settings',
+      ]);
+    });
 
     it('marks only the current canvas type as active', async () => {
       await setup();
@@ -227,10 +348,214 @@ describe('Toolbar', () => {
     });
   });
 
+  describe('language menu', () => {
+    const language = () =>
+      root().querySelector('.toolbar-locale') as HTMLDivElement | null;
+
+    it('hides the language menu unless the locale picker is enabled', async () => {
+      await setup();
+      expect(language()).toBeNull();
+
+      mounted?.unmount();
+      await setup({ enableLocalePicker: false });
+      expect(language()).toBeNull();
+    });
+
+    it('opens the locale picker through the emitter when enabled', async () => {
+      const { app } = await setup({ enableLocalePicker: true });
+      const openLocalePicker = vi.fn();
+      app.emitter.on({ openLocalePicker });
+
+      language()!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
+      expect(openLocalePicker).toHaveBeenCalledTimes(1);
+      expect(openLocalePicker.mock.calls[0][0]).toEqual(
+        openLocalePickerAction()
+      );
+    });
+
+    it('stands after the theme menu, drawing the languages glyph under its own title', async () => {
+      await setup({ enableThemeBuilder: true, enableLocalePicker: true });
+
+      expect(menu('Theme').nextElementSibling).toBe(language());
+      expect(iconNameOf(language())).toBe('languages');
+      expect(language()!.title).toBe('Display Language');
+      expect(language()!.getAttribute('class')).toContain(String(styles.menu));
+    });
+
+    it('reads its title in the language the element shows, following a switch', async () => {
+      const i18n = createTestI18n('en');
+      const provider = provideI18n(document.body, i18n);
+
+      try {
+        await setup({ enableLocalePicker: true });
+        expect(language()!.title).toBe('Display Language');
+
+        Object.assign(i18n, createI18n('ko-KR', pseudoMessages('ko')));
+        await flush();
+
+        expect(language()!.title).toBe('ko:Display Language');
+      } finally {
+        provider.destroy();
+      }
+    });
+  });
+
+  describe('toolbar anchors', () => {
+    it('marks Search, Theme and the language menu with the classes a hint is placed by', async () => {
+      await setup({ enableThemeBuilder: true, enableLocalePicker: true });
+
+      expect(root().querySelector('.toolbar-search')).toBe(menu('Search'));
+      expect(root().querySelector('.toolbar-theme')).toBe(menu('Theme'));
+      expect(iconNameOf(root().querySelector('.toolbar-locale'))).toBe(
+        'languages'
+      );
+    });
+
+    it('drops the Theme and language anchors with their menus', async () => {
+      await setup();
+
+      expect(root().querySelector('.toolbar-search')).toBe(menu('Search'));
+      expect(root().querySelector('.toolbar-theme')).toBeNull();
+      expect(root().querySelector('.toolbar-locale')).toBeNull();
+    });
+  });
+
+  describe('explorer menu (AC-S2)', () => {
+    const explorer = () =>
+      root().querySelector('.toolbar-explorer') as HTMLDivElement;
+    const press = async () => {
+      explorer().dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await flush();
+    };
+    const pressed = () => explorer().classList.contains('active');
+
+    it('stands right after Search, drawing the panel glyph under the Explorer title with its chord', async () => {
+      const { app } = await setup();
+
+      expect(menu('Search').nextElementSibling).toBe(explorer());
+      expect(iconNameOf(explorer())).toBe('list-tree');
+      expect(explorer().title).toBe(
+        toShortcutTitle(
+          app.keyBindingMap,
+          'Explorer',
+          KeyBindingName.findReplace
+        )
+      );
+      expect(explorer().title).not.toBe('Explorer');
+      expect(pressed()).toBe(false);
+    });
+
+    it('opens the Explorer on a press and closes it on the next, pressed while open', async () => {
+      const { app } = await setup();
+
+      await press();
+      expect(explorerViewOf(app.store).open).toBe(true);
+      expect(pressed()).toBe(true);
+
+      await press();
+      expect(explorerViewOf(app.store).open).toBe(false);
+      expect(pressed()).toBe(false);
+    });
+
+    for (const canvasType of [
+      CanvasType.visualization,
+      CanvasType.schemaSQL,
+      CanvasType.generatorCode,
+      CanvasType.dictionary,
+      CanvasType.settings,
+    ]) {
+      it(`shows unpressed on the ${canvasType} tab, where a press takes the ERD tab and opens it (N-h)`, async () => {
+        const { app } = await setup();
+        await press();
+        app.store.dispatchSync(changeCanvasTypeAction({ value: canvasType }));
+        await flush();
+        expect(pressed()).toBe(false);
+
+        await press();
+
+        expect(app.store.state.settings.canvasType).toBe(CanvasType.ERD);
+        expect(explorerViewOf(app.store).open).toBe(true);
+        expect(pressed()).toBe(true);
+      });
+    }
+
+    it('stays pressed while a canvas too narrow stands the panel aside, and a press closes it', async () => {
+      const { app } = await setup();
+      await press();
+      expect(layoutOf(app.store).reach).toBe(0);
+      expect(pressed()).toBe(true);
+
+      await press();
+
+      expect(explorerViewOf(app.store).open).toBe(false);
+    });
+
+    for (const open of TAKEOVERS) {
+      it(`keeps its place but shows disabled while ${open} takes the canvas over`, async () => {
+        const { app } = await setup();
+        app.store.dispatchSync(changeOpenMapAction({ [open]: true }));
+        await flush();
+
+        expect(menu('Search').nextElementSibling).toBe(explorer());
+        expect(explorer().getAttribute('class')).toContain('disabled');
+
+        await press();
+
+        expect(explorerViewOf(app.store).open).toBe(false);
+      });
+    }
+
+    it('shows disabled on another tab too while a takeover stays open', async () => {
+      const { app } = await setup();
+      app.store.dispatchSync(
+        changeOpenMapAction({ [Open.timeTravel]: true }),
+        changeCanvasTypeAction({ value: CanvasType.settings })
+      );
+      await flush();
+
+      expect(explorer().getAttribute('class')).toContain('disabled');
+
+      await press();
+
+      expect(explorerViewOf(app.store).open).toBe(false);
+      expect(app.store.state.settings.canvasType).toBe(CanvasType.settings);
+    });
+
+    it('spares the selection a press anywhere else in the bar clears', async () => {
+      const { app } = await setup();
+      app.store.dispatchSync(
+        addTable('t1'),
+        selectAction({ t1: SelectType.table })
+      );
+
+      explorer().dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+      explorer().dispatchEvent(new TouchEvent('touchstart', { bubbles: true }));
+      await flush();
+
+      expect(app.store.state.editor.selectedMap).toEqual({
+        t1: SelectType.table,
+      });
+    });
+
+    it('stays enabled under table properties', async () => {
+      const { app } = await setup();
+      app.store.dispatchSync(
+        changeOpenMapAction({ [Open.tableProperties]: true })
+      );
+      await flush();
+
+      expect(explorer().getAttribute('class')).not.toContain('disabled');
+    });
+  });
+
   describe('unselect all', () => {
     it('clears the selection on mousedown anywhere in the bar', async () => {
       const { app } = await setup();
-      app.store.dispatchSync(selectAction({ t1: SelectType.table }));
+      app.store.dispatchSync(
+        addTable('t1'),
+        selectAction({ t1: SelectType.table })
+      );
       expect(app.store.state.editor.selectedMap).toEqual({
         t1: SelectType.table,
       });
@@ -243,7 +568,10 @@ describe('Toolbar', () => {
 
     it('clears the selection on touchstart as well', async () => {
       const { app } = await setup();
-      app.store.dispatchSync(selectAction({ t1: SelectType.table }));
+      app.store.dispatchSync(
+        addTable('t1'),
+        selectAction({ t1: SelectType.table })
+      );
 
       root().dispatchEvent(new TouchEvent('touchstart', { bubbles: true }));
       await flush();
@@ -335,6 +663,104 @@ describe('Toolbar', () => {
 
       expect(app.store.state.doc.tableIds).toEqual(['t1']);
     });
+
+    describe('on the Dictionary tab', () => {
+      const addWord = (id: string) =>
+        attachActionTag(
+          Tag.dictionarySheet,
+          addDictionaryAction({ kind: 'word', id, values: { name: id } })
+        );
+
+      /** The Dictionary tab on the word sheet, the one the specs below write. */
+      async function onDictionary() {
+        const mounted = await setup();
+        dictionaryViewOf(mounted.app).sheet = DictionarySheet.word;
+        mounted.app.store.dispatchSync(
+          changeCanvasTypeAction({ value: CanvasType.dictionary })
+        );
+        await flush();
+        return mounted;
+      }
+
+      it('shows undo and redo, and no time travel, which replays the document', async () => {
+        await onDictionary();
+
+        expect(root().querySelectorAll('.undo-redo')).toHaveLength(2);
+        expect(menu('Time Travel')).toBeNull();
+      });
+
+      it("runs the sheet shown's own history, never the document's", async () => {
+        const { app } = await onDictionary();
+        app.store.dispatchSync(addTable('t1'));
+        app.store.dispatchSync(addWord('w1'));
+        await flush();
+
+        expect(menu('Undo').getAttribute('class')).toContain('active');
+        menu('Undo').dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        await flush();
+
+        expect(app.store.state.doc.wordIds).toEqual([]);
+        expect(app.store.state.doc.tableIds).toEqual(['t1']);
+        expect(menu('Undo').getAttribute('class')).not.toContain('active');
+        expect(menu('Redo').getAttribute('class')).toContain('active');
+
+        menu('Redo').dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        await flush();
+        expect(app.store.state.doc.wordIds).toEqual(['w1']);
+      });
+
+      it('shows both inactive on another sheet, and on the check sheet, which reaches neither history', async () => {
+        const { app } = await onDictionary();
+        // A document entry the check sheet's greyed buttons must leave alone.
+        app.store.dispatchSync(addTable('t1'));
+        app.store.dispatchSync(addWord('w1'));
+        const view = dictionaryViewOf(app);
+
+        view.sheet = DictionarySheet.term;
+        await flush();
+        expect(menu('Undo').getAttribute('class')).not.toContain('active');
+
+        view.sheet = DictionarySheet.check;
+        await flush();
+        expect(menu('Undo').getAttribute('class')).not.toContain('active');
+        menu('Undo').dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        menu('Redo').dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        await flush();
+        expect(app.store.state.doc.wordIds).toEqual(['w1']);
+        expect(app.store.state.doc.tableIds).toEqual(['t1']);
+      });
+
+      it('keeps the keyboard where it was on the Dictionary tab, and lets a press take it elsewhere', async () => {
+        await onDictionary();
+        const press = () => {
+          const event = new MouseEvent('mousedown', {
+            bubbles: true,
+            cancelable: true,
+          });
+          menu('Undo').dispatchEvent(event);
+          return event.defaultPrevented;
+        };
+
+        expect(press()).toBe(true);
+
+        const { app } = await setup();
+        await flush();
+        expect(app.store.state.settings.canvasType).not.toBe(
+          CanvasType.dictionary
+        );
+        expect(press()).toBe(false);
+      });
+
+      it('hides both in a read-only document', async () => {
+        const { app } = await setup({ readonly: true });
+        app.store.dispatchSync(
+          changeCanvasTypeAction({ value: CanvasType.dictionary })
+        );
+        await flush();
+
+        expect(root().querySelectorAll('.undo-redo')).toHaveLength(0);
+      });
+    });
   });
 
   describe('time travel', () => {
@@ -366,6 +792,111 @@ describe('Toolbar', () => {
       await setup();
 
       expect(menu('Time Travel').style.maxWidth).toBe('26px');
+    });
+  });
+
+  describe("a readonly editor's database name", () => {
+    /** The bar under a host that hands it the flag's readonly, as the element hands it its own. */
+    async function setupTurning(readonly: boolean) {
+      const flags = observable({ readonly });
+      const Host: FC = () => () =>
+        html`<${Toolbar}
+          enableThemeBuilder=${false}
+          readonly=${flags.readonly}
+        />`;
+      mounted = await mountAndFlush(html`<${Host} />`);
+      return { ...mounted, flags };
+    }
+
+    const nameText = () =>
+      root().querySelector(
+        `.${String(styles.databaseName)}`
+      ) as HTMLDivElement | null;
+
+    it('shows the name as text where the field stood, as wide, taking no typing', async () => {
+      const { app } = await setup({ readonly: true });
+      app.store.dispatchSync(changeDatabaseNameAction({ value: 'shop' }));
+      await flush();
+
+      const el = nameText() as HTMLDivElement;
+      expect(root().querySelector('input')).toBeNull();
+      expect(root().firstElementChild).toBe(el);
+      expect(el.textContent?.trim()).toBe('shop');
+      expect(el.title).toBe('shop');
+      expect(el.getAttribute('aria-label')).toBe('database name');
+      expect(el.getAttribute('dir')).toBe('auto');
+      expect(el.style.width).toBe('150px');
+      expect(el.hasAttribute('data-empty')).toBe(false);
+      expect(el.isContentEditable).toBe(false);
+    });
+
+    it("shows the field's placeholder, dimmed, while the document names no database", async () => {
+      await setup({ readonly: true });
+
+      expect(nameText()?.textContent?.trim()).toBe('database name');
+      expect(nameText()?.hasAttribute('data-empty')).toBe(true);
+      expect(nameText()?.title).toBe('database name');
+    });
+
+    it('names a long database in full in its title, which the text may cut short', async () => {
+      const { app } = await setup({ readonly: true });
+      const name = 'ecommerce_production_analytics_warehouse';
+      app.store.dispatchSync(changeDatabaseNameAction({ value: name }));
+      await flush();
+
+      expect(nameText()?.textContent?.trim()).toBe(name);
+      expect(nameText()?.title).toBe(name);
+      expect(nameText()?.getAttribute('aria-label')).toBe('database name');
+    });
+
+    it('keeps the tabs, Search and the Explorer, and no Undo, Redo or Time Travel', async () => {
+      const { app } = await setup({ readonly: true });
+      app.store.dispatchSync(addTable('t1'));
+      await flush();
+
+      expect(
+        Array.from(root().querySelectorAll<HTMLElement>('[title]'), el =>
+          el.getAttribute('title')
+        )
+      ).toEqual([
+        'database name',
+        'Entity Relationship Diagram',
+        'Visualization',
+        'Schema SQL',
+        'Code Generator',
+        'Dictionary',
+        'Settings',
+        toShortcutTitle(app.keyBindingMap, 'Search', KeyBindingName.search),
+        toShortcutTitle(
+          app.keyBindingMap,
+          'Explorer',
+          KeyBindingName.findReplace
+        ),
+      ]);
+    });
+
+    it('turns into the field as the editor turns writable, and back into text as it turns readonly', async () => {
+      const { app, flags } = await setupTurning(true);
+      app.store.dispatchSync(changeDatabaseNameAction({ value: 'shop' }));
+      await flush();
+      expect(nameText()?.textContent?.trim()).toBe('shop');
+
+      flags.readonly = false;
+      await flush();
+
+      expect(nameText()).toBeNull();
+      const el = input('database name');
+      expect(el.value).toBe('shop');
+      el.value = 'sakila';
+      el.dispatchEvent(new InputEvent('input', { bubbles: true }));
+      await flush();
+      expect(app.store.state.settings.databaseName).toBe('sakila');
+
+      flags.readonly = true;
+      await flush();
+
+      expect(input('database name')).toBeNull();
+      expect(nameText()?.textContent?.trim()).toBe('sakila');
     });
   });
 });

@@ -5,6 +5,7 @@ import type { DOMTemplateLiterals } from '@dineug/r-html';
 import { iconHit } from '@/components/erd/canvas/sceneHit';
 import {
   ICON_VIEW_SIZE,
+  mainButtonClick,
   type SceneMouseEvent,
 } from '@/components/erd/canvas/sceneTokens';
 import {
@@ -30,12 +31,25 @@ export type SceneIconOptions = {
 };
 
 /**
- * One lucide child as a konva shape: one filled dot or path data handed over
- * verbatim. The first child also answers a press anywhere in the icon's box,
- * so no shape exists only to be hit.
+ * One lucide child as a konva shape: a stroked rounded rect, one filled dot or path data handed
+ * over verbatim. The first child also answers a press anywhere in the icon's box, so no shape
+ * exists only to be hit.
  */
 const shape = ([tag, attrs]: IconNodeChild, color: string, hit: boolean) =>
-  tag === 'circle' ? (
+  tag === 'rect' ? (
+    <k-rect
+      x={Number(attrs.x ?? 0)}
+      y={Number(attrs.y ?? 0)}
+      width={Number(attrs.width)}
+      height={Number(attrs.height)}
+      cornerRadius={Number(attrs.rx ?? 0)}
+      stroke={color}
+      strokeWidth={ICON_STROKE_WIDTH}
+      lineJoin="round"
+      listening={hit}
+      hitFunc={hit ? iconHit : undefined}
+    />
+  ) : tag === 'circle' ? (
     <k-circle
       x={Number(attrs.cx)}
       y={Number(attrs.cy)}
@@ -60,8 +74,8 @@ const shape = ([tag, attrs]: IconNodeChild, color: string, hit: boolean) =>
 
 /**
  * A lucide icon drawn at size, by scaling its own 24 unit box. The scale carries
- * the stroke with it, which is what keeps the weight the same as the svg the DOM
- * scene rendered at that size.
+ * the stroke with it, which keeps the weight of the svg the DOM scene drew, and
+ * a click answers the main button alone (mainButtonClick).
  */
 export function sceneIcon({
   icon,
@@ -88,7 +102,7 @@ export function sceneIcon({
       y={y}
       scaleX={scale}
       scaleY={scale}
-      on:click={click}
+      on:click={click && mainButtonClick(click)}
       on:mouseenter={mouseenter}
       on:mouseleave={mouseleave}
     >

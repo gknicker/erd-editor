@@ -1,40 +1,41 @@
+import { isSettingLocked } from '@dineug/erd-editor-schema';
 import {
   createRef,
   FC,
   observable,
+  onBeforeMount,
   onUpdated,
   ref,
   repeat,
 } from '@dineug/r-html';
 
 import { useAppContext } from '@/components/appContext';
-import Button from '@/components/primitives/button/Button';
+import { readonlyBadge } from '@/components/erd/table-properties/TableProperties.styles';
+import { useI18n } from '@/components/localeContext';
 import Menu from '@/components/primitives/context-menu/menu/Menu';
 import Icon from '@/components/primitives/icon/Icon';
 import Separator from '@/components/primitives/separator/Separator';
 import Switch from '@/components/primitives/switch/Switch';
 import TextInput from '@/components/primitives/text-input/TextInput';
-import Toast from '@/components/primitives/toast/Toast';
+import { ColumnTypeToMessageKey } from '@/components/settings/columnTypeLabels';
+import { lockSettingRows } from '@/components/settings/lockSettingRows';
 import SettingsLnb, {
   Lnb,
+  LnbLabelKey,
 } from '@/components/settings/settings-lnb/SettingsLnb';
+import { takeSettingsPage } from '@/components/settings/settingsPage';
 import Shortcuts from '@/components/settings/shortcuts/Shortcuts';
 import { COLUMN_MIN_WIDTH } from '@/constants/layout';
-import { ColumnTypeToName, SaveSettingType } from '@/constants/schema';
+import { CanvasType } from '@/constants/schema';
 import {
   changeColumnOrderAction,
-  changeIgnoreSaveSettingsAction,
   changeMaxWidthCommentAction,
   changeRelationshipDataTypeSyncAction,
 } from '@/engine/modules/settings/atom.actions';
+import { changeLockSettingsAction$ } from '@/engine/modules/settings/generator.actions';
 import { fontSize6 } from '@/styles/typography.styles';
-import { bHas } from '@/utils/bit';
-import { recalculateTableWidth } from '@/utils/calcTable';
 import { onPrevent } from '@/utils/domEvent';
-import { relationshipSort } from '@/utils/draw-relationship/sort';
-import { openToastAction } from '@/utils/emitter';
 import { FlipAnimation } from '@/utils/flipAnimation';
-import { delay } from '@/utils/promise';
 import { fromShadowDraggable } from '@/utils/rx-operators/fromShadowDraggable';
 import {
   maxWidthCommentInRange,
@@ -48,6 +49,7 @@ export type SettingsProps = {};
 
 const Settings: FC<SettingsProps> = (props, ctx) => {
   const app = useAppContext(ctx);
+  const i18n = useI18n(ctx);
   const root = createRef<HTMLDivElement>();
   // The held row is left out: it snaps to its slot on each reorder, and only
   // the rows it pushes aside slide, so the list never paints out of order.
@@ -61,25 +63,21 @@ const Settings: FC<SettingsProps> = (props, ctx) => {
     lnb: Lnb.preferences as Lnb,
   });
 
+  // A page asked for from outside, the welcome screen's Shortcuts row say,
+  // is where the tab opens; otherwise it opens on Preferences.
+  onBeforeMount(() => {
+    state.lnb = takeSettingsPage(app.value.store) ?? Lnb.preferences;
+  });
+
   const handleChangeRelationshipDataTypeSync = (value: boolean) => {
     const { store } = app.value;
     store.dispatch(changeRelationshipDataTypeSyncAction({ value }));
   };
 
-  const handleRecalculationTableWidth = () => {
-    const { store, emitter, toWidth } = app.value;
-    recalculateTableWidth(store.state, { toWidth, clock: store.context.clock });
-    relationshipSort(store.state);
-    emitter.emit(
-      openToastAction({
-        close: delay(2000),
-        message: <Toast title="Recalculated table width" />,
-      })
-    );
-  };
-
   const handleChangeColumnOrderAction = (value: number, target: number) => {
     const { store } = app.value;
+    // A drag begun before the editor turned readonly moves nothing more.
+    if (store.getReadonly()) return;
 
     if (value !== target) {
       flipAnimation.snapshot();
@@ -138,32 +136,27 @@ const Settings: FC<SettingsProps> = (props, ctx) => {
     store.dispatch(changeMaxWidthCommentAction({ value: maxWidthComment }));
   };
 
-  const handleChangeScrollSaveSettings = (value: boolean) => {
+  const handleChangeLock = (lockSettingType: number, value: boolean) => {
     const { store } = app.value;
-
-    store.dispatch(
-      changeIgnoreSaveSettingsAction({
-        saveSettingType: SaveSettingType.scroll,
-        value: !value,
-      })
-    );
-  };
-
-  const handleChangeZoomLevelSaveSettings = (value: boolean) => {
-    const { store } = app.value;
-
-    store.dispatch(
-      changeIgnoreSaveSettingsAction({
-        saveSettingType: SaveSettingType.zoomLevel,
-        value: !value,
-      })
-    );
+    store.dispatch(changeLockSettingsAction$(lockSettingType, value));
   };
 
   return () => {
     const { store } = app.value;
     const { settings } = store.state;
+    const { t } = i18n.value;
+    // A reader sees every setting the document holds and changes none of them.
+    const readonly = store.getReadonly();
     const maxWidthCommentDisabled = settings.maxWidthComment === -1;
+    // On the Settings tab an unlocked row names the tab a lock would take,
+    // the one the reader came from, as changeLockSettingsAction$ reads it.
+    const liveValues = {
+      ...settings,
+      canvasType:
+        settings.canvasType === CanvasType.settings
+          ? store.state.editor.lastCanvasType
+          : settings.canvasType,
+    };
 
     return (
       <div class={styles.root} use:ref={ref(root)}>
@@ -171,86 +164,122 @@ const Settings: FC<SettingsProps> = (props, ctx) => {
           <SettingsLnb value={state.lnb} onChange={handleChangeLnb} />
         </div>
         <div class={styles.contentArea}>
-          <div class={fontSize6}>{state.lnb}</div>
+          <div class={styles.header}>
+            <div class={fontSize6}>{t(LnbLabelKey[state.lnb])}</div>
+            {readonly ? (
+              <span class={readonlyBadge}>
+                <Icon name="lock" size={12} />
+                <span>{t('tableProperties.readOnly')}</span>
+              </span>
+            ) : null}
+          </div>
           <Separator space={12} />
           <div class={['scrollbar', styles.content]}>
             {state.lnb === Lnb.preferences ? (
               <div class={styles.section}>
                 <div class={styles.row}>
-                  <div>Relationship DataType Sync</div>
+                  <div>{t('settings.relationshipDataTypeSync')}</div>
                   <div class={styles.vertical(16)}></div>
                   <Switch
                     value={settings.relationshipDataTypeSync}
+                    disabled={readonly}
                     onChange={handleChangeRelationshipDataTypeSync}
                   />
                 </div>
 
                 <div class={styles.row}>
-                  <div>Save Scroll Information</div>
-                  <div class={styles.vertical(16)}></div>
-                  <Switch
-                    value={
-                      !bHas(settings.ignoreSaveSettings, SaveSettingType.scroll)
-                    }
-                    onChange={handleChangeScrollSaveSettings}
-                  />
-                </div>
-
-                <div class={styles.row}>
-                  <div>Save Zoom Information</div>
-                  <div class={styles.vertical(16)}></div>
-                  <Switch
-                    value={
-                      !bHas(
-                        settings.ignoreSaveSettings,
-                        SaveSettingType.zoomLevel
-                      )
-                    }
-                    onChange={handleChangeZoomLevelSaveSettings}
-                  />
-                </div>
-
-                <div class={styles.row}>
-                  <div>Maximum comment width</div>
+                  <div>{t('settings.maxCommentWidth')}</div>
                   <div class={styles.vertical(16)}></div>
                   <Switch
                     value={!maxWidthCommentDisabled}
+                    disabled={readonly}
                     onChange={handleSwitchMaxWidthComment}
                   />
                   <div class={styles.vertical(8)}></div>
                   <TextInput
-                    title="Maximum comment width"
-                    placeholder="Maximum comment width"
+                    title={t('settings.maxCommentWidth')}
+                    placeholder={t('settings.maxCommentWidth')}
                     width={45}
                     value={
                       maxWidthCommentDisabled
                         ? toMaxWidthCommentFormat(COLUMN_MIN_WIDTH)
                         : toMaxWidthCommentFormat(settings.maxWidthComment)
                     }
-                    disabled={maxWidthCommentDisabled}
+                    disabled={readonly || maxWidthCommentDisabled}
                     numberOnly={true}
-                    onChange={handleChangeMaxWidthComment}
+                    onChange={
+                      readonly ? undefined : handleChangeMaxWidthComment
+                    }
                   />
                 </div>
 
-                <div class={styles.row}>
-                  <div>Recalculation table width</div>
-                  <div class={styles.vertical(16)}></div>
-                  <Button
-                    variant="soft"
-                    size="1"
-                    text={
-                      <>
-                        <Icon size={14} name="refresh-cw" />
-                        <div class={styles.vertical(8)}></div>
-                        <span>Sync</span>
-                      </>
-                    }
-                    onClick={handleRecalculationTableWidth}
-                  />
+                <div class={styles.lockSection}>
+                  <div>{t('settings.lockHeading')}</div>
+                  <Separator space={12} />
+                  <div class={styles.lockList}>
+                    {lockSettingRows.map(row => {
+                      const locked = isSettingLocked(
+                        settings.lockSettings,
+                        row.lockSettingType
+                      );
+                      const name = t(row.nameKey);
+
+                      return (
+                        <div class={styles.lockRow}>
+                          <div class={styles.lockName}>{name}</div>
+                          <div class={styles.lockControl}>
+                            <div
+                              class={styles.lockValue}
+                              bool:data-locked={locked}
+                              title={
+                                locked
+                                  ? t('settings.lockedValue')
+                                  : t('settings.currentValue')
+                              }
+                            >
+                              <span prop:dir="auto">
+                                {row.toText(
+                                  locked ? settings.lockedValues : liveValues,
+                                  i18n.value
+                                )}
+                              </span>
+                            </div>
+                            <button
+                              class={styles.lockButton}
+                              type="button"
+                              title={
+                                locked
+                                  ? t('settings.unlockSetting', { name })
+                                  : t('settings.lockSetting', { name })
+                              }
+                              aria-pressed={locked ? 'true' : 'false'}
+                              bool:data-locked={locked}
+                              bool:disabled={readonly}
+                              on:click={
+                                readonly
+                                  ? null
+                                  : () =>
+                                      handleChangeLock(
+                                        row.lockSettingType,
+                                        !locked
+                                      )
+                              }
+                            >
+                              {locked ? (
+                                <Icon name="lock" size={14} />
+                              ) : (
+                                <Icon name="lock-open" size={14} />
+                              )}
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
                 </div>
+
                 <div class={styles.columnOrderSection}>
-                  <div>Column Order</div>
+                  <div>{t('settings.columnOrder')}</div>
                   <Separator space={12} />
                   <div
                     class={styles.columnOrderList}
@@ -263,13 +292,20 @@ const Settings: FC<SettingsProps> = (props, ctx) => {
                       columnType => (
                         <div
                           class={styles.columnOrderItem}
-                          draggable="true"
+                          bool:data-readonly={readonly}
+                          draggable={readonly ? 'false' : 'true'}
                           data-id={columnType}
-                          on:dragstart={handleDragstartColumnOrder}
+                          on:dragstart={
+                            readonly ? null : handleDragstartColumnOrder
+                          }
                         >
                           <Menu
-                            icon={<Icon name="grip-vertical" size={14} />}
-                            name={ColumnTypeToName[columnType]}
+                            icon={
+                              readonly ? null : (
+                                <Icon name="grip-vertical" size={14} />
+                              )
+                            }
+                            name={t(ColumnTypeToMessageKey[columnType])}
                           />
                         </div>
                       )

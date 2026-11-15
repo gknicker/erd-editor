@@ -1,16 +1,23 @@
 import { describe, expect, it } from 'vite-plus/test';
 
-import { Column, RefPos, SortType, StatementType } from '@/parser/statement';
+import {
+  Column,
+  DatabaseVendor,
+  ReferentialAction,
+  RefPos,
+  SortType,
+  StatementType,
+} from '@/parser/statement';
 import {
   createTableParser,
   parserForeignKeyParser,
 } from '@/parser/statement/create.table';
 import { tokenizer } from '@/parser/tokenizer';
 
-function parse(sql: string) {
-  const tokens = tokenizer(sql);
+function parse(sql: string, database?: DatabaseVendor) {
+  const tokens = tokenizer(sql, database);
   const $pos: RefPos = { value: 0 };
-  const ast = createTableParser(tokens, $pos);
+  const ast = createTableParser(tokens, $pos, database);
   return { ast, tokens, $pos };
 }
 
@@ -349,7 +356,7 @@ describe('createTableParser - column options', () => {
         unique: true,
         comment: 'Second',
       }),
-      column({ name: 'c', dataType: 'INT', unique: true }),
+      column({ name: 'c', dataType: 'INT', unique: true, default: '0' }),
       column({
         name: 'd',
         dataType: 'VARCHAR(255)',
@@ -421,14 +428,210 @@ describe('createTableParser - column options', () => {
     ]);
   });
 
-  it('skips a DEFAULT written as a parenthesised function call', () => {
+  it('reads a DEFAULT written as a parenthesised function call without its parens', () => {
     const { ast } = parse(
       'CREATE TABLE t (a INT DEFAULT (CURRENT_TIMESTAMP()), b INT);'
     );
 
     expect(ast.columns).toEqual([
-      column({ name: 'a', dataType: 'INT' }),
+      column({ name: 'a', dataType: 'INT', default: 'CURRENT_TIMESTAMP()' }),
       column({ name: 'b', dataType: 'INT' }),
+    ]);
+  });
+
+  it('reads the whole DEFAULT expression up to the next column keyword', () => {
+    const { ast } = parse(
+      'CREATE TABLE t (\n' +
+        ' a timestamp DEFAULT now() NOT NULL,\n' +
+        ' b numeric(3,2) DEFAULT 0.5,\n' +
+        ' c bit DEFAULT ((0)) NOT NULL,\n' +
+        " d varchar(10) DEFAULT 'draft'::character varying,\n" +
+        " e integer DEFAULT nextval('t_e_seq'::regclass) NOT NULL,\n" +
+        " f timestamp DEFAULT (now() AT TIME ZONE 'utc'::text) COMMENT 'x',\n" +
+        ' g text[] DEFAULT ARRAY[]::text[]\n' +
+        ');'
+    );
+
+    expect(
+      ast.columns.map(column => [column.name, column.default, column.nullable])
+    ).toEqual([
+      ['a', 'now()', false],
+      ['b', '0.5', true],
+      ['c', '0', false],
+      ['d', "'draft'", true],
+      ['e', '', false],
+      ['f', "now() AT TIME ZONE 'utc'::text", true],
+      ['g', 'ARRAY[]::text[]', true],
+    ]);
+    expect(ast.columns[5].comment).toBe('x');
+  });
+
+  it('reads a default that is one call of nextval as auto increment with no default', () => {
+    const { ast } = parse(
+      'CREATE TABLE t (\n' +
+        " a integer DEFAULT nextval('public.t_a_seq'::regclass) NOT NULL,\n" +
+        " b bigint NOT NULL DEFAULT (nextval('t_b_seq'::regclass)),\n" +
+        " c integer DEFAULT nextval('t_c_seq'::regclass) + 1,\n" +
+        ' d integer,\n' +
+        " e integer DEFAULT nextval(('public.t_e_seq'::text)::regclass) NOT NULL\n" +
+        ');'
+    );
+
+    expect(
+      ast.columns.map(column => [
+        column.name,
+        column.default,
+        column.autoIncrement,
+        column.nullable,
+      ])
+    ).toEqual([
+      ['a', '', true, false],
+      ['b', '', true, false],
+      ['c', "nextval('t_c_seq'::regclass) + 1", false, true],
+      ['d', '', false, true],
+      ['e', '', true, false],
+    ]);
+  });
+
+  it('keeps a MariaDB call of nextval on a bare sequence name as the default', () => {
+    const { ast } = parse(
+      'CREATE TABLE `orders` (\n' +
+        '  `id` int(11) NOT NULL DEFAULT nextval(`shop`.`order_seq`),\n' +
+        '  `ref` bigint DEFAULT (NEXTVAL(order_seq))\n' +
+        ');'
+    );
+
+    expect(
+      ast.columns.map(column => [
+        column.name,
+        column.default,
+        column.autoIncrement,
+      ])
+    ).toEqual([
+      ['id', 'nextval(`shop`.`order_seq`)', false],
+      ['ref', 'NEXTVAL(order_seq)', false],
+    ]);
+  });
+
+  it('reads a prefixed literal whole and the columns after it', () => {
+    const { ast } = parse(
+      "CREATE TABLE t (a nvarchar(10) DEFAULT (N'(none)'), b nvarchar(10) DEFAULT (N'a,b'), c int);"
+    );
+
+    expect(ast.columns).toEqual([
+      column({ name: 'a', dataType: 'nvarchar(10)', default: "N'(none)'" }),
+      column({ name: 'b', dataType: 'nvarchar(10)', default: "N'a,b'" }),
+      column({ name: 'c', dataType: 'int' }),
+    ]);
+  });
+
+  it('reads a literal glued to the operator before it, as SQL Server stores one', () => {
+    const { ast } = parse(
+      "CREATE TABLE [dbo].[U]([Label] [nvarchar](40) NULL DEFAULT (N'a'+N' (b)'), [Id] [int] NOT NULL)"
+    );
+
+    expect(ast.columns).toEqual([
+      column({
+        name: 'Label',
+        dataType: 'nvarchar(40)',
+        default: "N'a' + N' (b)'",
+      }),
+      column({ name: 'Id', dataType: 'int', nullable: false }),
+    ]);
+  });
+
+  it('ends a DEFAULT at the column options MariaDB and SQL Server write after it', () => {
+    const { ast } = parse(
+      'CREATE TABLE t (\n' +
+        ' a int DEFAULT NULL WITHOUT SYSTEM VERSIONING,\n' +
+        ' b int DEFAULT 5 WITHOUT SYSTEM VERSIONING,\n' +
+        ' c int NOT NULL DEFAULT 0 INDEX ix_c,\n' +
+        ' d timestamp DEFAULT now()::timestamp without time zone,\n' +
+        ' e int\n' +
+        ') WITH SYSTEM VERSIONING;'
+    );
+
+    expect(ast.columns.map(column => [column.name, column.default])).toEqual([
+      ['a', 'NULL'],
+      ['b', '5'],
+      ['c', '0'],
+      ['d', 'now()::timestamp without time zone'],
+      ['e', ''],
+    ]);
+  });
+
+  it('reads a bare CASE default up to its END', () => {
+    const { ast } = parse(
+      "CREATE TABLE t (a text DEFAULT CASE WHEN (x IS NULL) THEN 'a' ELSE NULL END NOT NULL, b int);"
+    );
+
+    expect(ast.columns).toEqual([
+      column({
+        name: 'a',
+        dataType: 'text',
+        default: "CASE WHEN(x IS NULL) THEN 'a' ELSE NULL END",
+        nullable: false,
+      }),
+      column({ name: 'b', dataType: 'int' }),
+    ]);
+  });
+
+  it('reads a prefixed COMMENT as its text alone', () => {
+    const { ast } = parse(
+      "CREATE TABLE t (a int COMMENT N'hello world', b int COMMENT _utf8mb4'x') COMMENT=_utf8mb4'tbl';"
+    );
+
+    expect(ast.comment).toBe('tbl');
+    expect(ast.columns.map(column => column.comment)).toEqual([
+      'hello world',
+      'x',
+    ]);
+  });
+
+  it('reads the expression after the ON NULL of an Oracle DEFAULT', () => {
+    const { ast } = parse(
+      'CREATE TABLE t (\n' +
+        ' a NUMBER DEFAULT ON NULL 0 NOT NULL ENABLE,\n' +
+        " b VARCHAR2(10) DEFAULT ON NULL FOR INSERT ONLY 'x',\n" +
+        ' c NUMBER DEFAULT ON NULL FOR INSERT AND UPDATE 1,\n' +
+        ' d NUMBER DEFAULT ON NULL FOR INSERT\n' +
+        ');'
+    );
+
+    expect(
+      ast.columns.map(column => [column.name, column.default, column.nullable])
+    ).toEqual([
+      ['a', '0', false],
+      ['b', "'x'", true],
+      ['c', '1', true],
+      ['d', 'FOR INSERT', true],
+    ]);
+  });
+
+  it('reads an ON NULL at the end of the source as no default', () => {
+    const { ast } = parse('CREATE TABLE t (a NUMBER DEFAULT ON NULL');
+
+    expect(ast.columns).toEqual([column({ name: 'a', dataType: 'NUMBER' })]);
+  });
+
+  it('reads GENERATED BY DEFAULT AS IDENTITY as an identity with no default', () => {
+    const { ast } = parse(
+      'CREATE TABLE t (\n' +
+        ' a INT GENERATED BY DEFAULT AS IDENTITY (START WITH 1 INCREMENT BY 1) NOT NULL,\n' +
+        ' b NUMBER GENERATED BY DEFAULT ON NULL AS IDENTITY,\n' +
+        ' c INT\n' +
+        ');'
+    );
+
+    expect(ast.columns).toEqual([
+      column({
+        name: 'a',
+        dataType: 'INT',
+        autoIncrement: true,
+        nullable: false,
+      }),
+      column({ name: 'b', dataType: 'NUMBER', autoIncrement: true }),
+      column({ name: 'c', dataType: 'INT' }),
     ]);
   });
 
@@ -460,6 +663,23 @@ describe('createTableParser - column options', () => {
     expect(ast.columns).toEqual([
       column({ name: 'a', dataType: 'ARRAY<STRUCT<a:INT, b:STRING>>' }),
       column({ name: 'b', dataType: 'DECIMAL(10,2)' }),
+    ]);
+  });
+
+  // Bare, the comment read as words and the name as two fields.
+  it('keeps the quotes of a nested field comment and name', () => {
+    const { ast } = parse(
+      "CREATE TABLE t (a STRUCT<name: STRING COMMENT 'it''s > 0', `first name`: STRING>, b INT, c STRUCT<x: STRING COMMENT 'q'>);"
+    );
+
+    expect(ast.columns).toEqual([
+      column({
+        name: 'a',
+        dataType:
+          "STRUCT<name: STRING COMMENT 'it''s > 0', `first name`: STRING>",
+      }),
+      column({ name: 'b', dataType: 'INT' }),
+      column({ name: 'c', dataType: "STRUCT<x: STRING COMMENT 'q'>" }),
     ]);
   });
 
@@ -500,14 +720,455 @@ describe('createTableParser - column options', () => {
     ]);
   });
 
-  it('leaves a type no vendor list carries empty', () => {
-    // Extension types such as citext and hstore are outside every list.
-    const { ast } = parse('CREATE TABLE t (a numrange, b hstore, c citext);');
+  // Extension types such as citext and hstore are outside every list, and
+  // used to come in empty.
+  it('keeps a type no vendor list carries', () => {
+    const { ast } = parse(
+      'CREATE TABLE t (a numrange, b hstore, c citext, d ltree);'
+    );
 
     expect(ast.columns).toEqual([
       column({ name: 'a', dataType: 'numrange' }),
-      column({ name: 'b', dataType: '' }),
-      column({ name: 'c', dataType: '' }),
+      column({ name: 'b', dataType: 'hstore' }),
+      column({ name: 'c', dataType: 'citext' }),
+      column({ name: 'd', dataType: 'ltree' }),
+    ]);
+  });
+});
+
+// MySQL reads SIGNED, UNSIGNED and ZEROFILL as part of a numeric type, so the
+// export writes the column back unsigned only when the type keeps them.
+describe('createTableParser - MySQL numeric type attributes', () => {
+  const types = (sql: string) =>
+    parse(sql).ast.columns.map(({ name, dataType }) => [name, dataType]);
+
+  it('keeps UNSIGNED and ZEROFILL in the type, in the order written', () => {
+    expect(
+      types(
+        'CREATE TABLE t (a INT UNSIGNED, b SMALLINT(5) UNSIGNED ZEROFILL, c DECIMAL(10,2) UNSIGNED, d BIGINT(20) ZEROFILL UNSIGNED, e INT SIGNED, f DOUBLE PRECISION UNSIGNED, g FLOAT(7,2) ZEROFILL, h MEDIUMINT UNSIGNED);'
+      )
+    ).toEqual([
+      ['a', 'INT UNSIGNED'],
+      ['b', 'SMALLINT(5) UNSIGNED ZEROFILL'],
+      ['c', 'DECIMAL(10,2) UNSIGNED'],
+      ['d', 'BIGINT(20) ZEROFILL UNSIGNED'],
+      ['e', 'INT'],
+      ['f', 'DOUBLE PRECISION UNSIGNED'],
+      ['g', 'FLOAT(7,2) ZEROFILL'],
+      ['h', 'MEDIUMINT UNSIGNED'],
+    ]);
+  });
+
+  // MySQL 8.4 and MariaDB 11.4 store a SIGNED column as the bare type, and
+  // read TINYINT SIGNED, the name no generator rule matched, as TINYINT.
+  it('leaves SIGNED out, the default, wherever it stands among them', () => {
+    expect(
+      types(
+        'CREATE TABLE t (a TINYINT SIGNED, b FLOAT(53) signed, c INT SIGNED ZEROFILL, d INT UNSIGNED SIGNED, e BIGINT(20) SIGNED NOT NULL);'
+      )
+    ).toEqual([
+      ['a', 'TINYINT'],
+      ['b', 'FLOAT(53)'],
+      ['c', 'INT ZEROFILL'],
+      ['d', 'INT UNSIGNED'],
+      ['e', 'BIGINT(20)'],
+    ]);
+  });
+
+  it('keeps the case each word is written in, as mysqldump writes it', () => {
+    expect(
+      types(
+        'CREATE TABLE t (a int unsigned, b smallint(5) unsigned zerofill, c INT Unsigned);'
+      )
+    ).toEqual([
+      ['a', 'int unsigned'],
+      ['b', 'smallint(5) unsigned zerofill'],
+      ['c', 'INT Unsigned'],
+    ]);
+  });
+
+  it('still reads the column options after them', () => {
+    const { ast } = parse(
+      "CREATE TABLE t (id INT(10) UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'pk', n TINYINT UNSIGNED DEFAULT 0 UNIQUE, PRIMARY KEY (id));"
+    );
+
+    expect(ast.columns).toEqual([
+      column({
+        name: 'id',
+        dataType: 'INT(10) UNSIGNED',
+        comment: 'pk',
+        primaryKey: true,
+        autoIncrement: true,
+        nullable: false,
+      }),
+      column({
+        name: 'n',
+        dataType: 'TINYINT UNSIGNED',
+        default: '0',
+        unique: true,
+      }),
+    ]);
+  });
+
+  // MySQL refuses them anywhere but right after the type and its arguments.
+  it('leaves out one written after another column option', () => {
+    expect(
+      types(
+        'CREATE TABLE t (a INT NOT NULL UNSIGNED, b INT "UNSIGNED", c BIGINT COMMENT \'x\' ZEROFILL);'
+      )
+    ).toEqual([
+      ['a', 'INT'],
+      ['b', 'INT'],
+      ['c', 'BIGINT'],
+    ]);
+  });
+
+  it('still reads those words as a column name', () => {
+    expect(
+      types(
+        'CREATE TABLE t (unsigned INT UNSIGNED, signed SMALLINT, zerofill);'
+      )
+    ).toEqual([
+      ['unsigned', 'INT UNSIGNED'],
+      ['signed', 'SMALLINT'],
+      ['zerofill', ''],
+    ]);
+  });
+});
+
+describe('createTableParser - user defined types', () => {
+  const types = (sql: string) =>
+    parse(sql).ast.columns.map(({ name, dataType }) => [name, dataType]);
+
+  it('keeps the attributes that follow a CREATE TYPE or CREATE DOMAIN type', () => {
+    const { ast } = parse(
+      "CREATE TABLE person (current_mood mood NOT NULL DEFAULT 'ok', zip us_postal UNIQUE COMMENT 'post code', id sysname);"
+    );
+
+    expect(ast.columns).toEqual([
+      column({
+        name: 'current_mood',
+        dataType: 'mood',
+        default: "'ok'",
+        nullable: false,
+      }),
+      column({
+        name: 'zip',
+        dataType: 'us_postal',
+        unique: true,
+        comment: 'post code',
+      }),
+      column({ name: 'id', dataType: 'sysname' }),
+    ]);
+  });
+
+  it('keeps a qualified type and the quotes of a quoted one', () => {
+    expect(
+      types(
+        'CREATE TABLE t (a "MyType", b public.mood, c "public"."mood", d [dbo].[Phone] NOT NULL, e money.amount, f pg_catalog."varchar"(10));'
+      )
+    ).toEqual([
+      ['a', '"MyType"'],
+      ['b', 'public.mood'],
+      ['c', '"public"."mood"'],
+      ['d', '[dbo].[Phone]'],
+      ['e', 'money.amount'],
+      ['f', 'pg_catalog."varchar"(10)'],
+    ]);
+  });
+
+  // Shed, the brackets left dbo.Order, which T-SQL refuses: ORDER is reserved.
+  it('keeps the T-SQL brackets of a user type, needed or not', () => {
+    expect(
+      types(
+        'CREATE TABLE [c] ([Name] [sysname] NOT NULL, [Loc] [geography] NULL, [Zip] [my type], [D] [default], [O] [dbo].[Order], [P] dbo.[Order]);'
+      )
+    ).toEqual([
+      ['Name', '[sysname]'],
+      ['Loc', 'geography'],
+      ['Zip', '[my type]'],
+      ['D', '[default]'],
+      ['O', '[dbo].[Order]'],
+      ['P', 'dbo.[Order]'],
+    ]);
+  });
+
+  it('still unwraps the quotes of a type the lists carry', () => {
+    expect(
+      types('CREATE TABLE t ([a] [int], [b] [nvarchar](50), "c" "int4");')
+    ).toEqual([
+      ['a', 'int'],
+      ['b', 'nvarchar(50)'],
+      ['c', 'int4'],
+    ]);
+  });
+
+  // PostgreSQL reads char as character(1) and bit as bit(1), while "char" and
+  // "bit" name other types, which pg_dump writes quoted.
+  it('keeps the double quotes of "char" and "bit"', () => {
+    expect(
+      types(
+        'CREATE TABLE t (a "char", b char, c "char"[] NOT NULL, d "bit", e "bit"(3), f [char](2), g `bit`, h "CHAR"(2));'
+      )
+    ).toEqual([
+      ['a', '"char"'],
+      ['b', 'char'],
+      ['c', '"char"[]'],
+      ['d', '"bit"'],
+      ['e', '"bit"(3)'],
+      ['f', 'char(2)'],
+      ['g', 'bit'],
+      ['h', 'CHAR(2)'],
+    ]);
+  });
+
+  it('keeps the arguments of a user type', () => {
+    expect(
+      types(
+        "CREATE TABLE t (a halfvec(3), b public.geometry(Point,4326), c my_enum('x','y'));"
+      )
+    ).toEqual([
+      ['a', 'halfvec(3)'],
+      ['b', 'public.geometry(Point,4326)'],
+      ['c', "my_enum('x','y')"],
+    ]);
+  });
+
+  it('keeps the array suffix of any type', () => {
+    expect(
+      types(
+        'CREATE TABLE t (a mood[], b text[][], c integer ARRAY, d integer[3], e int ARRAY[4], f "MyType"[], g character varying(20)[], h public.mood [] NOT NULL, i mood ARRAY);'
+      )
+    ).toEqual([
+      ['a', 'mood[]'],
+      ['b', 'text[][]'],
+      ['c', 'integer ARRAY'],
+      ['d', 'integer[3]'],
+      ['e', 'int ARRAY[4]'],
+      ['f', '"MyType"[]'],
+      ['g', 'character varying(20)[]'],
+      ['h', 'public.mood[]'],
+      ['i', 'mood ARRAY'],
+    ]);
+  });
+
+  // SQLite takes any words as a type; UNSIGNED INTEGER is no listed name.
+  it('keeps the words the lists lack in front of a type they carry', () => {
+    expect(
+      types(
+        'CREATE TABLE t (a UNSIGNED INTEGER NOT NULL, b UNSIGNED SMALLINT(5), c VARYING CHARACTER(255), d UNSIGNED BIG INTEGER, e UNSIGNED TINY INT NOT NULL, f SIGNED BIG INT DEFAULT 0);'
+      )
+    ).toEqual([
+      ['a', 'UNSIGNED INTEGER'],
+      ['b', 'UNSIGNED SMALLINT(5)'],
+      ['c', 'VARYING CHARACTER(255)'],
+      ['d', 'UNSIGNED BIG INTEGER'],
+      ['e', 'UNSIGNED TINY INT'],
+      ['f', 'SIGNED BIG INT'],
+    ]);
+  });
+
+  it('reads no type out of the constraint that follows a typeless column', () => {
+    const { ast } = parse(
+      'CREATE TABLE t (\n' +
+        ' a,\n' +
+        ' b PRIMARY KEY,\n' +
+        ' c NOT NULL,\n' +
+        ' d NULL,\n' +
+        ' e UNIQUE,\n' +
+        ' f CHECK (f > 0),\n' +
+        ' g REFERENCES o (id) ON DELETE CASCADE,\n' +
+        ' h DEFAULT 0,\n' +
+        ' i COLLATE NOCASE,\n' +
+        ' j CONSTRAINT nn NOT NULL,\n' +
+        ' k AS (a + 1),\n' +
+        ' l GENERATED ALWAYS AS (a * 2) STORED,\n' +
+        " m COMMENT 'x',\n" +
+        ' n WITH MASKING POLICY p,\n' +
+        ' o VISIBLE,\n' +
+        " p 'x',\n" +
+        ' q MASKING POLICY mp,\n' +
+        ' r PROJECTION POLICY pp,\n' +
+        ' s ENCRYPT,\n' +
+        ' t INVISIBLE\n' +
+        ') AS SELECT * FROM o;'
+    );
+
+    expect(ast.columns.map(column => column.dataType)).toEqual(
+      Array.from({ length: 20 }, () => '')
+    );
+    expect(ast.columns.map(column => column.name).join('')).toBe(
+      'abcdefghijklmnopqrst'
+    );
+  });
+
+  it('reads a word the lists lack after the type as an attribute', () => {
+    expect(
+      types(
+        'CREATE TABLE t (a INT UNSIGNED ZEROFILL COLUMN_FORMAT FIXED, b mood SPARSE, c VARCHAR(10) BINARY, d hstore COMPRESSION pglz);'
+      )
+    ).toEqual([
+      ['a', 'INT UNSIGNED ZEROFILL'],
+      ['b', 'mood'],
+      ['c', 'VARCHAR(10)'],
+      ['d', 'hstore'],
+    ]);
+  });
+
+  // Each used to read as a column named by its first word, typed by the next.
+  it('reads no column out of a table item a column name could open', () => {
+    const { ast } = parse(
+      'CREATE TABLE t (a int, LIKE s INCLUDING ALL, EXCLUDE USING gist (a WITH &&), EXCLUDE (a WITH =), FULLTEXT ft (a), SPATIAL (a), PERIOD FOR SYSTEM_TIME (a, a), SUPPLEMENTAL LOG DATA (ALL) COLUMNS, b mood);'
+    );
+
+    expect(ast.columns).toEqual([
+      column({ name: 'a', dataType: 'int' }),
+      column({ name: 'b', dataType: 'mood' }),
+    ]);
+    expect(ast.indexes).toEqual([]);
+  });
+
+  it('still reads a column named by one of those words', () => {
+    expect(
+      types(
+        'CREATE TABLE t (exclude BOOLEAN, fulltext tsvector, fulltext mood, spatial geometry(Point,4326), period INT, supplemental TEXT, "like" s);'
+      )
+    ).toEqual([
+      ['exclude', 'BOOLEAN'],
+      ['fulltext', 'tsvector'],
+      ['fulltext', 'mood'],
+      ['spatial', 'geometry(Point,4326)'],
+      ['period', 'INT'],
+      ['supplemental', 'TEXT'],
+      ['like', 's'],
+    ]);
+  });
+
+  it('gives no type to the TAG or SORT of a CREATE TABLE AS column', () => {
+    expect(
+      types(
+        "CREATE TABLE t (a TAG (k = 'v'), b SORT, c SORT VISIBLE, d tag, e sort[]) AS SELECT 1, 2, 3, 4, 5;"
+      )
+    ).toEqual([
+      ['a', ''],
+      ['b', ''],
+      ['c', ''],
+      ['d', 'tag'],
+      ['e', 'sort[]'],
+    ]);
+  });
+
+  it('still reads no column out of a table constraint on a user type', () => {
+    const { ast } = parse(
+      'CREATE TABLE t (a mood, CONSTRAINT pk PRIMARY KEY (a) USING INDEX TABLESPACE ts, INDEX idx_a (a) USING BTREE);'
+    );
+
+    expect(ast.columns).toEqual([
+      column({ name: 'a', dataType: 'mood', primaryKey: true }),
+    ]);
+    expect(ast.indexes).toEqual([
+      { name: 'idx_a', unique: false, columns: [{ name: 'a', sort: 'ASC' }] },
+    ]);
+  });
+});
+
+describe('createTableParser - quoted type arguments', () => {
+  it('keeps the quotes of an ENUM or SET value', () => {
+    const { ast } = parse(
+      "CREATE TABLE t (a ENUM('G','PG-13', 'NC-17') NOT NULL DEFAULT 'G', b SET('Deleted Scenes','Trailers'), c enum(''));"
+    );
+
+    expect(ast.columns).toEqual([
+      column({
+        name: 'a',
+        dataType: "ENUM('G','PG-13','NC-17')",
+        default: "'G'",
+        nullable: false,
+      }),
+      column({ name: 'b', dataType: "SET('Deleted Scenes','Trailers')" }),
+      column({ name: 'c', dataType: "enum('')" }),
+    ]);
+  });
+
+  it('keeps a quote an ENUM value escapes by doubling it', () => {
+    const { ast } = parse(
+      "CREATE TABLE t (a ENUM('it''s','''x''') DEFAULT 'it''s', b INT);"
+    );
+
+    expect(ast.columns).toEqual([
+      column({
+        name: 'a',
+        dataType: "ENUM('it''s','''x''')",
+        default: "'it''s'",
+      }),
+      column({ name: 'b', dataType: 'INT' }),
+    ]);
+  });
+
+  // MySQL also escapes a quote with a backslash; read as the end of the value,
+  // it's became the label it' s.
+  it('doubles a quote an ENUM value or a COMMENT escapes with a backslash', () => {
+    const { ast } = parse(
+      "CREATE TABLE t (a ENUM('it\\'s','b') COMMENT 'it\\'s', b VARCHAR(9) DEFAULT 'C:\\', c INT);"
+    );
+
+    expect(ast.columns).toEqual([
+      column({ name: 'a', dataType: "ENUM('it''s','b')", comment: "it's" }),
+      column({ name: 'b', dataType: 'VARCHAR(9)', default: "'C:\\'" }),
+      column({ name: 'c', dataType: 'INT' }),
+    ]);
+  });
+
+  it('writes an argument back in the quotes it came in', () => {
+    expect(
+      parse(
+        'CREATE TABLE t (a SET("x", \'y\'), b OBJECT("city" VARCHAR, zip NUMBER));'
+      ).ast.columns.map(column => column.dataType)
+    ).toEqual(['SET("x",\'y\')', 'OBJECT("city" VARCHAR,zip NUMBER)']);
+  });
+});
+
+// Spark escapes a quote with a backslash, and all but its newest releases end
+// the literal at a doubled one: what a Databricks import writes back as SQL
+// has to escape the way it was read.
+describe('createTableParser - Databricks literals', () => {
+  const sql = String.raw`CREATE TABLE t (
+    a STRUCT<y: STRING COMMENT 'it\'s', z: STRING COMMENT 'C:\\x'> COMMENT 'o\'k',
+    b STRING DEFAULT 'it\'s' COMMENT 'a\\b',
+    c STRING DEFAULT 'C:\\'
+  )`;
+
+  it('writes a field comment and a default back in Spark escapes', () => {
+    expect(parse(sql, 'Databricks').ast.columns).toEqual([
+      column({
+        name: 'a',
+        dataType: String.raw`STRUCT<y: STRING COMMENT 'it\'s', z: STRING COMMENT 'C:\\x'>`,
+        comment: "o'k",
+      }),
+      column({
+        name: 'b',
+        dataType: 'STRING',
+        default: String.raw`'it\'s'`,
+        comment: String.raw`a\b`,
+      }),
+      column({ name: 'c', dataType: 'STRING', default: String.raw`'C:\\'` }),
+    ]);
+  });
+
+  it('doubles the quote of a literal from any other vendor', () => {
+    expect(parse(sql).ast.columns).toEqual([
+      column({
+        name: 'a',
+        dataType: String.raw`STRUCT<y: STRING COMMENT 'it''s', z: STRING COMMENT 'C:\\x'>`,
+        comment: "o'k",
+      }),
+      column({
+        name: 'b',
+        dataType: 'STRING',
+        default: "'it''s'",
+        comment: String.raw`a\\b`,
+      }),
+      column({ name: 'c', dataType: 'STRING', default: String.raw`'C:\\'` }),
     ]);
   });
 });
@@ -615,12 +1276,299 @@ describe('createTableParser - table level constraints', () => {
     ]);
   });
 
-  it('applies an anonymous UNIQUE constraint over several columns', () => {
+  it('records an anonymous UNIQUE over several columns as one unique index', () => {
     const { ast } = parse('CREATE TABLE t (a INT, b INT, UNIQUE (a, b));');
 
     expect(ast.columns).toEqual([
+      column({ name: 'a', dataType: 'INT' }),
+      column({ name: 'b', dataType: 'INT' }),
+    ]);
+    expect(ast.indexes).toEqual([
+      {
+        name: '',
+        unique: true,
+        columns: [
+          { name: 'a', sort: SortType.asc },
+          { name: 'b', sort: SortType.asc },
+        ],
+      },
+    ]);
+  });
+
+  it('records every spelling of a composite UNIQUE as one unique index', () => {
+    const { ast } = parse(
+      'CREATE TABLE t (\n' +
+        ' a INT, b INT, c INT, d INT,\n' +
+        ' UNIQUE KEY uq_ab (a, b DESC),\n' +
+        ' UNIQUE INDEX uq_bc (b, c),\n' +
+        ' CONSTRAINT uq_cd UNIQUE (c, d),\n' +
+        ' CONSTRAINT sym UNIQUE KEY uq_ad (a, d),\n' +
+        ' CONSTRAINT uq_bd UNIQUE KEY (b, d),\n' +
+        ' UNIQUE KEY (a, c)\n' +
+        ');'
+    );
+
+    expect(ast.columns.every(column => !column.unique)).toBe(true);
+    expect(
+      ast.indexes.map(({ name, unique, columns }) => [
+        name,
+        unique,
+        columns.map(({ name, sort }) => `${name} ${sort}`).join(', '),
+      ])
+    ).toEqual([
+      ['uq_ab', true, 'a ASC, b DESC'],
+      ['uq_bc', true, 'b ASC, c ASC'],
+      ['uq_cd', true, 'c ASC, d ASC'],
+      ['uq_ad', true, 'a ASC, d ASC'],
+      ['uq_bd', true, 'b ASC, d ASC'],
+      ['', true, 'a ASC, c ASC'],
+    ]);
+  });
+
+  it('keeps a CONSTRAINT name to the item it opens', () => {
+    const { ast } = parse(
+      'CREATE TABLE t (a INT, b INT, CONSTRAINT pk PRIMARY KEY (a), UNIQUE (a, b));'
+    );
+
+    expect(ast.indexes).toEqual([
+      {
+        name: '',
+        unique: true,
+        columns: [
+          { name: 'a', sort: SortType.asc },
+          { name: 'b', sort: SortType.asc },
+        ],
+      },
+    ]);
+  });
+
+  it('reads no key modifier as the name of a composite UNIQUE', () => {
+    const { ast } = parse(
+      'CREATE TABLE t (\n' +
+        ' a INT, b INT,\n' +
+        ' CONSTRAINT uq_mssql UNIQUE NONCLUSTERED (a, b),\n' +
+        ' CONSTRAINT uq_pg UNIQUE NULLS NOT DISTINCT (a, b),\n' +
+        ' UNIQUE NULLS DISTINCT (b, a),\n' +
+        ' UNIQUE KEY uq_hash USING HASH (a, b),\n' +
+        ' UNIQUE KEY USING BTREE (b, a),\n' +
+        ' UNIQUE CLUSTERED (a)\n' +
+        ');'
+    );
+
+    expect(ast.columns).toEqual([
       column({ name: 'a', dataType: 'INT', unique: true }),
-      column({ name: 'b', dataType: 'INT', unique: true }),
+      column({ name: 'b', dataType: 'INT' }),
+    ]);
+    expect(ast.indexes.map(index => index.name)).toEqual([
+      'uq_mssql',
+      'uq_pg',
+      '',
+      'uq_hash',
+      '',
+    ]);
+  });
+
+  it('names a SQL Server inline INDEX n UNIQUE by its index name', () => {
+    const { ast } = parse(
+      'CREATE TABLE t (\n' +
+        ' a INT, b INT,\n' +
+        ' INDEX ix_ab UNIQUE NONCLUSTERED (a, b DESC),\n' +
+        ' INDEX [ix_ba] UNIQUE (b, a),\n' +
+        ' INDEX ix_a UNIQUE CLUSTERED (a),\n' +
+        ' UNIQUE (b, a)\n' +
+        ');'
+    );
+
+    expect(ast.columns).toEqual([
+      column({ name: 'a', dataType: 'INT', unique: true }),
+      column({ name: 'b', dataType: 'INT' }),
+    ]);
+    expect(
+      ast.indexes.map(({ name, unique, columns }) => [
+        name,
+        unique,
+        columns.map(({ name, sort }) => `${name} ${sort}`).join(', '),
+      ])
+    ).toEqual([
+      ['ix_ab', true, 'a ASC, b DESC'],
+      ['ix_ba', true, 'b ASC, a ASC'],
+      ['', true, 'b ASC, a ASC'],
+    ]);
+  });
+
+  it('reads a filtered SQL Server INDEX n UNIQUE as a plain index unless its WHERE drops only NULL keys', () => {
+    const { ast, tokens, $pos } = parse(
+      'CREATE TABLE [dbo].[t] (\n' +
+        ' [a] INT, [b] INT, [c] INT, [d] INT,\n' +
+        ' INDEX [uq_ab] UNIQUE NONCLUSTERED ([a], [b]) WHERE ([a] IS NOT NULL AND ([b] IS NOT NULL)),\n' +
+        ' INDEX [ix_bc] UNIQUE ([b], [c] DESC) INCLUDE ([d]) WHERE ([d] > 0) WITH (PAD_INDEX = OFF),\n' +
+        ' INDEX [uq_c] UNIQUE ([c]) WHERE [c] IS NOT NULL,\n' +
+        ' INDEX [ix_d] UNIQUE ([d]) WHERE [d] IS NOT NULL OR [a] = 1 ON [PRIMARY],\n' +
+        ' INDEX [ix_x] UNIQUE ((LOWER([a]))) WHERE [a] > 0,\n' +
+        ' [e] INT,\n' +
+        ' INDEX [ix_e] UNIQUE CLUSTERED ([e]) WHERE ([e] IS NOT NULL AND [a] > 0)\n' +
+        ');\nCREATE TABLE z (i INT);'
+    );
+
+    expect(ast.columns).toEqual([
+      column({ name: 'a', dataType: 'INT' }),
+      column({ name: 'b', dataType: 'INT' }),
+      column({ name: 'c', dataType: 'INT', unique: true }),
+      column({ name: 'd', dataType: 'INT' }),
+      column({ name: 'e', dataType: 'INT' }),
+    ]);
+    expect(
+      ast.indexes.map(({ name, unique, columns }) => [
+        name,
+        unique,
+        columns.map(({ name, sort }) => `${name} ${sort}`).join(', '),
+      ])
+    ).toEqual([
+      ['uq_ab', true, 'a ASC, b ASC'],
+      ['ix_bc', false, 'b ASC, c DESC'],
+      ['ix_d', false, 'd ASC'],
+      ['ix_e', false, 'e ASC'],
+    ]);
+    expect(ast.keys).toEqual([{ name: 'uq_c', columnNames: ['c'] }]);
+    expect(tokens[$pos.value].value).toBe('CREATE');
+  });
+
+  it('looks for the filter of a unique key no further than its statement', () => {
+    const open = parse(
+      'CREATE TABLE t (a INT, b INT, UNIQUE (a, b);\n' +
+        'CREATE UNIQUE INDEX uq ON t (a) WHERE a > 0;'
+    ).ast;
+    const cut = parse('CREATE TABLE t (a INT, b INT, UNIQUE (a, b)').ast;
+
+    expect(open.indexes[0]).toMatchObject({ name: '', unique: true });
+    expect(cut.indexes[0]).toMatchObject({ name: '', unique: true });
+  });
+
+  it('reports the name of each primary key and one-column unique key it names', () => {
+    const { ast } = parse(
+      'CREATE TABLE "HR"."T" (\n' +
+        ' "ID" NUMBER CONSTRAINT "T_NN" NOT NULL ENABLE,\n' +
+        ' "A" NUMBER, "B" NUMBER,\n' +
+        ' "C" NUMBER CONSTRAINT "T_C_UK" UNIQUE USING INDEX TABLESPACE "USERS",\n' +
+        ' "D" NUMBER CONSTRAINT "T_D_NN" NOT NULL UNIQUE,\n' +
+        ' "E" NUMBER UNIQUE,\n' +
+        ' CONSTRAINT "T_PK" PRIMARY KEY ("ID", "A") USING INDEX ENABLE,\n' +
+        ' CONSTRAINT "T_B_UK" UNIQUE ("B"),\n' +
+        ' CONSTRAINT "T_AB_UK" UNIQUE ("A", "B"),\n' +
+        ' UNIQUE KEY "T_E_IX" ("E"), INDEX "T_D_IX" UNIQUE ("D")\n' +
+        ');\n'
+    );
+
+    expect(ast.keys).toEqual([
+      { name: 'T_C_UK', columnNames: ['C'] },
+      { name: 'T_PK', columnNames: ['ID', 'A'] },
+      { name: 'T_B_UK', columnNames: ['B'] },
+      { name: 'T_E_IX', columnNames: ['E'] },
+      { name: 'T_D_IX', columnNames: ['D'] },
+    ]);
+    expect(
+      parse(
+        'CREATE TABLE t (id INT CONSTRAINT nn NOT NULL PRIMARY KEY, a INT);\n'
+      ).ast.keys
+    ).toEqual([]);
+    expect(
+      parse('CREATE TABLE t (id INT CONSTRAINT pk_t PRIMARY KEY, a INT);\n').ast
+        .keys
+    ).toEqual([{ name: 'pk_t', columnNames: ['id'] }]);
+  });
+
+  it("reports a key with no name, composite or not, only where Oracle's USING INDEX follows it", () => {
+    const { ast } = parse(
+      'CREATE TABLE "HR"."T" (\n' +
+        ' "ID" NUMBER, "A" NUMBER, "B" NUMBER,\n' +
+        ' "E" NUMBER UNIQUE USING INDEX ENABLE,\n' +
+        ' "F" NUMBER UNIQUE, "G" NUMBER,\n' +
+        ' PRIMARY KEY ("ID") USING INDEX PCTFREE 10 ENABLE,\n' +
+        ' UNIQUE ("A", "B") USING INDEX ENABLE,\n' +
+        ' UNIQUE ("B", "G") ENABLE,\n' +
+        ' UNIQUE ("G") ENABLE, CHECK ("A" > 0) USING INDEX\n' +
+        ');\n'
+    );
+
+    expect(ast.keys).toEqual([
+      { name: '', columnNames: ['E'] },
+      { name: '', columnNames: ['ID'] },
+      { name: '', columnNames: ['A', 'B'] },
+    ]);
+    expect(ast.indexes.map(({ columns }) => columns.length)).toEqual([2, 2]);
+  });
+
+  it("reports no key with no name that PostgreSQL's USING INDEX TABLESPACE follows", () => {
+    const { ast } = parse(
+      'CREATE TABLE t (\n' +
+        ' id int PRIMARY KEY USING INDEX TABLESPACE fast,\n' +
+        ' a int, b int, e text UNIQUE USING INDEX TABLESPACE fast,\n' +
+        ' UNIQUE (a, b) INCLUDE (e) WITH (fillfactor = 70) USING INDEX TABLESPACE fast\n' +
+        ');\n'
+    );
+
+    expect(ast.keys).toEqual([]);
+    expect(ast.indexes).toEqual([
+      {
+        name: '',
+        unique: true,
+        columns: [
+          { name: 'a', sort: SortType.asc },
+          { name: 'b', sort: SortType.asc },
+        ],
+      },
+    ]);
+    expect(
+      parse(
+        'CREATE TABLE t (a int, b int, PRIMARY KEY (a, b) USING INDEX TABLESPACE fast);\n'
+      ).ast.keys
+    ).toEqual([]);
+  });
+
+  it('reads a primary key part by its first word', () => {
+    const { ast } = parse(
+      'CREATE TABLE t (\n' +
+        ' a TEXT, b INT,\n' +
+        ' CONSTRAINT pk_t PRIMARY KEY CLUSTERED (a(10) ASC, b DESC),\n' +
+        ' c INT\n' +
+        ');'
+    );
+
+    expect(ast.columns).toEqual([
+      column({ name: 'a', dataType: 'TEXT', primaryKey: true }),
+      column({ name: 'b', dataType: 'INT', primaryKey: true }),
+      column({ name: 'c', dataType: 'INT' }),
+    ]);
+    expect(ast.keys).toEqual([{ name: 'pk_t', columnNames: ['a', 'b'] }]);
+  });
+
+  it('reads no key list after a column level UNIQUE', () => {
+    const { ast } = parse(
+      'CREATE TABLE t (\n' +
+        ' a NUMBER UNIQUE USING INDEX (CREATE UNIQUE INDEX ix ON t (a)),\n' +
+        ' b NUMBER CONSTRAINT uq_b UNIQUE USING INDEX TABLESPACE users,\n' +
+        ' c NUMBER UNIQUE KEY,\n' +
+        ' t NUMBER\n' +
+        ');'
+    );
+
+    expect(ast.columns).toEqual([
+      column({ name: 'a', dataType: 'NUMBER', unique: true }),
+      column({ name: 'b', dataType: 'NUMBER', unique: true }),
+      column({ name: 'c', dataType: 'NUMBER', unique: true }),
+      column({ name: 't', dataType: 'NUMBER' }),
+    ]);
+    expect(ast.indexes).toEqual([]);
+  });
+
+  it('keeps a column level UNIQUE NULLS NOT DISTINCT on its column', () => {
+    const { ast } = parse(
+      'CREATE TABLE t (a INT UNIQUE NULLS NOT DISTINCT NOT NULL, b INT);'
+    );
+
+    expect(ast.columns).toEqual([
+      column({ name: 'a', dataType: 'INT', unique: true, nullable: false }),
+      column({ name: 'b', dataType: 'INT' }),
     ]);
   });
 
@@ -646,12 +1594,15 @@ describe('createTableParser - table level constraints', () => {
     ]);
   });
 
-  it('swallows the following keyword when CONSTRAINT has no name', () => {
+  it('reads the key after a CONSTRAINT that has no name', () => {
     const { ast } = parse(
-      'CREATE TABLE t (a INT, CONSTRAINT PRIMARY KEY (a));'
+      'CREATE TABLE t (a INT, b INT, CONSTRAINT PRIMARY KEY (a), CONSTRAINT UNIQUE (b));'
     );
 
-    expect(ast.columns).toEqual([column({ name: 'a', dataType: 'INT' })]);
+    expect(ast.columns).toEqual([
+      column({ name: 'a', dataType: 'INT', primaryKey: true }),
+      column({ name: 'b', dataType: 'INT', unique: true }),
+    ]);
   });
 
   it('parses INDEX and KEY definitions with sort directions', () => {
@@ -723,7 +1674,13 @@ describe('createTableParser - table level constraints', () => {
     );
 
     expect(ast.foreignKeys).toEqual([
-      { columnNames: ['a'], refTableName: 'other', refColumnNames: ['id'] },
+      {
+        columnNames: ['a'],
+        refTableName: 'other',
+        refColumnNames: ['id'],
+        onDelete: '',
+        onUpdate: '',
+      },
     ]);
   });
 
@@ -740,6 +1697,8 @@ describe('createTableParser - table level constraints', () => {
         columnNames: ['a', 'b'],
         refTableName: 'other',
         refColumnNames: ['x', 'y'],
+        onDelete: '',
+        onUpdate: '',
       },
     ]);
   });
@@ -762,6 +1721,8 @@ describe('createTableParser - table level constraints', () => {
         columnNames: ['cust_id'],
         refTableName: 'customers',
         refColumnNames: ['id'],
+        onDelete: '',
+        onUpdate: '',
       },
     ]);
   });
@@ -790,6 +1751,8 @@ describe('createTableParser - table level constraints', () => {
         columnNames: ['user_id'],
         refTableName: 'users',
         refColumnNames: ['id'],
+        onDelete: '',
+        onUpdate: '',
       },
     ]);
   });
@@ -804,7 +1767,13 @@ describe('createTableParser - table level constraints', () => {
 
     expect(ast.columns).toEqual([column({ name: 'a', dataType: 'INT' })]);
     expect(ast.foreignKeys).toEqual([
-      { columnNames: ['a'], refTableName: 'o', refColumnNames: ['x'] },
+      {
+        columnNames: ['a'],
+        refTableName: 'o',
+        refColumnNames: ['x'],
+        onDelete: '',
+        onUpdate: '',
+      },
     ]);
   });
 
@@ -834,6 +1803,46 @@ describe('createTableParser - table level constraints', () => {
     expect(ast.foreignKeys).toEqual([]);
     expect(ast.columns).toEqual([column({ name: 'a', dataType: 'INT' })]);
   });
+
+  // An unnamed CHECK used to read as a column named CHECK with no type.
+  it.each([
+    [
+      'PostgreSQL',
+      'CREATE TABLE u (id int, price numeric, CHECK (price > 0) NO INHERIT, label text);',
+    ],
+    [
+      'MySQL 8',
+      'CREATE TABLE `u` (`id` int, `price` int, CHECK (`price` > 0) NOT ENFORCED, check (`id` > 0) ENFORCED, `label` text);',
+    ],
+    [
+      'SQLite',
+      'CREATE TABLE u (id INTEGER, price INTEGER, CHECK(price>0), label TEXT);',
+    ],
+    [
+      'T-SQL',
+      'CREATE TABLE [dbo].[u] ([id] [int] NOT NULL, [price] [int] NULL, CHECK NOT FOR REPLICATION ([price]>(0)), [label] [nvarchar](10) NULL);',
+    ],
+  ])('reads no column out of an unnamed %s table CHECK', (_, sql) => {
+    const { ast } = parse(sql);
+
+    expect(ast.columns.map(({ name }) => name)).toEqual([
+      'id',
+      'price',
+      'label',
+    ]);
+  });
+
+  it('still reads a quoted column named check', () => {
+    const { ast } = parse(
+      'CREATE TABLE u (id int, "check" int CHECK ("check" > 0), `check` (a));'
+    );
+
+    expect(ast.columns).toEqual([
+      column({ name: 'id', dataType: 'int' }),
+      column({ name: 'check', dataType: 'int' }),
+      column({ name: 'check' }),
+    ]);
+  });
 });
 
 describe('createTableParser - constraint and index items', () => {
@@ -845,20 +1854,37 @@ describe('createTableParser - constraint and index items', () => {
     columnNames: ['a_id'],
     refTableName: 'a',
     refColumnNames: ['id'],
+    onDelete: '',
+    onUpdate: '',
   };
 
-  it('consumes the referential actions that trail a FOREIGN KEY', () => {
-    for (const actions of [
-      'ON DELETE RESTRICT ON UPDATE CASCADE',
-      'ON DELETE SET NULL',
-      'MATCH FULL ON DELETE CASCADE',
+  it('reads the referential actions that trail a FOREIGN KEY', () => {
+    for (const [actions, onDelete, onUpdate] of [
+      [
+        'ON DELETE RESTRICT ON UPDATE CASCADE',
+        ReferentialAction.restrict,
+        ReferentialAction.cascade,
+      ],
+      ['ON DELETE SET NULL', ReferentialAction.setNull, ''],
+      ['MATCH FULL ON DELETE CASCADE', ReferentialAction.cascade, ''],
+      ['on update no action', '', ReferentialAction.noAction],
+      [
+        'ON DELETE SET NULL (a_id) ON UPDATE CASCADE',
+        ReferentialAction.setNull,
+        ReferentialAction.cascade,
+      ],
+      [
+        'ON DELETE SET DEFAULT (a_id, b) ON UPDATE RESTRICT',
+        ReferentialAction.setDefault,
+        ReferentialAction.restrict,
+      ],
     ]) {
       const { ast } = parse(
         `CREATE TABLE b (id INT, a_id INT, FOREIGN KEY (a_id) REFERENCES a (id) ${actions});`
       );
 
       expect(ast.columns).toEqual(idAndA);
-      expect(ast.foreignKeys).toEqual([foreignKey]);
+      expect(ast.foreignKeys).toEqual([{ ...foreignKey, onDelete, onUpdate }]);
     }
 
     const { ast } = parse(
@@ -869,7 +1895,13 @@ describe('createTableParser - constraint and index items', () => {
       ...idAndA,
       column({ name: 'c', dataType: 'INT' }),
     ]);
-    expect(ast.foreignKeys).toEqual([foreignKey]);
+    expect(ast.foreignKeys).toEqual([
+      {
+        ...foreignKey,
+        onDelete: ReferentialAction.setDefault,
+        onUpdate: ReferentialAction.noAction,
+      },
+    ]);
   });
 
   it('keeps the data type of an inline REFERENCES with a SET NULL action', () => {
@@ -881,6 +1913,112 @@ describe('createTableParser - constraint and index items', () => {
       column({ name: 'id', dataType: 'INT' }),
       column({ name: 'a_id', dataType: 'BIGINT' }),
       column({ name: 'c', dataType: 'INTEGER' }),
+    ]);
+  });
+
+  it('keys the column an inline REFERENCES ends, with its actions', () => {
+    const { ast } = parse(
+      'CREATE TABLE b (id INT, a_id BIGINT NOT NULL REFERENCES s.a (id) ON DELETE CASCADE ON UPDATE RESTRICT, c INT REFERENCES a, d INT);'
+    );
+
+    expect(ast.columns).toEqual([
+      column({ name: 'id', dataType: 'INT' }),
+      column({ name: 'a_id', dataType: 'BIGINT', nullable: false }),
+      column({ name: 'c', dataType: 'INT' }),
+      column({ name: 'd', dataType: 'INT' }),
+    ]);
+    expect(ast.foreignKeys).toEqual([
+      {
+        columnNames: ['a_id'],
+        refTableName: 'a',
+        refColumnNames: ['id'],
+        onDelete: ReferentialAction.cascade,
+        onUpdate: ReferentialAction.restrict,
+      },
+      {
+        columnNames: ['c'],
+        refTableName: 'a',
+        refColumnNames: [],
+        onDelete: '',
+        onUpdate: '',
+      },
+    ]);
+  });
+
+  it('keys the column an inline FOREIGN KEY REFERENCES ends, named or not', () => {
+    for (const constraint of ['', 'CONSTRAINT fk_a ']) {
+      const { ast } = parse(
+        `CREATE TABLE b (a_id INT ${constraint}FOREIGN KEY REFERENCES a (id) ON DELETE CASCADE, c INT NOT NULL FOREIGN KEY REFERENCES a, d INT);`
+      );
+
+      expect(ast.columns).toEqual([
+        column({ name: 'a_id', dataType: 'INT' }),
+        column({ name: 'c', dataType: 'INT', nullable: false }),
+        column({ name: 'd', dataType: 'INT' }),
+      ]);
+      expect(ast.foreignKeys).toEqual([
+        {
+          columnNames: ['a_id'],
+          refTableName: 'a',
+          refColumnNames: ['id'],
+          onDelete: ReferentialAction.cascade,
+          onUpdate: '',
+        },
+        {
+          columnNames: ['c'],
+          refTableName: 'a',
+          refColumnNames: [],
+          onDelete: '',
+          onUpdate: '',
+        },
+      ]);
+    }
+  });
+
+  it('reads the column attributes that follow an inline REFERENCES', () => {
+    const { ast } = parse(
+      "CREATE TABLE b (a_id INT REFERENCES a (id) NOT NULL DEFAULT 1 COMMENT 'x');"
+    );
+
+    expect(ast.columns).toEqual([
+      column({
+        name: 'a_id',
+        dataType: 'INT',
+        nullable: false,
+        default: '1',
+        comment: 'x',
+      }),
+    ]);
+    expect(ast.foreignKeys).toHaveLength(1);
+  });
+
+  it('keys no column from an inline REFERENCES it cannot read', () => {
+    for (const sql of [
+      'CREATE TABLE b (a_id INT REFERENCES (id), z INT);',
+      'CREATE TABLE b (a_id INT REFERENCES a (x, y), z INT);',
+      'CREATE TABLE b (a_id INT REFERENCES',
+    ]) {
+      const { ast } = parse(sql);
+
+      expect(ast.foreignKeys).toEqual([]);
+      expect(ast.columns[0]).toEqual(column({ name: 'a_id', dataType: 'INT' }));
+    }
+  });
+
+  it('drops the ON UPDATE of a MySQL timestamp and keeps what follows it', () => {
+    const { ast } = parse(
+      "CREATE TABLE t (ts DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3) COMMENT 'x', z INT);"
+    );
+
+    expect(ast.columns).toEqual([
+      column({
+        name: 'ts',
+        dataType: 'DATETIME(3)',
+        default: 'CURRENT_TIMESTAMP(3)',
+        comment: 'x',
+        nullable: false,
+      }),
+      column({ name: 'z', dataType: 'INT' }),
     ]);
   });
 
@@ -949,7 +2087,13 @@ describe('createTableParser - constraint and index items', () => {
         columns: [{ name: 'a_id', sort: SortType.asc }],
       },
     ]);
-    expect(ast.foreignKeys).toEqual([foreignKey]);
+    expect(ast.foreignKeys).toEqual([
+      {
+        ...foreignKey,
+        onDelete: ReferentialAction.noAction,
+        onUpdate: ReferentialAction.noAction,
+      },
+    ]);
   });
 
   it('reads the column of each prefix length key part', () => {
@@ -1161,6 +2305,8 @@ describe('parserForeignKeyParser', () => {
       columnNames: ['a'],
       refTableName: 'o',
       refColumnNames: ['x'],
+      onDelete: '',
+      onUpdate: '',
     });
   });
 
@@ -1189,6 +2335,8 @@ describe('parserForeignKeyParser', () => {
       columnNames: ['a'],
       refTableName: 'sc',
       refColumnNames: ['x'],
+      onDelete: '',
+      onUpdate: '',
     });
   });
 
@@ -1219,10 +2367,19 @@ describe('parserForeignKeyParser', () => {
     expect(foreignKey).toBeNull();
   });
 
-  it('returns null when the referenced column list is missing', () => {
-    const { foreignKey } = parseForeignKey('FOREIGN KEY (a) REFERENCES o');
+  it('keeps a key with no referenced column list, the referenced primary key', () => {
+    const { foreignKey, $pos, tokens } = parseForeignKey(
+      'FOREIGN KEY (a, b) REFERENCES o ON DELETE CASCADE, c INT'
+    );
 
-    expect(foreignKey).toBeNull();
+    expect(foreignKey).toEqual({
+      columnNames: ['a', 'b'],
+      refTableName: 'o',
+      refColumnNames: [],
+      onDelete: ReferentialAction.cascade,
+      onUpdate: '',
+    });
+    expect(tokens[$pos.value].value).toBe(',');
   });
 
   it('returns null when the column counts differ', () => {

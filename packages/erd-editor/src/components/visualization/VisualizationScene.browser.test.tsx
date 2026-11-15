@@ -1,6 +1,7 @@
 /** @jsxHost konva */
 
 import { observable } from '@dineug/r-html';
+import { whenDrawn } from '@dineug/r-html-konva';
 import type { Group as KonvaGroup } from 'konva/lib/Group';
 import type { Layer } from 'konva/lib/Layer';
 import type { Circle } from 'konva/lib/shapes/Circle';
@@ -12,11 +13,14 @@ import { afterEach, describe, expect, it } from 'vite-plus/test';
 
 import {
   createTestAppContext,
+  createTestI18n,
   createTestTheme,
   fireScenePointer,
   flush,
   movePointer,
   moveScenePointer,
+  provideI18n,
+  pseudoMessages,
   releasePointer,
   whenPainted,
 } from '@/__test-utils__';
@@ -36,18 +40,22 @@ import {
   type VisualizationState,
 } from '@/components/visualization/visualizationView';
 import { TextFontFamily } from '@/constants/fonts';
+import { NameViewMode } from '@/constants/schema';
 import { addRelationshipAction } from '@/engine/modules/relationship/atom.actions';
+import { toNameViewModeAction } from '@/engine/modules/settings/atom.actions';
 import {
   addTableAction,
+  changeTableLogicalNameAction,
   changeTableNameAction,
 } from '@/engine/modules/table/atom.actions';
 import {
   addColumnAction,
   changeColumnNameAction,
 } from '@/engine/modules/table-column/atom.actions';
-import { whenDrawn } from '@/konva/batchDraw';
+import { createI18n, type I18n } from '@/i18n/translate';
 import { renderScene } from '@/konva/scene/renderScene';
 import type { Theme } from '@/themes/tokens';
+import { CURSOR_GRABBING } from '@/utils/stageCursor';
 
 type Fixture = {
   app: AppContext;
@@ -106,7 +114,7 @@ function seedRelated(app: AppContext) {
  * The seeded document laid out by d3 and then held still, so a position read
  * here is the one drawn.
  */
-async function setup(seed = seedGraph): Promise<Fixture> {
+async function setup(seed = seedGraph, i18n?: I18n): Promise<Fixture> {
   const app = createTestAppContext();
   seed(app);
 
@@ -120,6 +128,9 @@ async function setup(seed = seedGraph): Promise<Fixture> {
   const theme = createTestTheme();
   const container = document.createElement('div');
   document.body.append(container);
+  // On the Stage container, which the scene's providers hang from too, and
+  // before the render, since a component subscribes as it is set up.
+  const i18nProvider = i18n ? provideI18n(container, i18n) : null;
 
   const rendered = renderScene({
     app,
@@ -133,6 +144,7 @@ async function setup(seed = seedGraph): Promise<Fixture> {
   teardowns.push(() => {
     graph.simulation.stop();
     rendered.destroy();
+    i18nProvider?.destroy();
     container.remove();
   });
 
@@ -332,6 +344,20 @@ describe('the visualization scene', () => {
       ]);
     });
 
+    it('names a table without a name in the language the element shows, following a switch', async () => {
+      const i18n = createTestI18n('en');
+      const { stage, settle } = await setup(seedGraph, i18n);
+      expect(textsOf(stage)[1]).toBe('table');
+
+      Object.assign(i18n, createI18n('ko-KR', pseudoMessages('ko')));
+      await settle();
+
+      expect(textsOf(stage)).toEqual([
+        LONG_NAME.slice(0, NAME_MAX_LENGTH) + '…',
+        'ko:table',
+      ]);
+    });
+
     it('centres each label under its table in the editor face, in bold', async () => {
       const { stage, graph } = await setup();
       const [table] = graph.nodes;
@@ -381,6 +407,39 @@ describe('the visualization scene', () => {
       await settle();
       expect(labels.opacity()).toBe(1);
       expect(labels.visible()).toBe(true);
+    });
+
+    it('follows the name view, the name dimmed for a blank logical name and under it in the view of both', async () => {
+      const { app, stage, theme, settle } = await setup(app => {
+        seedGraph(app);
+        app.store.dispatchSync(
+          changeTableNameAction({ id: 't2', value: 'posts' }),
+          changeTableLogicalNameAction({ id: 't2', value: 'Posts' })
+        );
+      });
+      const switchTo = async (
+        mode: (typeof NameViewMode)[keyof typeof NameViewMode]
+      ) => {
+        app.store.dispatchSync(
+          toNameViewModeAction(app.store.state, mode, false)
+        );
+        await settle();
+      };
+      const cut = LONG_NAME.slice(0, NAME_MAX_LENGTH) + '…';
+
+      expect(textsOf(stage)).toEqual([cut, 'posts']);
+
+      await switchTo(NameViewMode.logical);
+      const [standIn, logical] = stage.find<Text>('.visualization-label');
+      expect(textsOf(stage)).toEqual([cut, 'Posts']);
+      expect(standIn.fill()).toBe(theme.placeholder);
+      expect(logical.fill()).toBe(theme.foreground);
+
+      await switchTo(NameViewMode.both);
+      expect(textsOf(stage)).toEqual([cut, 'Posts\nposts']);
+      expect(stage.find<Text>('.visualization-label')[0].fill()).toBe(
+        theme.foreground
+      );
     });
 
     it('gives a column no name however far the reader zooms in', async () => {
@@ -531,6 +590,41 @@ describe('the visualization scene', () => {
       await settle();
 
       expect(state.x).toBe(x + 40);
+    });
+
+    it('takes a middle press on the background whole, with the grabbing hand until the lift', async () => {
+      const { stage, state, settle } = await setup();
+      const { x } = state;
+      const container = stage.container();
+
+      const press = fireScenePointer(panOf(stage), 'mousedown', {
+        button: 1,
+        clientX: 0,
+        clientY: 0,
+      });
+      movePointer(25, 0);
+      await settle();
+
+      expect(press.defaultPrevented).toBe(true);
+      expect(container.style.cursor).toBe(CURSOR_GRABBING);
+      expect(state.x).toBe(x + 25);
+
+      releasePointer();
+      await settle();
+      expect(container.style.cursor).toBe('');
+      expect(state.drag).toBe(false);
+    });
+
+    it('leaves the default of a main press on the background alone, and the cursor too', async () => {
+      const { stage } = await setup();
+
+      const press = fireScenePointer(panOf(stage), 'mousedown', {
+        clientX: 0,
+        clientY: 0,
+      });
+
+      expect(press.defaultPrevented).toBe(false);
+      expect(stage.container().style.cursor).toBe('');
     });
   });
 

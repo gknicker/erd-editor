@@ -1,9 +1,17 @@
-import type { RootState } from '@dineug/erd-editor/peer.js';
+import {
+  getTablesGroupRect,
+  LockSettingType,
+  type RootState,
+  settingsActions,
+  settingsActions$,
+} from '@dineug/erd-editor/peer.js';
+import { createSchema, toJson } from '@dineug/erd-editor-schema';
 import { afterEach, describe, expect, it } from 'vite-plus/test';
 
-import { comparable, settle } from '@/__test-utils__/mcp';
-import { TOOL_SCENARIOS } from '@/__test-utils__/scenarios';
+import { settle } from '@/__test-utils__/mcp';
+import { APPEND_SCENARIOS, TOOL_SCENARIOS } from '@/__test-utils__/scenarios';
 import {
+  createImportValue,
   createPeerSession,
   type PeerSession,
   SEED,
@@ -75,28 +83,78 @@ describe('an import replaces the document on both sides (AC-E13)', () => {
         indexIds: [],
         memoIds: [],
       });
-      expect(comparable(other.value)).toEqual(comparable(agent.value));
+      expect(JSON.parse(other.value)).toEqual(JSON.parse(agent.value));
     }
   );
 
   it.each(SCHEMA_IMPORTS)(
-    '%s keeps the settings and lays the tables out in the same batch',
+    '%s keeps the settings and sends the grid points inside the load, never a sort',
     async name => {
-      const session = open();
+      // A sort each side replayed would measure with its own text widths.
+      const session = open({ otherToWidth: text => text.length * 23 });
       await quiet();
-      const { agent } = session;
+      const { agent, other } = session;
       runTool(agent, 'erd_set_database_name', { value: 'shop' });
 
       runTool(agent, name, TOOL_SCENARIOS[name]);
 
+      const points = ({
+        doc,
+        collections,
+      }: Pick<RootState, 'doc' | 'collections'>) =>
+        doc.tableIds.map(id => {
+          const { x, y } = collections.tableEntities[id].ui;
+          return { x, y };
+        });
+      const batch = session.sent.find(actions =>
+        actions.some(({ type }) => type === 'editor.loadJson')
+      );
       expect(agent.state.settings.databaseName).toBe('shop');
-      expect(
-        session.sent
-          .find(actions =>
-            actions.some(({ type }) => type === 'editor.loadJson')
-          )
-          ?.at(-1)?.type
-      ).toBe('table.sort');
+      expect(batch?.map(({ type }) => type)).toEqual([
+        'editor.clear',
+        'editor.loadJson',
+      ]);
+      expect(points(JSON.parse(batch![1].payload.value))).toEqual(
+        points(agent.state)
+      );
+      expect(points(other.state)).toEqual(points(agent.state));
+    }
+  );
+
+  it.each(SCHEMA_IMPORTS)(
+    '%s puts the view at the start of the canvas, in the file too, though a lock held it',
+    async name => {
+      const session = open();
+      await quiet();
+      const { agent, other } = session;
+      const viewOf = (value: string) => {
+        const { originX, originY, zoomLevel } = JSON.parse(value).settings;
+        return { originX, originY, zoomLevel };
+      };
+      const { originX, originY, zoomLevel } = createSchema().settings;
+      const start = { originX, originY, zoomLevel };
+      agent.dispatch([
+        settingsActions$.changeLockSettingsAction$(
+          LockSettingType.viewport,
+          false
+        ),
+      ]);
+      agent.dispatch([settingsActions.changeZoomLevelAction({ value: 0.5 })]);
+      agent.dispatch([
+        settingsActions$.changeLockSettingsAction$(
+          LockSettingType.viewport,
+          true
+        ),
+      ]);
+      await quiet();
+      expect(viewOf(agent.value)).not.toEqual(start);
+
+      runTool(agent, name, TOOL_SCENARIOS[name]);
+      await quiet();
+
+      expect(viewOf(agent.value)).toEqual(start);
+      expect(viewOf(other.value)).toEqual(start);
+      expect(agent.state.settings.lockSettings).toBe(63);
     }
   );
 
@@ -111,6 +169,39 @@ describe('an import replaces the document on both sides (AC-E13)', () => {
     expect(session.other.state.settings.databaseName).toBe('imported');
   });
 
+  it.each([
+    ['carries', LockSettingType.language, 63 & ~LockSettingType.language, 0.8],
+    ['has no', undefined, 63, createSchema().settings.zoomLevel],
+  ])(
+    'takes the locks of a JSON document that %s lockSettings, every one on and the view at the start without them',
+    async (_, unlocked, locks, zoomLevel) => {
+      const session = open();
+      await quiet();
+      const { agent, other } = session;
+      agent.dispatch([
+        settingsActions$.changeLockSettingsAction$(
+          LockSettingType.viewport | LockSettingType.bracketType,
+          false
+        ),
+      ]);
+      agent.dispatch([settingsActions.changeZoomLevelAction({ value: 0.5 })]);
+      const json = JSON.parse(createImportValue());
+      json.settings.zoomLevel = 0.8;
+      if (unlocked === undefined) {
+        delete json.settings.lockSettings;
+      } else {
+        json.settings.lockSettings &= ~unlocked;
+      }
+
+      runTool(agent, 'erd_import_json', { value: JSON.stringify(json) });
+      await quiet();
+
+      expect(agent.state.settings.lockSettings).toBe(locks);
+      expect(other.state.settings.lockSettings).toBe(locks);
+      expect(agent.state.settings.zoomLevel).toBe(zoomLevel);
+    }
+  );
+
   it('brings the seed back on both sides with one undo', async () => {
     const session = open();
     await quiet();
@@ -122,7 +213,7 @@ describe('an import replaces the document on both sides (AC-E13)', () => {
 
     expect(tableNames(agent.state)).toEqual(['users', 'orders', 'empty']);
     expect(other.state.doc.indexIds).toEqual([SEED.index]);
-    expect(comparable(other.value)).toEqual(comparable(agent.value));
+    expect(JSON.parse(other.value)).toEqual(JSON.parse(agent.value));
   });
 
   it('lays tables out at the same points where the other side measures text apart', async () => {
@@ -153,6 +244,206 @@ describe('an import replaces the document on both sides (AC-E13)', () => {
     expect(positions(agent.state)).toHaveLength(4);
     expect(widths(other.state)).not.toEqual(widths(agent.state));
     expect(positions(other.state)).toEqual(positions(agent.state));
+  });
+});
+
+describe('the dictionaries through a replace', () => {
+  /** A word, a term and a domain, which the user adds in the editor. */
+  const DICTIONARY_ROWS = [
+    { kind: 'word', id: 'w1', values: { name: 'Order' } },
+    { kind: 'term', id: 't1', values: { name: 'Order number' } },
+    { kind: 'domain', id: 'd1', values: { name: 'Money' } },
+  ].map(payload => ({ type: 'dictionary.add', payload }));
+
+  const dictionaryIds = ({ doc }: RootState) => ({
+    words: [...doc.wordIds],
+    terms: [...doc.termIds],
+    domains: [...doc.domainIds],
+  });
+
+  it.each(SCHEMA_IMPORTS)(
+    '%s keeps every word, term and domain on both sides',
+    async (name, table) => {
+      const session = open();
+      await quiet();
+      const { agent, other } = session;
+      other.dispatch(DICTIONARY_ROWS, { label: 'dictionary' });
+      await quiet();
+
+      runTool(agent, name, TOOL_SCENARIOS[name]);
+      await quiet();
+
+      const kept = {
+        words: [SEED.memberWord, SEED.numberWord, 'w1'],
+        terms: [SEED.term, 't1'],
+        domains: [SEED.domain, 'd1'],
+      };
+      expect(tableNames(agent.state)).toEqual([table]);
+      expect(dictionaryIds(agent.state)).toEqual(kept);
+      expect(dictionaryIds(other.state)).toEqual(kept);
+      expect(
+        JSON.parse(agent.value).collections.termEntities.rows.slice(-1)
+      ).toEqual([['t1', 'Order number']]);
+      expect(JSON.parse(other.value)).toEqual(JSON.parse(agent.value));
+    }
+  );
+
+  it('erd_import_json replaces them with the document it loads', async () => {
+    const session = open();
+    await quiet();
+    const { agent, other } = session;
+    other.dispatch(DICTIONARY_ROWS, { label: 'dictionary' });
+    await quiet();
+
+    runTool(agent, 'erd_import_json', TOOL_SCENARIOS.erd_import_json);
+    await quiet();
+
+    const none = { words: [], terms: [], domains: [] };
+    expect(dictionaryIds(agent.state)).toEqual(none);
+    expect(dictionaryIds(other.state)).toEqual(none);
+  });
+});
+
+describe('a DBML TableGroup', () => {
+  it.each(['replace', 'append'] as const)(
+    'erd_import_dbml with mode %s makes a TableGroup a table group round its tables on both sides',
+    async mode => {
+      const session = open();
+      await quiet();
+      const { agent, other } = session;
+      const value = `Table accounts {
+  id int [pk]
+}
+Table invoices {
+  id int [pk]
+  account_id int [ref: > accounts.id]
+}
+Table notes {
+  id int [pk]
+}
+TableGroup billing [color: #3498db, note: 'dropped'] {
+  accounts
+  invoices
+}`;
+
+      const run = runTool(agent, 'erd_import_dbml', { value, mode });
+      await quiet();
+
+      const { doc, collections } = agent.state;
+      const groupId = doc.tableGroupIds.at(-1)!;
+      const group = collections.tableGroupEntities[groupId];
+      const memberIds = doc.tableIds.filter(
+        id => collections.tableEntities[id].groupId === groupId
+      );
+      const { x, y, width, height } = group.ui;
+      expect(run.mismatch).toBeUndefined();
+      expect(group).toMatchObject({ name: 'billing', color: '#3498db' });
+      expect(
+        memberIds.map(id => collections.tableEntities[id].name).sort()
+      ).toEqual(['accounts', 'invoices']);
+      expect({ x, y, width, height }).toEqual(
+        getTablesGroupRect(agent.state, memberIds)
+      );
+      expect(doc.tableGroupIds).toHaveLength(mode === 'append' ? 2 : 1);
+      expect(JSON.parse(other.value)).toEqual(JSON.parse(agent.value));
+    }
+  );
+});
+
+describe('an import with mode append adds to the document on both sides', () => {
+  const SEED_NAMES = ['users', 'orders', 'empty'];
+
+  it.each([...SCHEMA_IMPORTS, ['erd_import_json', 'accounts']] as const)(
+    '%s adds %s under new ids beside the seed and sends it to the other side',
+    async (name, table) => {
+      const session = open();
+      await quiet();
+      const { agent, other } = session;
+      const seeded = structuredClone(agent.state.collections.tableEntities);
+      const sentBefore = session.sent.length;
+
+      const run = runTool(agent, name, APPEND_SCENARIOS[name]);
+      await quiet();
+
+      const sent = session.sent
+        .slice(sentBefore)
+        .flatMap(actions => actions.map(({ type }) => type));
+      expect(run).toMatchObject({ batches: 1, historyEntries: 1 });
+      expect(run.mismatch).toBeUndefined();
+      expect(tableNames(agent.state)).toEqual([...SEED_NAMES, table]);
+      expect(tableNames(other.state)).toEqual([...SEED_NAMES, table]);
+      expect(agent.state.doc.tableIds).not.toContain('accounts');
+      expect(run.createdIds).toContain(agent.state.doc.tableIds[3]);
+      for (const id of [SEED.users, SEED.orders, SEED.empty]) {
+        expect(agent.state.collections.tableEntities[id].ui).toMatchObject({
+          x: seeded[id].ui.x,
+          y: seeded[id].ui.y,
+        });
+      }
+      expect(agent.state.doc.relationshipIds).toEqual([SEED.relationship]);
+      expect(sent).not.toContain('editor.loadJson');
+      expect(sent.filter(type => type.startsWith('editor.'))).toEqual([]);
+      expect(JSON.parse(other.value)).toEqual(JSON.parse(agent.value));
+    }
+  );
+
+  it('keeps the settings, the database name the document carries included', async () => {
+    const session = open();
+    await quiet();
+    runTool(session.agent, 'erd_set_database_name', { value: 'shop' });
+
+    runTool(session.agent, 'erd_import_json', APPEND_SCENARIOS.erd_import_json);
+    await quiet();
+
+    expect(session.agent.state.settings.databaseName).toBe('shop');
+    expect(session.other.state.settings.databaseName).toBe('shop');
+  });
+
+  it('lays what it adds out below every table and memo the seed holds, from the left edge of its group', async () => {
+    const session = open();
+    await quiet();
+    const { agent } = session;
+    const { tableEntities, memoEntities, tableGroupEntities } =
+      agent.state.collections;
+    const lowest = Math.max(
+      ...Object.values(tableEntities).map(({ ui }) => ui.y),
+      ...Object.values(memoEntities).map(({ ui }) => ui.y)
+    );
+
+    runTool(agent, 'erd_import_sql', APPEND_SCENARIOS.erd_import_sql);
+
+    const added =
+      agent.state.collections.tableEntities[agent.state.doc.tableIds[3]];
+    expect(added.ui.y).toBeGreaterThan(lowest);
+    expect(added.ui.x).toBe(tableGroupEntities[SEED.group].ui.x);
+  });
+
+  it('takes the append away on both sides with one undo', async () => {
+    const session = open();
+    await quiet();
+    const { agent, other } = session;
+
+    runTool(agent, 'erd_import_dbml', APPEND_SCENARIOS.erd_import_dbml);
+    agent.undo();
+    await quiet();
+
+    expect(tableNames(agent.state)).toEqual(SEED_NAMES);
+    expect(tableNames(other.state)).toEqual(SEED_NAMES);
+    expect(JSON.parse(other.value)).toEqual(JSON.parse(agent.value));
+  });
+
+  it('refuses an empty document text, which would add nothing', async () => {
+    const session = open();
+    await quiet();
+    const sentBefore = session.sent.length;
+
+    const error = refusal(() =>
+      runTool(session.agent, 'erd_import_json', { value: '', mode: 'append' })
+    );
+
+    expect(error.code).toBe(ToolErrorCode.invalidArgs);
+    expect(error.message).toBe('value is empty, so nothing was imported');
+    expect(session.sent).toHaveLength(sentBefore);
   });
 });
 
@@ -216,19 +507,21 @@ describe('what an import refuses or mirrors from the element', () => {
     }
   );
 
-  it('loads an empty text as an empty document, as the element’s value setter does', async () => {
+  it('loads an empty text as a new document, as the element’s value setter does', async () => {
     const session = open();
     await quiet();
 
     const run = runTool(session.agent, 'erd_import_json', { value: '' });
     await quiet();
 
-    // The reducer cannot parse an empty text; an empty object is a document.
+    // The reducer cannot parse an empty text, so the new document goes spelled out.
     expect(
       run.actions.find(({ type }) => type === 'editor.loadJson')?.payload
-    ).toEqual({ value: '{}' });
+    ).toEqual({ value: toJson(createSchema()) });
     expect(run.batches).toBe(1);
-    expect(session.agent.state.doc.tableIds).toEqual([]);
-    expect(session.other.state.doc.tableIds).toEqual([]);
+    for (const peer of [session.agent, session.other]) {
+      expect(peer.state.doc.tableIds).toEqual([]);
+      expect(peer.state.settings.lockSettings).toBe(63);
+    }
   });
 });

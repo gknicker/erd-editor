@@ -1,6 +1,14 @@
+import { AnyAction } from '@dineug/r-html';
+import { isNil, pick } from 'es-toolkit';
 import { round } from 'es-toolkit/compat';
 
+import {
+  CanvasType,
+  LockSettingFields,
+  LockSettingTypeList,
+} from '@/constants/schema';
 import { GeneratorAction } from '@/engine/generator.actions';
+import { endScreenSettingsAction } from '@/engine/modules/editor/atom.actions';
 import {
   viewChangeZoomLevelAction,
   viewScrollToAction,
@@ -8,6 +16,7 @@ import {
   viewStreamZoomLevelAction,
 } from '@/engine/modules/editor/view.actions';
 import { RootState } from '@/engine/state';
+import { attachActionsTag, Tag } from '@/engine/tag';
 import { Point } from '@/internal-types';
 import {
   getZoomTransform,
@@ -15,15 +24,25 @@ import {
   toScenePoint,
   toScreenPoint,
 } from '@/konva/scene/viewport';
+import { bHas } from '@/utils/bit';
 import type { GeometrySource } from '@/utils/draw-relationship/geometrySource';
 import { zoomLevelInRange } from '@/utils/validation';
 
 import {
+  changeBracketTypeAction,
+  changeColumnNameCaseAction,
+  changeDatabaseAction,
+  changeLanguageAction,
+  changeLockSettingsAction,
+  changeShowAction,
+  changeTableNameCaseAction,
   changeZoomLevelAction,
   scrollToAction,
   streamScrollToAction,
   streamZoomLevelAction,
+  UnlockCarriedSettings,
 } from './atom.actions';
+import type { ScreenSettingUnit } from './screenBaseline';
 
 /**
  * How far the scroll has to travel for the scene point given to land under the
@@ -158,7 +177,99 @@ export const pinchZoomAction$ = (
     }
   };
 
+/**
+ * Locks the settings named at what they hold now, or unlocks them carrying the
+ * code settings and the name view among them as they show here. A canvas type
+ * locked on the Settings tab holds the tab the reader came from.
+ */
+export const changeLockSettingsAction$ = (
+  lockSettingType: number,
+  value: boolean
+): GeneratorAction =>
+  function* ({ settings, editor }) {
+    const named = value
+      ? lockSettingType
+      : lockSettingType & UnlockCarriedSettings;
+    const fields = LockSettingTypeList.filter(bit => bHas(named, bit)).flatMap(
+      bit => LockSettingFields[bit]
+    );
+    const values: Partial<RootState['settings']['lockedValues']> = pick(
+      settings,
+      fields
+    );
+
+    if (values.canvasType === CanvasType.settings) {
+      values.canvasType = editor.lastCanvasType;
+    }
+
+    yield changeLockSettingsAction({ lockSettingType, value, values });
+  };
+
+/** The setter each setting a writable screen takes back sends its value through. */
+const RESTORED_SETTERS = {
+  language: changeLanguageAction,
+  tableNameCase: changeTableNameCaseAction,
+  columnNameCase: changeColumnNameCaseAction,
+  bracketType: changeBracketTypeAction,
+  database: changeDatabaseAction,
+} as const;
+
+const RESTORED_UNITS: ReadonlyArray<ScreenSettingUnit> = [
+  ...(Object.keys(RESTORED_SETTERS) as ScreenSettingUnit[]),
+  'show',
+];
+
+/**
+ * The setters that bring each code setting, the database and the show bits the
+ * values name from what the settings hold to those values, untagged; a unit the
+ * values leave out, and one the settings already hold, sends none.
+ */
+export function screenSettingRestores(
+  values: Partial<Pick<RootState['settings'], ScreenSettingUnit>>,
+  settings: RootState['settings']
+): AnyAction[] {
+  const restores: AnyAction[] = [];
+  Object.entries(RESTORED_SETTERS).forEach(([unit, setter]) => {
+    const value = values[unit as keyof typeof RESTORED_SETTERS];
+    if (!isNil(value) && value !== settings[unit as ScreenSettingUnit]) {
+      restores.push(setter({ value }));
+    }
+  });
+
+  // The bits the values hold and the settings lack come back set, and those the
+  // settings hold alone come back cleared, each as one change, so every listener
+  // of a show change hears it.
+  const { show } = values;
+  if (!isNil(show)) {
+    const set = show & ~settings.show;
+    const clear = settings.show & ~show;
+    if (set) restores.push(changeShowAction({ show: set, value: true }));
+    if (clear) restores.push(changeShowAction({ show: clear, value: false }));
+  }
+  return restores;
+}
+
+/**
+ * What a readonly editor turning writable sends in one batch: the document's
+ * code settings, database and show bits back on the screen through their own
+ * setters, tagged as the screen's, then the end of their baseline.
+ */
+export const restoreScreenSettingsAction$ = (): GeneratorAction =>
+  function* ({ editor: { screenBaseline }, settings }) {
+    const units = RESTORED_UNITS.filter(unit => !isNil(screenBaseline?.[unit]));
+    if (!screenBaseline || !units.length) return;
+
+    yield [
+      ...attachActionsTag(
+        Tag.screen,
+        screenSettingRestores(screenBaseline, settings)
+      ),
+      endScreenSettingsAction({ units }),
+    ];
+  };
+
 export const actions$ = {
   changeZoomLevelAction$,
   streamZoomLevelAction$,
+  changeLockSettingsAction$,
 };

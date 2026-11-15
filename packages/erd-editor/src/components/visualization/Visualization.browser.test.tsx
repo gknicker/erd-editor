@@ -1,4 +1,5 @@
 import { useProvider } from '@dineug/r-html';
+import { whenDrawn } from '@dineug/r-html-konva';
 import type { Layer } from 'konva/lib/Layer';
 import type { Circle } from 'konva/lib/shapes/Circle';
 import type { Stage } from 'konva/lib/Stage';
@@ -38,7 +39,6 @@ import {
   addColumnAction,
   changeColumnNameAction,
 } from '@/engine/modules/table-column/atom.actions';
-import { whenDrawn } from '@/konva/batchDraw';
 
 /** How far right of the pointer the preview opens. */
 const MARGIN = 20;
@@ -331,6 +331,15 @@ describe('the visualization shell', () => {
     ]);
     expect(canvasOf(mounted).style.width).toBe(`${viewport.width}px`);
     expect(canvasOf(mounted).style.height).toBe(`${viewport.height}px`);
+  });
+
+  it('keeps the graph left to right inside a right-to-left editor', async () => {
+    const mounted = await mountVisualization();
+    mounted.container.dir = 'rtl';
+    const root = canvasOf(mounted).parentElement!;
+
+    expect(root.getAttribute('dir')).toBe('ltr');
+    expect(getComputedStyle(stageOf().content).direction).toBe('ltr');
   });
 
   it('centres the view on the stage at scale one', async () => {

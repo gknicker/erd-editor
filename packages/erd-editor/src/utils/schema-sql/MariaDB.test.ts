@@ -11,11 +11,17 @@ import { createTable } from '@/utils/collection/table.entity';
 import { createColumn } from '@/utils/collection/tableColumn.entity';
 import {
   createSchema,
+  formatDropBlock,
+  formatHeader,
   formatIndex,
   formatTable,
 } from '@/utils/schema-sql/MariaDB';
-import { createSchema as createSchemaMySQL } from '@/utils/schema-sql/MySQL';
-import { Name } from '@/utils/schema-sql/utils';
+import {
+  createSchema as createSchemaMySQL,
+  formatDropBlock as formatDropBlockMySQL,
+  formatHeader as formatHeaderMySQL,
+} from '@/utils/schema-sql/MySQL';
+import { createWrittenObjects, Name } from '@/utils/schema-sql/utils';
 
 function createFixture() {
   const state = {
@@ -169,6 +175,21 @@ describe('schema-sql/MariaDB', () => {
       expect(buffer[0]).toBe('CREATE TABLE `users`');
       expect(buffer[2]).toBe('  `id`   INT         NOT NULL AUTO_INCREMENT,');
       expect(buffer[5]).toBe('  PRIMARY KEY (`id`)');
+    });
+
+    it('wraps a DEFAULT expression in the parentheses MariaDB needs', () => {
+      const { state, users } = createFixture();
+      const columns = state.collections.tableColumnEntities;
+      columns['col-name'].default = 'uuid()';
+      columns['col-age'].default = '1 + 1';
+      const buffer: string[] = [];
+
+      formatTable(state, { buffer, table: users });
+
+      expect(buffer[3]).toBe(
+        "  name VARCHAR(50) NOT NULL DEFAULT uuid() COMMENT 'user name',"
+      );
+      expect(buffer[4]).toBe('  age  INT         NULL     DEFAULT (1 + 1),');
     });
 
     it('prefers AUTO_INCREMENT over a DEFAULT value on the same column', () => {
@@ -354,7 +375,7 @@ describe('schema-sql/MariaDB', () => {
       expect(sql).toContain('  ADD CONSTRAINT FK_users_TO_posts1\n');
     });
 
-    it('emits empty key lists when the relationship columns cannot be resolved', () => {
+    it('skips a relationship none of whose columns resolve, blank line and all', () => {
       const { state } = createFixture();
       const relationship = state.collections.relationshipEntities['rel-1'];
       relationship.start.columnIds = ['ghost-start'];
@@ -362,8 +383,10 @@ describe('schema-sql/MariaDB', () => {
 
       const sql = createSchema(state);
 
-      expect(sql).toContain('    FOREIGN KEY ()\n');
-      expect(sql).toContain('    REFERENCES users ();\n');
+      expect(sql).not.toContain('FOREIGN KEY');
+      expect(sql).toContain(
+        '  ADD CONSTRAINT UQ_users_name UNIQUE (name);\n\nCREATE INDEX IDX_posts\n'
+      );
     });
 
     it('skips a relationship whose tables cannot be resolved', () => {
@@ -409,5 +432,218 @@ describe('schema-sql/MariaDB', () => {
 
       expect(mariadb).toBe(mysql);
     });
+  });
+});
+
+describe('schema-sql/MariaDB dotted table names', () => {
+  it('names constraints and indexes after the table part of an unquoted schema.table', () => {
+    const { state, users, posts } = createFixture();
+    users.name = 'sales.users';
+    posts.name = 'sales.posts';
+
+    expect(createSchema(state).split('\n')).toEqual([
+      '',
+      'CREATE TABLE sales.posts',
+      '(',
+      '  title   VARCHAR(20) NOT NULL,',
+      '  user_id INT         NULL    ',
+      ');',
+      '',
+      'CREATE TABLE sales.users',
+      '(',
+      '  id   INT         NOT NULL AUTO_INCREMENT,',
+      "  name VARCHAR(50) NOT NULL DEFAULT 'guest' COMMENT 'user name',",
+      '  age  INT         NULL    ,',
+      '  PRIMARY KEY (id)',
+      ") COMMENT 'user table';",
+      '',
+      'ALTER TABLE sales.users',
+      '  ADD CONSTRAINT UQ_users_name UNIQUE (name);',
+      '',
+      'ALTER TABLE sales.posts',
+      '  ADD CONSTRAINT FK_users_TO_posts',
+      '    FOREIGN KEY (user_id)',
+      '    REFERENCES sales.users (id);',
+      '',
+      'CREATE INDEX IDX_posts',
+      '  ON sales.posts (title ASC);',
+      '',
+    ]);
+  });
+
+  it('names keys after the table part of "sales"."users" without its quotes', () => {
+    const { state, users } = createFixture();
+    users.name = '"sales"."users"';
+
+    const sql = createSchema(state);
+
+    expect(sql).toContain('  ADD CONSTRAINT UQ_users_name UNIQUE (name);\n');
+    expect(sql).toContain('  ADD CONSTRAINT FK_users_TO_posts\n');
+  });
+
+  it('numbers a foreign key and an index name that repeat an earlier one but for case', () => {
+    const { state, users, posts } = createFixture();
+    users.name = 'sales.users';
+    posts.name = 'sales.posts';
+    // The hr table borrows the sales key column and both indexes one index
+    // column, which the DDL reads by id alone.
+    const hrUsers = createTable({
+      id: 'tbl-hr-users',
+      name: 'hr.Users',
+      columnIds: ['col-id'],
+    });
+    const hrRelationship = createRelationship({
+      id: 'rel-hr',
+      start: { tableId: hrUsers.id, columnIds: ['col-id'] },
+      end: { tableId: 'tbl-posts', columnIds: ['col-user-id'] },
+    });
+    const indexColumn = createIndexColumn({
+      id: 'idx-col-id',
+      indexId: 'idx-users',
+      columnId: 'col-id',
+    });
+    const usersIndex = createIndex({
+      id: 'idx-users',
+      tableId: 'tbl-users',
+      indexColumnIds: [indexColumn.id],
+    });
+    const hrIndex = createIndex({
+      id: 'idx-hr',
+      tableId: hrUsers.id,
+      indexColumnIds: [indexColumn.id],
+    });
+    state.collections.tableEntities[hrUsers.id] = hrUsers;
+    state.collections.relationshipEntities[hrRelationship.id] = hrRelationship;
+    state.collections.indexColumnEntities[indexColumn.id] = indexColumn;
+    state.collections.indexEntities[usersIndex.id] = usersIndex;
+    state.collections.indexEntities[hrIndex.id] = hrIndex;
+    state.doc.tableIds.push(hrUsers.id);
+    state.doc.relationshipIds.push(hrRelationship.id);
+    state.doc.indexIds = [usersIndex.id, hrIndex.id];
+
+    const sql = createSchema(state);
+
+    expect(sql).toContain('  ADD CONSTRAINT FK_users_TO_posts\n');
+    expect(sql).toContain('  ADD CONSTRAINT FK_Users_TO_posts1\n');
+    expect(sql).toContain('CREATE INDEX IDX_users\n  ON sales.users');
+    expect(sql).toContain('CREATE INDEX IDX_Users1\n  ON hr.Users');
+  });
+
+  it('keeps a quoted dotted name whole in every automatic name', () => {
+    const { state, users, posts } = createFixture();
+    users.name = 'sales.users';
+    posts.name = 'sales.posts';
+    state.settings.bracketType = BracketType.backtick;
+
+    const sql = createSchema(state);
+
+    expect(sql).toContain('  ADD CONSTRAINT `UQ_sales.users_name` UNIQUE');
+    expect(sql).toContain('  ADD CONSTRAINT `FK_sales.users_TO_sales.posts`');
+    expect(sql).toContain('CREATE INDEX `IDX_sales.posts`\n  ON `sales.posts`');
+  });
+});
+
+describe('schema-sql/MariaDB ifNotExists', () => {
+  it('writes IF NOT EXISTS on the table, the unique constraint, the foreign key and the index', () => {
+    const { state, index } = createFixture();
+    state.settings.bracketType = BracketType.backtick;
+    index.unique = true;
+    const written = createWrittenObjects();
+
+    expect(
+      createSchema(state, undefined, {
+        statements: 'ifNotExists',
+        written,
+      }).split('\n')
+    ).toEqual([
+      '',
+      'CREATE TABLE IF NOT EXISTS `posts`',
+      '(',
+      '  `title`   VARCHAR(20) NOT NULL,',
+      '  `user_id` INT         NULL    ',
+      ');',
+      '',
+      'CREATE TABLE IF NOT EXISTS `users`',
+      '(',
+      '  `id`   INT         NOT NULL AUTO_INCREMENT,',
+      "  `name` VARCHAR(50) NOT NULL DEFAULT 'guest' COMMENT 'user name',",
+      '  `age`  INT         NULL    ,',
+      '  PRIMARY KEY (`id`)',
+      ") COMMENT 'user table';",
+      '',
+      'ALTER TABLE `users`',
+      '  ADD CONSTRAINT `UQ_users_name` UNIQUE IF NOT EXISTS (`name`);',
+      '',
+      'ALTER TABLE `posts`',
+      '  ADD CONSTRAINT `FK_users_TO_posts`',
+      '    FOREIGN KEY IF NOT EXISTS (`user_id`)',
+      '    REFERENCES `users` (`id`);',
+      '',
+      'CREATE UNIQUE INDEX IF NOT EXISTS `IDX_posts`',
+      '  ON `posts` (`title` ASC);',
+      '',
+    ]);
+    expect(written.tables.map(table => table.name)).toEqual(['posts', 'users']);
+  });
+
+  it('writes what MySQL writes under create and recreate, but not under ifNotExists', () => {
+    const { state } = createFixture();
+
+    (['create', 'recreate'] as const).forEach(statements => {
+      expect(createSchema(state, undefined, { statements })).toBe(
+        createSchemaMySQL(state, undefined, { statements })
+      );
+    });
+    expect(
+      createSchema(state, undefined, { statements: 'ifNotExists' })
+    ).not.toBe(
+      createSchemaMySQL(state, undefined, { statements: 'ifNotExists' })
+    );
+  });
+
+  it('writes the header and the drop block MySQL writes', () => {
+    const { state, users } = createFixture();
+    const written = createWrittenObjects();
+    written.tables.push(users);
+
+    expect(formatHeader).toBe(formatHeaderMySQL);
+    expect(formatDropBlock).toBe(formatDropBlockMySQL);
+    expect(formatHeader(state, 'createAndUse', 'shop')).toBe(
+      'CREATE DATABASE IF NOT EXISTS shop;\nUSE shop;'
+    );
+    expect(formatDropBlock(state, written)).toContain(
+      '\n\nDROP TABLE IF EXISTS users;\n\n'
+    );
+  });
+});
+
+describe('schema-sql/MariaDB logical names as comments', () => {
+  it('writes the logical name where the table or column comment is empty, and none without the option', () => {
+    const { state, users, posts } = createFixture();
+    const columns = state.collections.tableColumnEntities;
+    users.logicalName = 'User';
+    posts.logicalName = 'Post';
+    columns['col-name'].logicalName = 'Name';
+    columns['col-title'].logicalName = "Post's title";
+    const buffer: string[] = [];
+
+    formatTable(state, { buffer, table: posts, logicalNameAsComment: true });
+
+    expect(buffer).toEqual([
+      'CREATE TABLE posts',
+      '(',
+      "  title   VARCHAR(20) NOT NULL COMMENT 'Post''s title',",
+      '  user_id INT         NULL    ',
+      ") COMMENT 'Post';",
+    ]);
+    expect(
+      createSchema(state, undefined, {
+        statements: 'ifNotExists',
+        logicalNameAsComment: true,
+      })
+    ).toContain(
+      "\n  name VARCHAR(50) NOT NULL DEFAULT 'guest' COMMENT 'user name',\n"
+    );
+    expect(createSchema(state)).not.toContain('Post');
   });
 });

@@ -1,5 +1,11 @@
 import { Reducer } from '@dineug/r-html';
 
+import {
+  DDLScriptPosition,
+  LockSettingType,
+  LockSettingTypeList,
+  NameViewMode,
+} from '@/constants/schema';
 import { EngineContext } from '@/engine/context';
 import { RootState } from '@/engine/state';
 import { ValuesType } from '@/internal-types';
@@ -18,12 +24,40 @@ export const ActionType = {
   changeColumnNameCase: 'settings.changeColumnNameCase',
   changeBracketType: 'settings.changeBracketType',
   changeRelationshipDataTypeSync: 'settings.changeRelationshipDataTypeSync',
-  changeRelationshipOptimization: 'settings.changeRelationshipOptimization',
   changeColumnOrder: 'settings.changeColumnOrder',
   changeMaxWidthComment: 'settings.changeMaxWidthComment',
+  changeLockSettings: 'settings.changeLockSettings',
   changeIgnoreSaveSettings: 'settings.changeIgnoreSaveSettings',
+  changeDDLScript: 'settings.changeDDLScript',
+  changeNameViewMode: 'settings.changeNameViewMode',
 } as const;
 export type ActionType = ValuesType<typeof ActionType>;
+
+/** What a code setter carries: its value, and whether every peer takes it. */
+export type CodeSettingPayload = {
+  value: number;
+  /**
+   * Set by the shared store on what it sends, made while the lock was off, so
+   * every peer writes it through the register whatever its own lock says.
+   */
+  shared?: boolean;
+};
+
+export type CodeSetting =
+  | 'language'
+  | 'tableNameCase'
+  | 'columnNameCase'
+  | 'bracketType';
+
+/** The lock of each code setting, under which each store shows its own value of it. */
+export const CodeSettingLocks: Readonly<
+  Record<CodeSetting, (typeof LockSettingTypeList)[number]>
+> = {
+  language: LockSettingType.language,
+  tableNameCase: LockSettingType.tableNameCase,
+  columnNameCase: LockSettingType.columnNameCase,
+  bracketType: LockSettingType.bracketType,
+};
 
 export type ActionMap = {
   [ActionType.changeDatabaseName]: {
@@ -53,22 +87,11 @@ export type ActionMap = {
   [ActionType.changeCanvasType]: {
     value: string;
   };
-  [ActionType.changeLanguage]: {
-    value: number;
-  };
-  [ActionType.changeTableNameCase]: {
-    value: number;
-  };
-  [ActionType.changeColumnNameCase]: {
-    value: number;
-  };
-  [ActionType.changeBracketType]: {
-    value: number;
-  };
+  [ActionType.changeLanguage]: CodeSettingPayload;
+  [ActionType.changeTableNameCase]: CodeSettingPayload;
+  [ActionType.changeColumnNameCase]: CodeSettingPayload;
+  [ActionType.changeBracketType]: CodeSettingPayload;
   [ActionType.changeRelationshipDataTypeSync]: {
-    value: boolean;
-  };
-  [ActionType.changeRelationshipOptimization]: {
     value: boolean;
   };
   [ActionType.changeColumnOrder]: {
@@ -78,9 +101,32 @@ export type ActionMap = {
   [ActionType.changeMaxWidthComment]: {
     value: number;
   };
+  [ActionType.changeLockSettings]: {
+    lockSettingType: number;
+    value: boolean;
+    /**
+     * The settings named as the sending store shows them: a lock holds them,
+     * and an unlock shows the code settings and the name view among them on
+     * every peer, so each saves one value. The viewport and the tab carry none.
+     */
+    values: Partial<RootState['settings']['lockedValues']>;
+  };
   [ActionType.changeIgnoreSaveSettings]: {
     saveSettingType: number;
     value: boolean;
+  };
+  [ActionType.changeDDLScript]: {
+    position: ValuesType<typeof DDLScriptPosition>;
+    value: string;
+  };
+  [ActionType.changeNameViewMode]: {
+    value: ValuesType<typeof NameViewMode>;
+    /**
+     * Whether every peer takes it: the sender's lock was off and it could
+     * edit. Otherwise only the store whose editor sent it shows it.
+     */
+    shared: boolean;
+    editorId: string;
   };
 };
 

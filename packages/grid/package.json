@@ -1,0 +1,48 @@
+{
+  "name": "@dineug/grid",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Canvas spreadsheet grid for r-html, drawn through Konva",
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "sideEffects": false,
+  "license": "MIT",
+  "scripts": {
+    "dev": "vp run --filter @dineug/grid... --filter !@dineug/grid build && vp dev",
+    "test:dev": "vp test dev",
+    "test:coverage": "vp test run --coverage",
+    "bench": "vp run --filter @dineug/grid... --filter !@dineug/grid build && E2E=1 playwright test -c playwright.bench.config.ts",
+    "bench:typecheck": "tsc -p bench/tsconfig.json"
+  },
+  "dependencies": {
+    "@chenglou/pretext": "catalog:",
+    "@dineug/r-html": "workspace:*",
+    "@dineug/r-html-konva": "workspace:*"
+  },
+  "peerDependencies": {
+    "konva": "catalog:"
+  },
+  "devDependencies": {
+    "@dineug/vite-plugin-r-html": "workspace:*",
+    "@playwright/test": "catalog:",
+    "@types/node": "catalog:",
+    "@typescript/typescript6": "catalog:",
+    "@vitest/browser-playwright": "catalog:",
+    "@vitest/coverage-v8": "catalog:",
+    "happy-dom": "catalog:",
+    "konva": "catalog:",
+    "typescript": "catalog:",
+    "vite": "catalog:",
+    "vite-plugin-dts": "catalog:",
+    "vite-plus": "catalog:",
+    "vitest": "catalog:"
+  }
+}

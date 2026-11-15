@@ -1,5 +1,5 @@
 import { query } from '@dineug/erd-editor-schema';
-import { nanoid } from 'nanoid';
+import { uuid25 } from '@dineug/uuid';
 
 import { ColumnOption } from '@/constants/schema';
 import { GeneratorAction } from '@/engine/generator.actions';
@@ -10,8 +10,14 @@ import {
 import { bHas } from '@/utils/bit';
 import { createColumn } from '@/utils/collection/tableColumn.entity';
 
+import { ActionMap, ActionType } from './actions';
 import { addRelationshipAction } from './atom.actions';
 import { toForeignKeyActions } from './fkColumns';
+
+type ReferentialActions = Pick<
+  ActionMap[typeof ActionType.addRelationship],
+  'onDelete' | 'onUpdate'
+>;
 
 /**
  * Draws a relationship between two live tables in one batch, giving the start
@@ -21,9 +27,14 @@ import { toForeignKeyActions } from './fkColumns';
 export const addRelationshipAction$ = (
   startTableId: string,
   endTableId: string,
-  relationshipType: number
+  relationshipType: number,
+  referentialActions: ReferentialActions = {}
 ): GeneratorAction =>
-  function* ({ doc: { tableIds }, collections }) {
+  function* ({
+    doc: { tableIds, domainIds },
+    collections,
+    settings: { database },
+  }) {
     const tables = query(collections)
       .collection('tableEntities')
       .selectByIds(tableIds);
@@ -31,15 +42,17 @@ export const addRelationshipAction$ = (
     const endTable = tables.find(({ id }) => id === endTableId);
     if (!startTable || !endTable) return;
 
-    const primaryKeys = query(collections)
-      .collection('tableColumnEntities')
+    const columnCollection = query(collections).collection(
+      'tableColumnEntities'
+    );
+    const primaryKeys = columnCollection
       .selectByIds(startTable.columnIds)
       .filter(({ options }) => bHas(options, ColumnOption.primaryKey));
     const newPrimaryKey = primaryKeys.length
       ? null
       : createColumn({ tableId: startTable.id });
     const startColumns = newPrimaryKey ? [newPrimaryKey] : primaryKeys;
-    const endColumnIds = startColumns.map(() => nanoid());
+    const endColumnIds = startColumns.map(() => uuid25());
 
     yield [
       ...(newPrimaryKey
@@ -55,10 +68,18 @@ export const addRelationshipAction$ = (
             }),
           ]
         : []),
-      ...toForeignKeyActions(startColumns, endTable.id, endColumnIds),
+      ...toForeignKeyActions(startColumns, endTable.id, endColumnIds, {
+        startTableName: startTable.name,
+        endColumnNames: columnCollection
+          .selectByIds(endTable.columnIds)
+          .map(({ name }) => name),
+        database,
+        domainIds,
+      }),
       addRelationshipAction({
-        id: nanoid(),
+        id: uuid25(),
         relationshipType,
+        ...referentialActions,
         start: {
           tableId: startTable.id,
           columnIds: startColumns.map(({ id }) => id),

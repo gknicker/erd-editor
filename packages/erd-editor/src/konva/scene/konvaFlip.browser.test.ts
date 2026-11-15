@@ -2,12 +2,12 @@
 // gate, so every way one can end has to hand it back. A window left open parks
 // its layer forever, hence cases about the closing rather than the motion.
 
+import { markDirty, whenDrawn } from '@dineug/r-html-konva';
 import { Layer } from 'konva/lib/Layer';
 import { Rect } from 'konva/lib/shapes/Rect';
 import { Stage } from 'konva/lib/Stage';
-import { afterEach, describe, expect, it } from 'vite-plus/test';
+import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
 
-import { markDirty, whenDrawn } from '@/konva/batchDraw';
 import { createKonvaFlip, FLIP_DURATION } from '@/konva/scene/konvaFlip';
 
 const stages: Stage[] = [];
@@ -43,6 +43,13 @@ const wait = (ms: number) =>
   new Promise<void>(resolve => setTimeout(resolve, ms));
 
 /**
+ * Stops the wall clock a konva Tween reads, for a case that reads a tween on the
+ * frame it starts. Its play reads that clock twice, and a millisecond ticking
+ * between the two reads moves the node off where the invert put it.
+ */
+const holdClock = () => vi.useFakeTimers({ toFake: ['Date'] });
+
+/**
  * Where a node is painted, offset included. getAbsolutePosition adds the offset
  * back on purpose, so it answers where the node belongs rather than where the
  * invert is currently holding it.
@@ -50,6 +57,7 @@ const wait = (ms: number) =>
 const drawnY = (node: Rect) => node.getAbsoluteTransform().getTranslation().y;
 
 afterEach(async () => {
+  vi.useRealTimers();
   for (const stage of stages.splice(0)) {
     const container = stage.container();
     stage.destroy();
@@ -70,6 +78,7 @@ describe('the column reorder flip', () => {
 
     first.y(24);
     second.y(0);
+    holdClock();
     markDirty(layer);
     await settled();
 
@@ -78,7 +87,11 @@ describe('the column reorder flip', () => {
     expect(drawnY(first)).toBeCloseTo(0, 5);
     expect(drawnY(second)).toBeCloseTo(24, 5);
 
-    await wait(FLIP_DURATION * 1000 + 150);
+    // With the clock running again, the tween closes its window, or the flip's
+    // timeout does once a busy page starved its frames; either way the rows
+    // come to rest where they belong.
+    vi.useRealTimers();
+    await settled();
     expect(first.offsetY()).toBeCloseTo(0, 5);
     expect(second.offsetY()).toBeCloseTo(0, 5);
     expect(drawnY(first)).toBeCloseTo(24, 5);
@@ -172,6 +185,7 @@ describe('the column reorder flip', () => {
     row.y(12);
     flip.snapshot();
     row.y(24);
+    holdClock();
     markDirty(layer);
     await settled();
 
@@ -251,6 +265,7 @@ describe('the column reorder flip', () => {
     flip.snapshot();
     first.y(24);
     second.y(0);
+    holdClock();
     markDirty(layer);
     await settled();
 
@@ -273,6 +288,7 @@ describe('the column reorder flip', () => {
     const added = createRow(layer, 0);
     first.y(24);
     rows.unshift(added);
+    holdClock();
     markDirty(layer);
     await settled();
 
@@ -282,6 +298,7 @@ describe('the column reorder flip', () => {
     expect(added.offsetY()).toBe(0);
     expect(first.opacity()).toBe(1);
 
+    vi.useRealTimers();
     await wait(FLIP_DURATION * 1000 + 150);
     expect(added.opacity()).toBe(1);
     await settled(200);
@@ -322,6 +339,7 @@ describe('the column reorder flip', () => {
     const flip = createKonvaFlip(() => rows);
     flip.snapshot();
     rows.push(createRow(layer, 0));
+    holdClock();
     markDirty(layer);
     await settled();
 

@@ -1,19 +1,38 @@
 import { AnyAction } from '@dineug/r-html';
+import { pick } from 'es-toolkit';
 import { beforeEach, describe, expect, it } from 'vite-plus/test';
 
+import {
+  TABLE_GROUP_PADDING,
+  TABLE_GROUP_TITLE_HEIGHT,
+  TABLE_SORT_MARGIN,
+} from '@/constants/layout';
 import { Clock } from '@/engine/clock';
+import type { ReplicaEngineContext } from '@/engine/context';
+import { POSITION_REGISTER } from '@/engine/geometryRegisters';
 import {
   addTableAction,
   changeTableColorAction,
   changeTableCommentAction,
+  changeTableGroupAction,
+  changeTableLogicalNameAction,
   changeTableNameAction,
+  changeTableNameDerivedAction,
   changeZIndexAction,
   moveTableAction,
   moveToTableAction,
   removeTableAction,
   sortTableAction,
 } from '@/engine/modules/table/atom.actions';
+import { addTableGroupAction } from '@/engine/modules/table-group/atom.actions';
 import { createStore, Store } from '@/engine/store';
+import { Tag } from '@/engine/tag';
+import { calcTableHeight, calcTableWidths } from '@/utils/calcTable';
+
+const P = TABLE_GROUP_PADDING;
+
+/** The padding over a group box's top edge, the title bar included. */
+const TOP = TABLE_GROUP_PADDING + TABLE_GROUP_TITLE_HEIGHT;
 
 const TABLE_A = 'table-a';
 const TABLE_B = 'table-b';
@@ -130,7 +149,12 @@ describe('table/atom.actions moveTable', () => {
     expect(table('ghost').ui.x).toBe(210);
     expect(table('ghost').ui.y).toBe(120);
     expect(store.state.doc.tableIds).toEqual([]);
-    expect(store.state.lww.ghost).toBeUndefined();
+    expect(store.state.lww.ghost).toEqual([
+      'tableEntities',
+      -1,
+      -1,
+      { [POSITION_REGISTER]: 0 },
+    ]);
   });
 
   it('accumulates repeated movements', () => {
@@ -173,6 +197,101 @@ describe('table/atom.actions moveToTable', () => {
 
     expect(table('ghost').ui).toMatchObject({ x: 1, y: 2 });
     expect(store.state.doc.tableIds).toEqual([]);
+  });
+});
+
+describe('table/atom.actions position register', () => {
+  const position = () => pick(table(TABLE_A).ui, ['x', 'y']);
+  const register = () => store.state.lww[TABLE_A]?.[3][POSITION_REGISTER];
+  const shared = (action: AnyAction, version: number): AnyAction => ({
+    ...versioned(action, version),
+    tags: Tag.shared,
+  });
+
+  beforeEach(() => addTable(TABLE_A, 1));
+
+  it('lands the same absolute move twice as once (AC-M1)', () => {
+    const moveTo = versioned(
+      moveToTableAction({ id: TABLE_A, x: 40, y: 60 }),
+      5
+    );
+
+    store.dispatchSync(moveTo);
+    store.dispatchSync(moveTo);
+
+    expect(position()).toEqual({ x: 40, y: 60 });
+    expect(register()).toBe(5);
+  });
+
+  it('ignores an absolute move older than the register', () => {
+    store.dispatchSync(
+      versioned(moveToTableAction({ id: TABLE_A, x: 40, y: 60 }), 5)
+    );
+    store.dispatchSync(
+      versioned(moveToTableAction({ id: TABLE_A, x: -1, y: -1 }), 3)
+    );
+
+    expect(position()).toEqual({ x: 40, y: 60 });
+    expect(register()).toBe(5);
+  });
+
+  it('raises the register with the store’s own step, so an older absolute move is refused after it', () => {
+    store.dispatchSync(
+      versioned(
+        moveTableAction({ ids: [TABLE_A], movementX: 30, movementY: 0 }),
+        7
+      )
+    );
+    store.dispatchSync(
+      versioned(moveToTableAction({ id: TABLE_A, x: 0, y: 0 }), 6)
+    );
+
+    expect(position()).toEqual({ x: 230, y: 100 });
+    expect(register()).toBe(7);
+  });
+
+  it('adds a peer’s step outside the register, whatever its version (AC-M3)', () => {
+    store.dispatchSync(
+      versioned(moveToTableAction({ id: TABLE_A, x: 40, y: 60 }), 5)
+    );
+    store.dispatchSync(
+      shared(
+        moveTableAction({ ids: [TABLE_A], movementX: 10, movementY: 0 }),
+        9
+      )
+    );
+    store.dispatchSync(
+      shared(
+        moveTableAction({ ids: [TABLE_A], movementX: 0, movementY: 10 }),
+        2
+      )
+    );
+
+    expect(position()).toEqual({ x: 50, y: 70 });
+    expect(register()).toBe(5);
+  });
+
+  it('adds every step a replica’s context takes outside the register', () => {
+    const replicaContext: ReplicaEngineContext = {
+      toWidth: text => text.length * 10,
+      clock,
+      remote: true,
+    };
+    store = createStore(replicaContext);
+    addTable(TABLE_A, 1);
+
+    store.dispatchSync(
+      versioned(
+        moveTableAction({ ids: [TABLE_A], movementX: 10, movementY: 5 }),
+        9
+      )
+    );
+    store.dispatchSync(
+      versioned(moveToTableAction({ id: TABLE_A, x: 0, y: 0 }), 4)
+    );
+
+    expect(position()).toEqual({ x: 0, y: 0 });
+    expect(register()).toBe(4);
   });
 });
 
@@ -365,6 +484,146 @@ describe('table/atom.actions changeTableColor', () => {
   });
 });
 
+describe('table/atom.actions changeTableGroup', () => {
+  it('sets the group under the "groupId" LWW path, apart from the other fields', () => {
+    addTable(TABLE_A);
+
+    store.dispatchSync(
+      versioned(changeTableNameAction({ id: TABLE_A, value: 'users' }), 9),
+      versioned(changeTableGroupAction({ id: TABLE_A, value: 'g1' }), 3)
+    );
+
+    expect(table(TABLE_A).groupId).toBe('g1');
+    expect(store.state.lww[TABLE_A][3]).toEqual({ name: 9, groupId: 3 });
+  });
+
+  it('keeps the newer placement whatever order two writes arrive in', () => {
+    addTable(TABLE_A);
+    addTable(TABLE_B);
+
+    store.dispatchSync(
+      versioned(changeTableGroupAction({ id: TABLE_A, value: 'newer' }), 8),
+      versioned(changeTableGroupAction({ id: TABLE_A, value: 'older' }), 5),
+      versioned(changeTableGroupAction({ id: TABLE_B, value: 'older' }), 5),
+      versioned(changeTableGroupAction({ id: TABLE_B, value: 'newer' }), 8)
+    );
+
+    expect(table(TABLE_A).groupId).toBe('newer');
+    expect(table(TABLE_B).groupId).toBe('newer');
+  });
+
+  it('takes a table out of its group with an empty id', () => {
+    addTable(TABLE_A);
+    store.dispatchSync(changeTableGroupAction({ id: TABLE_A, value: 'g1' }));
+
+    store.dispatchSync(changeTableGroupAction({ id: TABLE_A, value: '' }));
+
+    expect(table(TABLE_A).groupId).toBe('');
+  });
+
+  it('creates the entity when it is missing, at the clock version', () => {
+    clock.merge(6);
+
+    store.dispatchSync(changeTableGroupAction({ id: 'ghost', value: 'g1' }));
+
+    expect(table('ghost').groupId).toBe('g1');
+    expect(store.state.lww.ghost[3]).toEqual({ groupId: 6 });
+  });
+});
+
+describe('table/atom.actions changeTableLogicalName', () => {
+  it('sets the logical name under its own path and measures its width', () => {
+    addTable(TABLE_A);
+
+    store.dispatchSync(
+      versioned(changeTableNameAction({ id: TABLE_A, value: 'members' }), 2),
+      versioned(
+        changeTableLogicalNameAction({ id: TABLE_A, value: 'Member list' }),
+        4
+      )
+    );
+
+    expect(table(TABLE_A).logicalName).toBe('Member list');
+    expect(table(TABLE_A).name).toBe('members');
+    expect(table(TABLE_A).ui.widthLogicalName).toBe(110);
+    expect(store.state.lww[TABLE_A][3]).toEqual({ name: 2, logicalName: 4 });
+  });
+
+  it('keeps the newer logical name whatever order two writes arrive in', () => {
+    addTable(TABLE_A);
+    addTable(TABLE_B);
+
+    store.dispatchSync(
+      versioned(
+        changeTableLogicalNameAction({ id: TABLE_A, value: 'newer' }),
+        8
+      ),
+      versioned(
+        changeTableLogicalNameAction({ id: TABLE_A, value: 'older' }),
+        5
+      ),
+      versioned(
+        changeTableLogicalNameAction({ id: TABLE_B, value: 'older' }),
+        5
+      ),
+      versioned(
+        changeTableLogicalNameAction({ id: TABLE_B, value: 'newer' }),
+        8
+      )
+    );
+
+    expect(table(TABLE_A).logicalName).toBe('newer');
+    expect(table(TABLE_B).logicalName).toBe('newer');
+  });
+
+  it('clears to the minimum width and creates a missing entity at the clock version', () => {
+    clock.merge(3);
+
+    store.dispatchSync(
+      changeTableLogicalNameAction({ id: 'ghost', value: '' })
+    );
+
+    expect(table('ghost').logicalName).toBe('');
+    expect(table('ghost').ui.widthLogicalName).toBe(60);
+    expect(store.state.lww.ghost[3]).toEqual({ logicalName: 3 });
+    expect(store.state.doc.tableIds).toEqual([]);
+  });
+});
+
+describe('table/atom.actions changeTableNameDerived', () => {
+  it('sets the flag under its own path, apart from the name', () => {
+    addTable(TABLE_A);
+
+    store.dispatchSync(
+      versioned(changeTableNameAction({ id: TABLE_A, value: 'members' }), 2),
+      versioned(changeTableNameDerivedAction({ id: TABLE_A, value: true }), 3)
+    );
+
+    expect(table(TABLE_A).nameDerived).toBe(true);
+    expect(table(TABLE_A).name).toBe('members');
+    expect(store.state.lww[TABLE_A][3]).toEqual({ name: 2, nameDerived: 3 });
+  });
+
+  it('keeps the newer flag whatever order two writes arrive in', () => {
+    addTable(TABLE_A);
+
+    store.dispatchSync(
+      versioned(changeTableNameDerivedAction({ id: TABLE_A, value: false }), 7),
+      versioned(changeTableNameDerivedAction({ id: TABLE_A, value: true }), 6)
+    );
+
+    expect(table(TABLE_A).nameDerived).toBe(false);
+  });
+
+  it('creates the entity when it is missing', () => {
+    store.dispatchSync(
+      changeTableNameDerivedAction({ id: 'ghost', value: true })
+    );
+
+    expect(table('ghost').nameDerived).toBe(true);
+  });
+});
+
 describe('table/atom.actions changeZIndex', () => {
   it('sets zIndex without touching the LWW register', () => {
     addTable(TABLE_A, 1);
@@ -393,6 +652,13 @@ describe('table/atom.actions sortTable', () => {
     table(TABLE_C).columnIds.push('c3');
   }
 
+  /** A name a thousand wide, so two such tables overrun the 2000 the sort wraps three at. */
+  function widen(...ids: string[]) {
+    ids.forEach(id => {
+      table(id).ui.widthName = 1000;
+    });
+  }
+
   it('lays tables out left to right ordered by column count', () => {
     seedForSort();
 
@@ -404,9 +670,9 @@ describe('table/atom.actions sortTable', () => {
     expect(table(TABLE_A).ui).toMatchObject({ x: 940, y: 50 });
   });
 
-  it('wraps to the next row when the canvas width is exceeded', () => {
+  it('wraps to the next row when the sort width is exceeded', () => {
     seedForSort();
-    store.state.settings.width = 600;
+    widen(TABLE_A, TABLE_B, TABLE_C);
 
     store.dispatchSync(sortTableAction());
 
@@ -415,6 +681,18 @@ describe('table/atom.actions sortTable', () => {
     expect(table(TABLE_B).ui).toMatchObject({ x: 50, y: 50 });
     expect(table(TABLE_C).ui).toMatchObject({ x: 50, y: 160 });
     expect(table(TABLE_A).ui).toMatchObject({ x: 50, y: 294 });
+  });
+
+  it('wraps at a hundred per table, so thirty tables wrap after six', () => {
+    const ids = Array.from({ length: 30 }, (_, index) => `t${index}`);
+    ids.forEach(id => addTable(id));
+
+    store.dispatchSync(sortTableAction());
+
+    // 50 + 6 * 445 = 2720 fits the 3000, and a seventh would end at 3165.
+    const firstRow = ids.filter(id => table(id).ui.y === 50);
+    expect(firstRow).toHaveLength(6);
+    expect(table(ids[6]).ui.x).toBe(50);
   });
 
   it('keeps the row height when a later table in the row is not taller', () => {
@@ -435,5 +713,92 @@ describe('table/atom.actions sortTable', () => {
 
     expect(() => store.dispatchSync(sortTableAction())).not.toThrow();
     expect(store.state.collections.tableEntities).toEqual({});
+  });
+
+  const sizeOf = (id: string) => ({
+    width: calcTableWidths(table(id), store.state).width,
+    height: calcTableHeight(table(id)),
+  });
+
+  /** B (0 columns) and A (2 columns) in group g, C (1 column) in none. */
+  function seedGroupForSort() {
+    seedForSort();
+    store.dispatchSync(
+      addTableGroupAction({
+        id: 'g',
+        ui: { x: 900, y: 900, width: 10, height: 10, zIndex: 1 },
+      }),
+      changeTableGroupAction({ id: TABLE_A, value: 'g' }),
+      changeTableGroupAction({ id: TABLE_B, value: 'g' })
+    );
+  }
+
+  it('gathers a group in one cell where its first member comes, its rect the members and the padding', () => {
+    seedGroupForSort();
+    const a = sizeOf(TABLE_A);
+    const b = sizeOf(TABLE_B);
+
+    store.dispatchSync(sortTableAction());
+
+    const group = store.state.collections.tableGroupEntities['g'];
+    expect(table(TABLE_B).ui).toMatchObject({ x: 50 + P, y: 50 + TOP });
+    expect(table(TABLE_A).ui).toMatchObject({
+      x: 50 + P + b.width + TABLE_SORT_MARGIN,
+      y: 50 + TOP,
+    });
+    expect(group.ui).toMatchObject({
+      x: 50,
+      y: 50,
+      width: b.width + TABLE_SORT_MARGIN + a.width + P * 2,
+      height: Math.max(a.height, b.height) + P + TOP,
+    });
+    expect(table(TABLE_C).ui).toMatchObject({
+      x: 50 + group.ui.width + TABLE_SORT_MARGIN,
+      y: 50,
+    });
+  });
+
+  it("wraps a group's rows so that its box fits the sort width beside the start corner", () => {
+    seedGroupForSort();
+    widen(TABLE_A, TABLE_B, TABLE_C);
+    const a = sizeOf(TABLE_A);
+    const b = sizeOf(TABLE_B);
+
+    store.dispatchSync(sortTableAction());
+
+    const group = store.state.collections.tableGroupEntities['g'];
+    expect(table(TABLE_A).ui).toMatchObject({
+      x: 50 + P,
+      y: 50 + TOP + b.height + TABLE_SORT_MARGIN,
+    });
+    expect(group.ui.x + group.ui.width).toBeLessThanOrEqual(2000);
+    expect(group.ui).toMatchObject({
+      width: Math.max(a.width, b.width) + P * 2,
+      height: b.height + TABLE_SORT_MARGIN + a.height + P + TOP,
+    });
+    expect(table(TABLE_C).ui).toMatchObject({
+      x: 50,
+      y: 50 + group.ui.height + TABLE_SORT_MARGIN,
+    });
+  });
+
+  it('leaves a group with no member at its rect and reads a groupId naming no group as none', () => {
+    seedForSort();
+    store.dispatchSync(
+      addTableGroupAction({
+        id: 'empty',
+        ui: { x: 900, y: 900, width: 10, height: 10, zIndex: 1 },
+      }),
+      changeTableGroupAction({ id: TABLE_B, value: 'ghost' })
+    );
+
+    store.dispatchSync(sortTableAction());
+
+    expect(
+      store.state.collections.tableGroupEntities['empty'].ui
+    ).toMatchObject({ x: 900, y: 900, width: 10, height: 10 });
+    expect(table(TABLE_B).ui).toMatchObject({ x: 50, y: 50 });
+    expect(table(TABLE_C).ui).toMatchObject({ x: 495, y: 50 });
+    expect(table(TABLE_A).ui).toMatchObject({ x: 940, y: 50 });
   });
 });

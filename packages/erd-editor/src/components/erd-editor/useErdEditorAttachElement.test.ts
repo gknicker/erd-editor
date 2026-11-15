@@ -1,3 +1,12 @@
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+import {
+  createSchema,
+  toDocumentJson,
+  toJson,
+} from '@dineug/erd-editor-schema';
 import {
   AnyAction,
   createRef,
@@ -7,6 +16,7 @@ import {
   Ref,
   ref,
 } from '@dineug/r-html';
+import { cloneDeep } from 'es-toolkit';
 import {
   afterEach,
   beforeEach,
@@ -16,6 +26,7 @@ import {
   vi,
 } from 'vite-plus/test';
 
+import { openSearchOn } from '@/__test-utils__/explorerSearch';
 import {
   createTestAppContext,
   flush,
@@ -29,8 +40,36 @@ import {
 } from '@/components/erd-editor/ErdEditor';
 import { useErdEditorAttachElement } from '@/components/erd-editor/useErdEditorAttachElement';
 import {
+  measureRoot,
+  observeViewport,
+} from '@/components/erd-editor/viewportLayout';
+import ExplorerController, {
+  EDIT_SEARCH_DELAY,
+} from '@/components/explorer/explorer-controller/ExplorerController';
+import { explorerViewOf } from '@/components/explorer/explorerView';
+import { TABLE_SORT_START } from '@/constants/layout';
+import { Open } from '@/constants/open';
+import {
+  BracketType,
+  CanvasType,
+  ColumnOption,
+  Database,
+  Language,
+  NameViewMode,
+  OrderType,
+  ReferentialAction,
+  RelationshipType,
+  Show,
+} from '@/constants/schema';
+import {
+  changeHandToolAction,
+  changeOpenMapAction,
   dragSelectRectAction,
+  dragstartColumnAction,
+  drawStartRelationshipAction,
+  editMemoAction,
   editTableAction,
+  editTableGroupAction,
   focusColumnAction,
   focusTableAction,
   focusTableEndAction,
@@ -46,15 +85,82 @@ import {
 } from '@/engine/modules/editor/atom.actions';
 import { FocusType, SelectType } from '@/engine/modules/editor/state';
 import {
+  addMemoAction,
+  changeMemoValueAction,
+} from '@/engine/modules/memo/atom.actions';
+import {
+  changeCanvasTypeAction,
+  changeDatabaseAction,
+  changeLanguageAction,
+  changeShowAction,
+  changeZoomLevelAction,
+  scrollToAction,
+  streamScrollToAction,
+  toNameViewModeAction,
+} from '@/engine/modules/settings/atom.actions';
+import {
+  addTableAction,
   changeTableNameAction,
   moveTableAction,
+  removeTableAction,
 } from '@/engine/modules/table/atom.actions';
-import { AccentColor, Appearance, GrayColor } from '@/themes/radix-ui-theme';
+import { createReplicationStore } from '@/engine/replication-store';
+import type { Unsubscribe } from '@/internal-types';
+import type { ElkLayoutPoint, ElkLayoutRequest } from '@/services/elk-layout';
+import {
+  AccentColor,
+  Appearance,
+  createTheme,
+  GrayColor,
+  SYSTEM_APPEARANCE,
+} from '@/themes/radix-ui-theme';
+import { createIndex } from '@/utils/collection/index.entity';
+import { createIndexColumn } from '@/utils/collection/indexColumn.entity';
+import { createRelationship } from '@/utils/collection/relationship.entity';
+import { createTable } from '@/utils/collection/table.entity';
+import { createColumn } from '@/utils/collection/tableColumn.entity';
 import {
   openDiffViewerAction,
-  schemaGCAction,
+  setLocaleOptionAction,
   setThemeOptionsAction,
+  toggleSearchAction,
 } from '@/utils/emitter';
+import { FindField } from '@/utils/find-replace';
+
+type Layout = (request: ElkLayoutRequest) => Promise<ElkLayoutPoint[]>;
+
+const hoisted = vi.hoisted(() => ({
+  elkLayout: null as Layout | null,
+  requests: [] as ElkLayoutRequest[],
+}));
+
+/**
+ * ELK answers from a shared worker, which this environment runs none of, so
+ * the one call across that boundary is the one the test stands in for.
+ */
+vi.mock('@/services/elk-layout', async importOriginal => {
+  const actual = await importOriginal<typeof import('@/services/elk-layout')>();
+
+  return {
+    ...actual,
+    createElkLayout: (request: ElkLayoutRequest) => {
+      hoisted.requests.push(request);
+      return hoisted.elkLayout
+        ? hoisted.elkLayout(request)
+        : Promise.reject(new Error('no worker'));
+    },
+  };
+});
+
+const RELATED_SQL = `
+CREATE TABLE users (id INT NOT NULL, PRIMARY KEY (id));
+CREATE TABLE posts (
+  id INT NOT NULL,
+  user_id INT,
+  PRIMARY KEY (id),
+  FOREIGN KEY (user_id) REFERENCES users (id)
+);
+`;
 
 type MediaListener = (event: { matches: boolean }) => void;
 
@@ -91,23 +197,171 @@ const loadedDocument = (x = 0) =>
           columnIds: [],
           seqColumnIds: [],
           ui: { x, y: 0, zIndex: 2, widthName: 60, widthComment: 60 },
-          meta: { updateAt: 1, createAt: 1 },
         },
       },
     },
   });
 
-async function setup(initialProps: Partial<ErdEditorProps> = {}) {
-  const app = createTestAppContext();
+/**
+ * The two-table PostgreSQL document the Schema SQL options fixtures were
+ * written from, every lock off but the name view's, which its clear bit locks,
+ * so the bracket type it saves is the one shown.
+ */
+function schemaSQLSampleDocument(
+  ddlScripts?: {
+    before: string;
+    after: string;
+  },
+  { logicalNames = false } = {}
+) {
+  // The logical names and the comment the logical name rule file was written from.
+  const named = (logicalName: string) => (logicalNames ? { logicalName } : {});
+  const key =
+    ColumnOption.primaryKey | ColumnOption.notNull | ColumnOption.autoIncrement;
+  const columns = [
+    createColumn({
+      id: 'm1',
+      tableId: 'tm',
+      name: 'id',
+      dataType: 'INT',
+      options: key,
+      ...named('Member ID'),
+    }),
+    createColumn({
+      id: 'm2',
+      tableId: 'tm',
+      name: 'email',
+      dataType: 'VARCHAR(255)',
+      options: ColumnOption.notNull | ColumnOption.unique,
+      ...(logicalNames
+        ? { logicalName: 'Email', comment: 'Sign-in address' }
+        : {}),
+    }),
+    createColumn({
+      id: 'p1',
+      tableId: 'tp',
+      name: 'id',
+      dataType: 'INT',
+      options: key,
+    }),
+    createColumn({
+      id: 'p2',
+      tableId: 'tp',
+      name: 'member_id',
+      dataType: 'INT',
+      options: ColumnOption.notNull,
+      ...named("Author's member"),
+    }),
+    createColumn({
+      id: 'p3',
+      tableId: 'tp',
+      name: 'title',
+      dataType: 'VARCHAR(200)',
+      options: ColumnOption.notNull,
+      ...named('Title'),
+    }),
+  ];
+
+  return JSON.stringify({
+    version: '3.0.0',
+    settings: {
+      database: Database.PostgreSQL,
+      databaseName: 'shop',
+      bracketType: BracketType.none,
+      lockSettings: 0,
+      ...(ddlScripts ? { ddlScripts } : {}),
+    },
+    doc: { tableIds: ['tm', 'tp'], relationshipIds: ['rp'], indexIds: ['ix'] },
+    collections: {
+      tableEntities: {
+        tm: createTable({
+          id: 'tm',
+          name: 'member',
+          comment: 'Members',
+          columnIds: ['m1', 'm2'],
+          seqColumnIds: ['m1', 'm2'],
+          ...named('Member'),
+        }),
+        tp: createTable({
+          id: 'tp',
+          name: 'post',
+          columnIds: ['p1', 'p2', 'p3'],
+          seqColumnIds: ['p1', 'p2', 'p3'],
+          ...named('Post'),
+        }),
+      },
+      tableColumnEntities: Object.fromEntries(
+        columns.map(column => [column.id, column])
+      ),
+      relationshipEntities: {
+        rp: createRelationship({
+          id: 'rp',
+          onDelete: ReferentialAction.cascade,
+          start: { tableId: 'tm', columnIds: ['m1'] },
+          end: { tableId: 'tp', columnIds: ['p2'] },
+        }),
+      },
+      indexEntities: {
+        ix: createIndex({
+          id: 'ix',
+          name: 'idx_post_title',
+          tableId: 'tp',
+          indexColumnIds: ['ic'],
+          seqIndexColumnIds: ['ic'],
+        }),
+      },
+      indexColumnEntities: {
+        ic: createIndexColumn({
+          id: 'ic',
+          indexId: 'ix',
+          columnId: 'p3',
+          orderType: OrderType.ASC,
+        }),
+      },
+    },
+  });
+}
+
+/** A Schema SQL options fixture, the bytes the generator must write. */
+const schemaSQLFixture = (path: string) =>
+  readFileSync(
+    join(
+      dirname(fileURLToPath(import.meta.url)),
+      '../../utils/schema-sql/__fixtures__/options',
+      path
+    ),
+    'utf8'
+  );
+
+/**
+ * Mounts the hook on a store of its own, seeded first when given a seed.
+ * Wired, the store reads readonly from the props and drops what opens an edit,
+ * as ErdEditor builds it, so the store's own guards answer for it.
+ */
+async function setup(
+  initialProps: Partial<ErdEditorProps> = {},
+  {
+    wired = false,
+    seed,
+  }: { wired?: boolean; seed?: (app: AppContext) => void } = {}
+) {
   const props = observable<ErdEditorProps>(
     {
       readonly: false,
       systemDarkMode: false,
       enableThemeBuilder: false,
+      enableLocalePicker: false,
+      enableWelcomeScreen: false,
       ...initialProps,
     },
     { shallow: true }
   );
+  const app = createTestAppContext(
+    wired
+      ? { getReadonly: () => props.readonly, readonlyEditState: true }
+      : undefined
+  );
+  seed?.(app);
   const ctx = document.createElement('div') as unknown as ErdEditorElement;
   document.body.append(ctx);
 
@@ -128,6 +382,8 @@ async function setup(initialProps: Partial<ErdEditorProps> = {}) {
 }
 
 beforeEach(() => {
+  hoisted.elkLayout = null;
+  hoisted.requests.length = 0;
   mediaListeners = [];
   mediaMatches = false;
   vi.stubGlobal('matchMedia', (query: string) => ({
@@ -179,6 +435,7 @@ describe('useErdEditorAttachElement', () => {
     expect(typeof ctx.destroy).toBe('function');
     expect(typeof ctx.setInitialValue).toBe('function');
     expect(typeof ctx.setPresetTheme).toBe('function');
+    expect(typeof ctx.setSystemAppearance).toBe('function');
     expect(typeof ctx.setTheme).toBe('function');
     expect(typeof ctx.setKeyBindingMap).toBe('function');
     expect(typeof ctx.setSchemaSQL).toBe('function');
@@ -189,6 +446,7 @@ describe('useErdEditorAttachElement', () => {
     expect(typeof ctx.getSharedStore).toBe('function');
     expect(typeof ctx.setDiffValue).toBe('function');
     expect(typeof ctx.value).toBe('string');
+    expect(typeof ctx.runtimeValue).toBe('string');
   });
 
   it('defines focus/blur as writable own properties that drive the root element', async () => {
@@ -209,6 +467,14 @@ describe('useErdEditorAttachElement', () => {
     ctx.blur();
     expect(focusSpy).toHaveBeenCalledTimes(2);
     expect(blurSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('accepts system as a preset appearance', async () => {
+    const { api, ctx } = await setup();
+
+    ctx.setPresetTheme({ appearance: SYSTEM_APPEARANCE });
+
+    expect(api.themeState.options.appearance).toBe('system');
   });
 
   it('applies only valid preset theme options and ignores the rest', async () => {
@@ -292,10 +558,64 @@ describe('useErdEditorAttachElement', () => {
     expect(app.keyBindingMap.undo).toBe(before);
   });
 
-  it('loads an initial value and emits a schema GC request', async () => {
+  it('lets a host remap the search and find and replace chords, and none of the reserved ones', async () => {
     const { app, ctx } = await setup();
-    const schemaGC = vi.fn();
-    app.emitter.on({ schemaGC });
+    const reserved = {
+      edit: app.keyBindingMap.edit,
+      stop: app.keyBindingMap.stop,
+      redo: app.keyBindingMap.redo,
+      zoomIn: app.keyBindingMap.zoomIn,
+      zoomOut: app.keyBindingMap.zoomOut,
+      zoomReset: app.keyBindingMap.zoomReset,
+    };
+
+    ctx.setKeyBindingMap({
+      search: [{ shortcut: '$mod+KeyP', preventDefault: true }],
+      findReplace: [{ shortcut: '$mod+Shift+KeyH', preventDefault: true }],
+      ...Object.fromEntries(
+        Object.keys(reserved).map(name => [name, [{ shortcut: 'KeyQ' }]])
+      ),
+    } as any);
+
+    expect(app.keyBindingMap.search).toEqual([
+      { shortcut: '$mod+KeyP', preventDefault: true },
+    ]);
+    expect(app.keyBindingMap.findReplace).toEqual([
+      { shortcut: '$mod+Shift+KeyH', preventDefault: true },
+    ]);
+    for (const [name, before] of Object.entries(reserved)) {
+      expect(Reflect.get(app.keyBindingMap, name)).toBe(before);
+    }
+  });
+
+  it('takes an empty list for find and replace, which leaves its chord to the page', async () => {
+    const { app, ctx } = await setup();
+    const search = app.keyBindingMap.search;
+
+    ctx.setKeyBindingMap({ findReplace: [] } as any);
+
+    expect(app.keyBindingMap.findReplace).toEqual([]);
+    expect(app.keyBindingMap.search).toBe(search);
+  });
+
+  it('lets a host remap the delete key, or hand Delete and Backspace back to the page', async () => {
+    const { app, ctx } = await setup();
+    const removeTable = app.keyBindingMap.removeTable;
+
+    ctx.setKeyBindingMap({
+      removeSelection: [{ shortcut: 'Alt+KeyD', preventDefault: true }],
+    } as any);
+    expect(app.keyBindingMap.removeSelection).toEqual([
+      { shortcut: 'Alt+KeyD', preventDefault: true },
+    ]);
+
+    ctx.setKeyBindingMap({ removeSelection: [] } as any);
+    expect(app.keyBindingMap.removeSelection).toEqual([]);
+    expect(app.keyBindingMap.removeTable).toBe(removeTable);
+  });
+
+  it('loads an initial value', async () => {
+    const { app, ctx } = await setup();
 
     ctx.setInitialValue(
       JSON.stringify({
@@ -305,7 +625,6 @@ describe('useErdEditorAttachElement', () => {
     );
 
     expect(app.store.state.settings.databaseName).toBe('seeded');
-    expect(schemaGC).toHaveBeenCalledTimes(1);
   });
 
   it('drops the history of the document setInitialValue replaces', async () => {
@@ -385,6 +704,87 @@ describe('useErdEditorAttachElement', () => {
     expect(typeof app.store.state.settings.databaseName).toBe('string');
   });
 
+  describe('the locks of what a host loads', () => {
+    const LOCK_ALL = 63;
+    const file = '{"version":"3.0.0","settings":{"lockSettings":0}}';
+
+    it('shows an element given no value a new document, every lock on', async () => {
+      const { app, ctx } = await setup();
+
+      expect(app.store.state.settings.lockSettings).toBe(LOCK_ALL);
+      expect(JSON.parse(ctx.value).settings.lockSettings).toBe(LOCK_ALL);
+    });
+
+    it('loads an empty initial value, a new file, as a new document', async () => {
+      const { app, ctx } = await setup();
+      ctx.setInitialValue(file);
+      expect(app.store.state.settings.lockSettings).toBe(0);
+
+      ctx.setInitialValue('');
+
+      expect(app.store.state.settings.lockSettings).toBe(LOCK_ALL);
+    });
+
+    it('keeps the locks a file names', async () => {
+      const { app, ctx } = await setup();
+
+      ctx.setInitialValue(file);
+
+      expect(app.store.state.settings.lockSettings).toBe(0);
+    });
+
+    it('sends the new document an empty value loads, which any peer parses', async () => {
+      const { app, ctx } = await setup();
+      ctx.value = file;
+      const sent: AnyAction[] = [];
+      app.store.subscribe(actions => sent.push(...actions));
+
+      ctx.value = '';
+
+      const load = sent.find(({ type }) => type === 'editor.loadJson');
+      expect(load?.payload).toEqual({ value: toJson(createSchema()) });
+      expect(app.store.state.settings.lockSettings).toBe(LOCK_ALL);
+    });
+
+    it.each([
+      ['setSchemaSQL', 'CREATE TABLE a (id INT);'],
+      ['setSchemaDBML', 'Table a {\n  id int\n}'],
+      ['setSchemaAML', 'a\n  id int pk'],
+      ['setSchemaGraphQL', 'type A { id: ID! }'],
+    ] as const)(
+      'makes %s on an element given no value a new document',
+      async (method, source) => {
+        const { app, ctx } = await setup();
+
+        ctx[method](source);
+
+        expect(app.store.state.doc.tableIds).toHaveLength(1);
+        expect(JSON.parse(ctx.value).settings.lockSettings).toBe(LOCK_ALL);
+      }
+    );
+
+    it('keeps the locks of the file a source is imported into', async () => {
+      const { app, ctx } = await setup();
+      ctx.setInitialValue(file);
+
+      ctx.setSchemaSQL('CREATE TABLE a (id INT);');
+
+      expect(app.store.state.doc.tableIds).toHaveLength(1);
+      expect(app.store.state.settings.lockSettings).toBe(0);
+    });
+
+    it('keeps the locks of the file clear() empties, which stays that file', async () => {
+      const { app, ctx } = await setup();
+      ctx.setInitialValue(file);
+      ctx.setSchemaSQL('CREATE TABLE a (id INT);');
+
+      ctx.clear();
+
+      expect(app.store.state.doc.tableIds).toEqual([]);
+      expect(JSON.parse(ctx.value).settings.lockSettings).toBe(0);
+    });
+  });
+
   it('round-trips the document through the value accessor', async () => {
     const { app, ctx } = await setup();
 
@@ -398,6 +798,33 @@ describe('useErdEditorAttachElement', () => {
 
     ctx.value = '   ';
     expect(app.store.state.settings.databaseName).not.toBe('round-trip');
+  });
+
+  it('gives the file form through value and the document as held, removed tables included, through runtimeValue', async () => {
+    const { app, ctx } = await setup();
+    app.store.dispatchSync(
+      addTableAction({ id: 'kept', ui: { x: 0, y: 0, zIndex: 3 } }),
+      addTableAction({ id: 'gone', ui: { x: 0, y: 0, zIndex: 4 } }),
+      removeTableAction({ id: 'gone' })
+    );
+
+    const saved = JSON.parse(ctx.value);
+    const held = JSON.parse(ctx.runtimeValue);
+
+    expect(ctx.value).toBe(toDocumentJson(app.store.state));
+    expect(ctx.runtimeValue).toBe(toJson(app.store.state));
+    expect(Object.keys(saved.collections.tableEntities)).toEqual(['kept']);
+    expect(saved.collections.tableEntities.kept.ui).not.toHaveProperty(
+      'zIndex'
+    );
+    expect(Object.keys(held.collections.tableEntities)).toEqual([
+      'kept',
+      'gone',
+    ]);
+    expect(held.collections.tableEntities.kept.ui.zIndex).toBe(3);
+    expect(
+      Object.getOwnPropertyDescriptor(ctx, 'runtimeValue')?.set
+    ).toBeUndefined();
   });
 
   it('imports schema SQL and ignores blank input', async () => {
@@ -426,6 +853,200 @@ describe('useErdEditorAttachElement', () => {
 
     ctx.setSchemaGraphQL('   ');
     expect(app.store.state.doc.tableIds).toEqual(tableIds);
+  });
+
+  it('lands an import at once and returns nothing unless asked to place it', async () => {
+    const { app, ctx } = await setup();
+
+    expect(ctx.setSchemaSQL('CREATE TABLE users (id INT);')).toBeUndefined();
+    expect(app.store.state.doc.tableIds).toHaveLength(1);
+
+    expect(
+      ctx.setSchemaAML('accounts\n  id int pk', { placement: 'grid' })
+    ).toBeUndefined();
+    const { doc, collections } = app.store.state;
+    expect(doc.tableIds.map(id => collections.tableEntities[id].name)).toEqual([
+      'accounts',
+    ]);
+    expect(hoisted.requests).toEqual([]);
+  });
+
+  it('places an import by its relationships first when asked for auto', async () => {
+    const { app, ctx } = await setup();
+    hoisted.elkLayout = async ({ nodes }) =>
+      nodes.map((node, index) => ({ id: node.id, x: index * 700, y: 0 }));
+
+    const landing = ctx.setSchemaSQL(RELATED_SQL, { placement: 'auto' });
+    expect(landing).toBeInstanceOf(Promise);
+    expect(app.store.state.doc.tableIds).toEqual([]);
+    await landing;
+
+    const { doc, collections } = app.store.state;
+    expect(hoisted.requests).toHaveLength(1);
+    expect(
+      hoisted.requests[0].nodes.map(
+        ({ id }) => collections.tableEntities[id].ui.x
+      )
+    ).toEqual([TABLE_SORT_START, TABLE_SORT_START + 700]);
+    expect(doc.tableIds).toHaveLength(2);
+    expect(app.store.history.size).toBe(1);
+  });
+
+  it.each([
+    ['setSchemaSQL', 'CREATE TABLE a (id INT);', 'a'],
+    ['setSchemaGraphQL', 'type A { id: ID! }', 'A'],
+    ['setSchemaDBML', 'Table a {\n  id int\n}', 'a'],
+    ['setSchemaAML', 'a\n  id int pk', 'a'],
+  ] as const)(
+    'reads %s through its own parser when asked for auto',
+    async (method, source, name) => {
+      const { app, ctx } = await setup();
+
+      await ctx[method](source, { placement: 'auto' });
+
+      const { doc, collections } = app.store.state;
+      expect(
+        doc.tableIds.map(id => collections.tableEntities[id].name)
+      ).toEqual([name]);
+    }
+  );
+
+  it.each<[string, (ctx: ErdEditorElement) => void, string[]]>([
+    [
+      'setInitialValue',
+      ctx => ctx.setInitialValue(loadedDocument()),
+      ['loaded'],
+    ],
+    ['the value setter', ctx => (ctx.value = loadedDocument()), ['loaded']],
+    ['clear', ctx => ctx.clear(), []],
+  ])(
+    'lands no auto import once %s has loaded meanwhile',
+    async (_, load, names) => {
+      const { app, ctx } = await setup();
+      let settle = (_: ElkLayoutPoint[]) => {};
+      hoisted.elkLayout = () => new Promise(resolve => (settle = resolve));
+
+      const landing = ctx.setSchemaSQL(RELATED_SQL, { placement: 'auto' });
+      await flush();
+      load(ctx);
+      settle(hoisted.requests[0].nodes.map(({ id }) => ({ id, x: 0, y: 0 })));
+
+      await expect(landing).resolves.toBeUndefined();
+      const { doc, collections } = app.store.state;
+      expect(
+        doc.tableIds.map(id => collections.tableEntities[id].name)
+      ).toEqual(names);
+    }
+  );
+
+  it('answers auto on blank input with a settled Promise and no change', async () => {
+    const { app, ctx } = await setup();
+
+    await expect(
+      ctx.setSchemaDBML('   ', { placement: 'auto' })
+    ).resolves.toBeUndefined();
+    expect(app.store.history.size).toBe(0);
+  });
+
+  it('asks no layout for an auto import a readonly editor would refuse', async () => {
+    const { app, ctx } = await setup({ readonly: true }, { wired: true });
+
+    await expect(
+      ctx.setSchemaSQL(RELATED_SQL, { placement: 'auto' })
+    ).resolves.toBeUndefined();
+    await expect(
+      ctx.setSchemaSQL(RELATED_SQL, { placement: 'auto', mode: 'append' })
+    ).resolves.toBeUndefined();
+    expect(hoisted.requests).toEqual([]);
+    expect(app.store.state.doc.tableIds).toEqual([]);
+    expect(app.store.history.size).toBe(0);
+  });
+
+  /** The names of the tables the document holds, in order. */
+  const namesOf = ({ store }: AppContext) =>
+    store.state.doc.tableIds.map(
+      id => store.state.collections.tableEntities[id].name
+    );
+
+  it('adds an import below the diagram for an append, returning nothing', async () => {
+    const { app, ctx } = await setup();
+    ctx.setSchemaSQL('CREATE TABLE users (id INT);');
+
+    expect(
+      ctx.setSchemaGraphQL('type Post { id: ID! }', { mode: 'append' })
+    ).toBeUndefined();
+    expect(
+      ctx.setSchemaDBML('Table tags {\n  id int\n}', {
+        mode: 'append',
+        placement: 'grid',
+      })
+    ).toBeUndefined();
+    ctx.setSchemaAML('roles\n  id int pk', { mode: 'append' });
+    ctx.setSchemaSQL('   ', { mode: 'append' });
+
+    expect(namesOf(app)).toEqual(['users', 'Post', 'tags', 'roles']);
+    expect(hoisted.requests).toEqual([]);
+  });
+
+  it('places an import by its relationships before adding it for auto', async () => {
+    const { app, ctx } = await setup();
+    ctx.setSchemaSQL('CREATE TABLE old (id INT);');
+    hoisted.elkLayout = async ({ nodes }) =>
+      nodes.map((node, index) => ({ id: node.id, x: index * 700, y: 0 }));
+
+    const landing = ctx.setSchemaSQL(RELATED_SQL, {
+      placement: 'auto',
+      mode: 'append',
+    });
+    expect(landing).toBeInstanceOf(Promise);
+    expect(namesOf(app)).toEqual(['old']);
+    await landing;
+
+    expect(hoisted.requests).toHaveLength(1);
+    expect(namesOf(app)).toEqual(['old', 'users', 'posts']);
+    expect(app.store.history.size).toBe(2);
+  });
+
+  it('adds nothing to a readonly editor, which it would refuse', async () => {
+    const { app, ctx, props } = await setup({}, { wired: true });
+    ctx.setSchemaSQL('CREATE TABLE old (id INT);');
+    props.readonly = true;
+    await flush();
+
+    ctx.setSchemaSQL('CREATE TABLE more (id INT);', { mode: 'append' });
+    await expect(
+      ctx.setSchemaSQL(RELATED_SQL, { placement: 'auto', mode: 'append' })
+    ).resolves.toBeUndefined();
+    ctx.setSchemaJSON(JSON.stringify(app.store.state), { mode: 'append' });
+
+    expect(namesOf(app)).toEqual(['old']);
+    expect(hoisted.requests).toEqual([]);
+    expect(app.store.state.editor.selectedMap).toEqual({});
+  });
+
+  it('replaces the document with setSchemaJSON, an edit undo takes back', async () => {
+    const { app, ctx } = await setup();
+    ctx.setSchemaSQL('CREATE TABLE old (id INT);');
+    const json = loadedDocument(40);
+
+    ctx.setSchemaJSON(json);
+    expect(namesOf(app)).toEqual(['loaded']);
+    ctx.setSchemaJSON('  ');
+    expect(namesOf(app)).toEqual(['loaded']);
+
+    app.store.undo();
+    expect(namesOf(app)).toEqual(['old']);
+  });
+
+  it('adds a document with setSchemaJSON for an append, keeping the settings', async () => {
+    const { app, ctx } = await setup();
+    ctx.setSchemaSQL('CREATE TABLE old (id INT);');
+    const { databaseName } = app.store.state.settings;
+
+    ctx.setSchemaJSON(loadedDocument(40), { mode: 'append' });
+
+    expect(namesOf(app)).toEqual(['old', 'loaded']);
+    expect(app.store.state.settings.databaseName).toBe(databaseName);
   });
 
   it('loads an empty document when the SDL declares no object type', async () => {
@@ -496,6 +1117,96 @@ describe('useErdEditorAttachElement', () => {
     expect(unknownVendorSQL).toBe(defaultSQL);
   });
 
+  it('writes the schema SQL the options ask for, a choice the vendor lacks falling back', async () => {
+    const { ctx } = await setup();
+    ctx.setInitialValue(schemaSQLSampleDocument());
+
+    expect(ctx.getSchemaSQL()).toBe(
+      schemaSQLFixture('PostgreSQL/create-none.sql')
+    );
+    expect(
+      ctx.getSchemaSQL('PostgreSQL', {
+        statements: 'recreate',
+        header: 'createAndUse',
+      })
+    ).toBe(schemaSQLFixture('PostgreSQL/recreate-createAndUse.sql'));
+    expect(
+      ctx.getSchemaSQL(undefined, { statements: 'ifNotExists', header: 'use' })
+    ).toBe(schemaSQLFixture('PostgreSQL/ifNotExists-use.sql'));
+    expect(
+      ctx.getSchemaSQL('Oracle', {
+        statements: 'ifNotExists',
+        header: 'createAndUse',
+      })
+    ).toBe(schemaSQLFixture('Oracle/create-use.sql'));
+  });
+
+  it('writes a logical name where a comment is empty under logicalNameAsComment, any other value read as left out', async () => {
+    const { ctx } = await setup();
+    ctx.setInitialValue(
+      schemaSQLSampleDocument(undefined, { logicalNames: true })
+    );
+    const named = schemaSQLFixture(
+      'PostgreSQL/logical-name-comment-create-none.sql'
+    );
+
+    expect(ctx.getSchemaSQL('PostgreSQL', { logicalNameAsComment: true })).toBe(
+      named
+    );
+    expect(ctx.getSchemaSQL('PostgreSQL')).not.toContain("'Post'");
+    for (const value of [false, 'true', 1]) {
+      expect(
+        ctx.getSchemaSQL('PostgreSQL', { logicalNameAsComment: value } as any)
+      ).toBe(ctx.getSchemaSQL('PostgreSQL'));
+    }
+  });
+
+  it('ignores options that are no object, and any value or key getSchemaSQL does not know', async () => {
+    const { ctx } = await setup();
+    ctx.setInitialValue(schemaSQLSampleDocument());
+    const created = schemaSQLFixture('PostgreSQL/create-none.sql');
+
+    for (const options of [null, 'recreate', 1, [], {}]) {
+      expect(ctx.getSchemaSQL('PostgreSQL', options as any)).toBe(created);
+    }
+    expect(
+      ctx.getSchemaSQL('PostgreSQL', {
+        statements: 'drop',
+        header: 'USE',
+        tableIds: ['tm'],
+      } as any)
+    ).toBe(created);
+    expect(
+      ctx.getSchemaSQL('PostgreSQL', {
+        statements: 'replace',
+        header: 'createAndUse',
+      } as any)
+    ).toBe(schemaSQLFixture('PostgreSQL/create-createAndUse.sql'));
+  });
+
+  it('writes the document’s before and after scripts with or without options', async () => {
+    const { ctx } = await setup();
+    ctx.setInitialValue(
+      schemaSQLSampleDocument({
+        before: 'CREATE EXTENSION IF NOT EXISTS pgcrypto;',
+        after: 'GRANT SELECT ON member, post TO PUBLIC;',
+      })
+    );
+
+    expect(ctx.getSchemaSQL()).toBe(
+      schemaSQLFixture('PostgreSQL/create-none-scripts.sql')
+    );
+    expect(
+      ctx.getSchemaSQL('PostgreSQL', {
+        statements: 'recreate',
+        header: 'createAndUse',
+      })
+    ).toBe(schemaSQLFixture('PostgreSQL/recreate-createAndUse-scripts.sql'));
+    expect(ctx.getSchemaSQL('PostgreSQL', { scripts: false } as any)).toBe(
+      schemaSQLFixture('PostgreSQL/create-none-scripts.sql')
+    );
+  });
+
   it('clears the document through clear()', async () => {
     const { app, ctx } = await setup();
     ctx.setSchemaSQL('CREATE TABLE users (id INT);');
@@ -518,7 +1229,7 @@ describe('useErdEditorAttachElement', () => {
 
     ctx.setDiffValue(null as any);
     expect(openDiffViewer).toHaveBeenLastCalledWith(
-      openDiffViewerAction({ value: '{}' })
+      openDiffViewerAction({ value: toJson(createSchema()) })
     );
   });
 
@@ -944,15 +1655,15 @@ describe('useErdEditorAttachElement', () => {
   it('tears every watcher and shared store down on destroy()', async () => {
     const { api, app, ctx } = await setup();
     ctx.getSharedStore({ mouseTracker: false });
-    const schemaGC = vi.fn();
-    app.emitter.on({ schemaGC });
+    const toggleSearch = vi.fn();
+    app.emitter.on({ toggleSearch });
     expect(api.destroySet.size).toBeGreaterThan(0);
 
     ctx.destroy();
 
     expect(api.destroySet.size).toBe(0);
-    app.emitter.emit(schemaGCAction());
-    expect(schemaGC).not.toHaveBeenCalled();
+    app.emitter.emit(toggleSearchAction());
+    expect(toggleSearch).not.toHaveBeenCalled();
   });
 
   it('dispatches a change event for document mutations', async () => {
@@ -1006,21 +1717,115 @@ describe('useErdEditorAttachElement', () => {
   it('follows the system appearance only while systemDarkMode is on', async () => {
     const { api, props } = await setup();
 
-    fireMediaChange(true);
+    fireMediaChange(false);
     await flush();
     expect(api.themeState.options.appearance).toBe('dark');
+    expect(api.hasDarkMode()).toBe(true);
 
     props.systemDarkMode = true;
     await flush();
-    expect(api.themeState.options.appearance).toBe('dark');
-
-    fireMediaChange(false);
-    await flush();
-    expect(api.themeState.options.appearance).toBe('light');
+    expect(api.themeState.options.appearance).toBe('system');
+    expect(api.hasDarkMode()).toBe(false);
 
     fireMediaChange(true);
     await flush();
-    expect(api.themeState.options.appearance).toBe('dark');
+    expect(api.hasDarkMode()).toBe(true);
+
+    fireMediaChange(false);
+    await flush();
+    expect(api.hasDarkMode()).toBe(false);
+  });
+
+  it('repaints the theme when the system it follows turns light or dark', async () => {
+    const { api, ctx } = await setup();
+    const darkBackground = api.theme.canvasBackground;
+
+    ctx.setPresetTheme({ appearance: SYSTEM_APPEARANCE });
+    await flush();
+    expect(api.theme.canvasBackground).not.toBe(darkBackground);
+
+    fireMediaChange(true);
+    await flush();
+    expect(api.theme.canvasBackground).toBe(darkBackground);
+  });
+
+  it('keeps a light or dark the builder picked while systemDarkMode is on', async () => {
+    const { api, app, props } = await setup();
+    props.systemDarkMode = true;
+    await flush();
+
+    app.emitter.emit(setThemeOptionsAction({ appearance: Appearance.light }));
+    fireMediaChange(true);
+    await flush();
+
+    expect(api.themeState.options.appearance).toBe('light');
+    expect(api.hasDarkMode()).toBe(false);
+  });
+
+  it('echoes a system pick from the builder as system, not as what it shows', async () => {
+    const { app, ctx } = await setup();
+    const onChangePresetTheme = vi.fn();
+    ctx.addEventListener('changePresetTheme', onChangePresetTheme);
+
+    app.emitter.emit(setThemeOptionsAction({ appearance: SYSTEM_APPEARANCE }));
+
+    expect(onChangePresetTheme.mock.calls[0][0].detail).toEqual({
+      grayColor: 'slate',
+      accentColor: 'indigo',
+      appearance: 'system',
+    });
+  });
+
+  it('lets a host name what system shows, over the OS color scheme', async () => {
+    const { api, ctx } = await setup();
+    ctx.setPresetTheme({ appearance: SYSTEM_APPEARANCE });
+    ctx.setSystemAppearance(Appearance.dark);
+    await flush();
+    expect(api.hasDarkMode()).toBe(true);
+
+    fireMediaChange(false);
+    await flush();
+    expect(api.hasDarkMode()).toBe(true);
+
+    ctx.setSystemAppearance(Appearance.light);
+    await flush();
+    expect(api.hasDarkMode()).toBe(false);
+    expect(api.theme.canvasBackground).toBe(
+      createTheme({ ...api.themeState.options, appearance: 'light' })
+        .canvasBackground
+    );
+  });
+
+  it('hands system back to the OS color scheme for null or an unknown value', async () => {
+    const { api, ctx } = await setup();
+    ctx.setPresetTheme({ appearance: SYSTEM_APPEARANCE });
+    ctx.setSystemAppearance(Appearance.light);
+    await flush();
+
+    fireMediaChange(true);
+    ctx.setSystemAppearance(null);
+    await flush();
+    expect(api.themeState.systemAppearance).toBeNull();
+    expect(api.hasDarkMode()).toBe(true);
+
+    ctx.setSystemAppearance(Appearance.light);
+    ctx.setSystemAppearance('system' as any);
+    await flush();
+    expect(api.themeState.systemAppearance).toBeNull();
+    expect(api.hasDarkMode()).toBe(true);
+  });
+
+  it('keeps the light or dark picked when the host names what system shows', async () => {
+    const { api, ctx } = await setup();
+    ctx.setPresetTheme({ appearance: Appearance.light });
+    await flush();
+    const lightBackground = api.theme.canvasBackground;
+
+    ctx.setSystemAppearance(Appearance.dark);
+    await flush();
+
+    expect(api.hasDarkMode()).toBe(false);
+    expect(api.theme.canvasBackground).toBe(lightBackground);
   });
 
   it('ignores prop changes other than systemDarkMode', async () => {
@@ -1035,15 +1840,18 @@ describe('useErdEditorAttachElement', () => {
     expect(api.themeState.options.appearance).toBe('light');
   });
 
-  it('turns the system watcher off again when systemDarkMode goes back to false', async () => {
-    const { api, props } = await setup({ systemDarkMode: true });
+  it('keeps the appearance system shows when systemDarkMode goes back to false', async () => {
+    const { api, props } = await setup();
+    props.systemDarkMode = true;
+    await flush();
 
     props.systemDarkMode = false;
     await flush();
+    expect(api.themeState.options.appearance).toBe('light');
+
     fireMediaChange(true);
     await flush();
-
-    expect(api.themeState.options.appearance).toBe('dark');
+    expect(api.hasDarkMode()).toBe(false);
 
     ctxSetLight(api);
     await flush();
@@ -1051,6 +1859,317 @@ describe('useErdEditorAttachElement', () => {
     await flush();
 
     expect(api.themeState.options.appearance).toBe('light');
+  });
+
+  it('leaves a light or dark as it is when systemDarkMode goes back to false', async () => {
+    const { api, ctx, props } = await setup();
+    props.systemDarkMode = true;
+    await flush();
+    ctx.setPresetTheme({ appearance: Appearance.dark });
+    await flush();
+
+    props.systemDarkMode = false;
+    await flush();
+
+    expect(api.themeState.options.appearance).toBe('dark');
+  });
+});
+
+describe('useErdEditorAttachElement display language', () => {
+  /** Chromium's navigator.languages: a frozen array, changed with a languagechange event. */
+  function spyLanguages(initial: string[]) {
+    let languages: readonly string[] = Object.freeze([...initial]);
+    vi.spyOn(window.navigator, 'languages', 'get').mockImplementation(
+      () => languages as string[]
+    );
+
+    return (next: string[]) => {
+      languages = Object.freeze([...next]);
+      window.dispatchEvent(new Event('languagechange'));
+    };
+  }
+
+  it('shows English with nothing set while the picker is off, whatever the browser language', async () => {
+    spyLanguages(['ko-KR']);
+    const { api } = await setup();
+
+    expect(api.localeState.option).toBeNull();
+    expect(api.resolveLocaleOption()).toBe('en');
+    expect(api.resolveSystemLocale()).toBe('ko-KR');
+    expect(api.i18n.locale).toBe('en');
+    expect(api.i18n.dir).toBe('ltr');
+    expect(api.i18n.t('common.close')).toBe('Close');
+  });
+
+  it('keeps English while the picker is off when a host only names the system language', async () => {
+    const change = spyLanguages(['ko-KR']);
+    const { api, ctx } = await setup();
+
+    ctx.setSystemLocale('ja');
+    change(['pl-PL']);
+    await flush();
+
+    expect(api.resolveSystemLocale()).toBe('ja-JP');
+    expect(api.resolveLocaleOption()).toBe('en');
+    expect(api.i18n.locale).toBe('en');
+  });
+
+  it('follows the browser language with nothing set while the picker is on, from setup', async () => {
+    spyLanguages(['ko', 'en']);
+    const { api } = await setup({ enableLocalePicker: true });
+
+    expect(api.localeState.option).toBeNull();
+    expect(api.resolveLocaleOption()).toBe('system');
+    expect(api.i18n.locale).toBe('ko-KR');
+    expect(api.resolveSystemLocale()).toBe('ko-KR');
+  });
+
+  it('follows the system language once the picker is turned on, and English once it is off again', async () => {
+    spyLanguages(['ko-KR']);
+    const { api, props } = await setup();
+    const i18n = api.i18n;
+
+    props.enableLocalePicker = true;
+    await flush();
+
+    expect(api.resolveLocaleOption()).toBe('system');
+    expect(api.i18n).toBe(i18n);
+    expect(api.i18n.locale).toBe('ko-KR');
+
+    props.enableLocalePicker = false;
+    await flush();
+
+    expect(api.resolveLocaleOption()).toBe('en');
+    expect(api.i18n.locale).toBe('en');
+  });
+
+  it('turns the picker on into the language a host names for system', async () => {
+    spyLanguages(['ko-KR']);
+    const { api, ctx, props } = await setup();
+    ctx.setSystemLocale('ja');
+    await flush();
+    expect(api.i18n.locale).toBe('en');
+
+    props.enableLocalePicker = true;
+    await flush();
+
+    expect(api.i18n.locale).toBe('ja-JP');
+  });
+
+  it('keeps a language a host sets whether the picker is on or off', async () => {
+    spyLanguages(['ko-KR']);
+    const { api, ctx, props } = await setup();
+
+    ctx.setLocale('ja-JP');
+    expect(api.i18n.locale).toBe('ja-JP');
+
+    props.enableLocalePicker = true;
+    await flush();
+    expect(api.resolveLocaleOption()).toBe('ja-JP');
+    expect(api.i18n.locale).toBe('ja-JP');
+
+    props.enableLocalePicker = false;
+    await flush();
+    expect(api.resolveLocaleOption()).toBe('ja-JP');
+    expect(api.i18n.locale).toBe('ja-JP');
+  });
+
+  it('follows the system language a host asks for while the picker is off', async () => {
+    spyLanguages(['ko-KR']);
+    const { api, ctx } = await setup();
+
+    ctx.setLocale('system');
+
+    expect(api.resolveLocaleOption()).toBe('system');
+    expect(api.i18n.locale).toBe('ko-KR');
+
+    ctx.setSystemLocale('ja');
+    expect(api.i18n.locale).toBe('ja-JP');
+  });
+
+  it('switches the language in place before setLocale returns, with no event', async () => {
+    const { api, ctx } = await setup();
+    const onChangeLocale = vi.fn();
+    ctx.addEventListener('changeLocale', onChangeLocale);
+    const i18n = api.i18n;
+
+    ctx.setLocale('ko-KR');
+
+    expect(api.i18n).toBe(i18n);
+    expect(api.i18n.locale).toBe('ko-KR');
+    expect(api.localeState.option).toBe('ko-KR');
+
+    ctx.setLocale('ar-SA');
+
+    expect(api.i18n.locale).toBe('ar-SA');
+    expect(api.i18n.dir).toBe('rtl');
+
+    await flush();
+    expect(onChangeLocale).not.toHaveBeenCalled();
+  });
+
+  it('ignores a value that names no option', async () => {
+    const { api, ctx } = await setup();
+    ctx.setLocale('ja-JP');
+
+    ctx.setLocale('ko' as any);
+    ctx.setLocale('KO-KR' as any);
+    ctx.setLocale(42 as any);
+    ctx.setLocale(null as any);
+
+    expect(api.localeState.option).toBe('ja-JP');
+    expect(api.i18n.locale).toBe('ja-JP');
+  });
+
+  it('assigns nothing when the language resolves to the one shown', async () => {
+    spyLanguages(['de-AT']);
+    const { api, ctx } = await setup({ enableLocalePicker: true });
+    const messages = api.i18n.messages;
+    const t = api.i18n.t;
+
+    ctx.setLocale('de-DE');
+    ctx.setLocale('system');
+
+    expect(api.i18n.locale).toBe('de-DE');
+    expect(api.i18n.messages).toBe(messages);
+    expect(api.i18n.t).toBe(t);
+  });
+
+  it('reads the language a host names for system, over the browser', async () => {
+    spyLanguages(['de-DE']);
+    const { api, ctx } = await setup({ enableLocalePicker: true });
+    expect(api.i18n.locale).toBe('de-DE');
+
+    ctx.setSystemLocale('ja');
+
+    expect(api.localeState.systemTag).toBe('ja');
+    expect(api.i18n.locale).toBe('ja-JP');
+    expect(api.resolveSystemLocale()).toBe('ja-JP');
+  });
+
+  it('hands system back to the browser for null, a blank or a non-string tag', async () => {
+    spyLanguages(['de-DE']);
+    const { api, ctx } = await setup({ enableLocalePicker: true });
+
+    for (const tag of [null, '', '   ', 7 as any]) {
+      ctx.setSystemLocale('ja');
+      expect(api.i18n.locale).toBe('ja-JP');
+
+      ctx.setSystemLocale(tag);
+
+      expect(api.localeState.systemTag).toBeNull();
+      expect(api.i18n.locale).toBe('de-DE');
+    }
+  });
+
+  it('keeps a trimmed tag', async () => {
+    const { api, ctx } = await setup({ enableLocalePicker: true });
+
+    ctx.setSystemLocale('  zh-Hant  ');
+
+    expect(api.localeState.systemTag).toBe('zh-Hant');
+    expect(api.i18n.locale).toBe('zh-TW');
+  });
+
+  it('keeps a language picked whatever the host names for system', async () => {
+    const { api, ctx } = await setup();
+    ctx.setLocale('fr-FR');
+
+    ctx.setSystemLocale('ja');
+
+    expect(api.i18n.locale).toBe('fr-FR');
+    expect(api.resolveSystemLocale()).toBe('ja-JP');
+
+    ctx.setLocale('system');
+    expect(api.i18n.locale).toBe('ja-JP');
+  });
+
+  it('follows a browser language change under system, once the scheduler runs', async () => {
+    const change = spyLanguages(['en-US']);
+    const { api } = await setup({ enableLocalePicker: true });
+
+    change(['pl-PL', 'en']);
+    await flush();
+
+    expect(api.i18n.locale).toBe('pl-PL');
+  });
+
+  it('leaves a picked language as it is when the browser language changes', async () => {
+    const change = spyLanguages(['en-US']);
+    const { api, ctx } = await setup({ enableLocalePicker: true });
+    ctx.setLocale('sv-SE');
+
+    change(['pl-PL']);
+    await flush();
+
+    expect(api.i18n.locale).toBe('sv-SE');
+  });
+
+  it('lets a host-named system language stand when the browser language changes', async () => {
+    const change = spyLanguages(['en-US']);
+    const { api, ctx } = await setup({ enableLocalePicker: true });
+    ctx.setSystemLocale('tr');
+
+    change(['pl-PL']);
+    await flush();
+
+    expect(api.i18n.locale).toBe('tr-TR');
+  });
+
+  it('stops following the browser and the picker once destroyed', async () => {
+    const change = spyLanguages(['en-US']);
+    const { api, ctx, props } = await setup();
+
+    ctx.destroy();
+    props.enableLocalePicker = true;
+    change(['pl-PL']);
+    await flush();
+
+    expect(api.i18n.locale).toBe('en');
+  });
+
+  it('applies a pick from the picker and tells the host once', async () => {
+    const { api, app, ctx } = await setup();
+    const onChangeLocale = vi.fn();
+    ctx.addEventListener('changeLocale', onChangeLocale);
+
+    app.emitter.emit(setLocaleOptionAction({ locale: 'uk-UA' }));
+
+    expect(api.i18n.locale).toBe('uk-UA');
+    expect(onChangeLocale).toHaveBeenCalledTimes(1);
+
+    const event = onChangeLocale.mock.calls[0][0] as CustomEvent;
+    expect(event.detail).toEqual({ locale: 'uk-UA' });
+    expect(event.bubbles).toBe(false);
+    expect(event.composed).toBe(false);
+  });
+
+  it('tells the host of a pick that changes nothing, system included', async () => {
+    const { api, app, ctx } = await setup({ enableLocalePicker: true });
+    const onChangeLocale = vi.fn();
+    ctx.addEventListener('changeLocale', onChangeLocale);
+    const locale = api.i18n.locale;
+
+    app.emitter.emit(setLocaleOptionAction({ locale: 'system' }));
+    app.emitter.emit(setLocaleOptionAction({ locale: 'system' }));
+
+    expect(api.i18n.locale).toBe(locale);
+    expect(onChangeLocale).toHaveBeenCalledTimes(2);
+    expect(
+      onChangeLocale.mock.calls.map(([event]) => (event as CustomEvent).detail)
+    ).toEqual([{ locale: 'system' }, { locale: 'system' }]);
+  });
+
+  it('tells the host nothing of a pick that names no option', async () => {
+    const { api, app, ctx } = await setup();
+    const onChangeLocale = vi.fn();
+    ctx.addEventListener('changeLocale', onChangeLocale);
+
+    app.emitter.emit(setLocaleOptionAction({ locale: 'ko' as any }));
+
+    expect(api.localeState.option).toBeNull();
+    expect(api.i18n.locale).toBe('en');
+    expect(onChangeLocale).not.toHaveBeenCalled();
   });
 });
 
@@ -1099,3 +2218,267 @@ function collectSharedSelection(app: AppContext) {
 function collectSharedDragSelect(app: AppContext) {
   return collectDispatched(app, sharedDragSelectTrackerAction.type);
 }
+
+/** Every dialog a reader may meet open, the three that write and the three that only read. */
+const OPEN_DIALOGS = {
+  [Open.mapColumns]: true,
+  [Open.automaticTablePlacement]: true,
+  [Open.timeTravel]: true,
+  [Open.tableProperties]: true,
+  [Open.diffViewer]: true,
+  [Open.exportImage]: true,
+};
+
+/** A table focused on its name with its cell editor open, and every other edit state there is. */
+function openEditState(app: AppContext) {
+  app.store.dispatchSync(
+    addTableAction({ id: 't1', ui: { x: 0, y: 0, zIndex: 1 } }),
+    selectAction({ t1: SelectType.table }),
+    focusTableAction({ tableId: 't1', focusType: FocusType.tableName }),
+    editTableAction(),
+    editMemoAction({ id: 'm1' }),
+    editTableGroupAction({ id: 'g1' }),
+    changeHandToolAction({ value: true }),
+    drawStartRelationshipAction({ relationshipType: RelationshipType.OneN }),
+    dragstartColumnAction({ tableId: 't1', columnIds: ['c1'] }),
+    changeOpenMapAction(OPEN_DIALOGS)
+  );
+}
+
+function expectEditStateClosed(app: AppContext) {
+  const { editor } = app.store.state;
+  expect(editor.focusTable).toBeNull();
+  expect(editor.selectedMap).toEqual({});
+  expect(editor.editMemoId).toBeNull();
+  expect(editor.editTableGroupId).toBeNull();
+  expect(editor.drawRelationship).toBeNull();
+  expect(editor.draggableColumn).toBeNull();
+  expect(editor.draggingColumnMap).toEqual({});
+  expect(editor.handTool).toBe(false);
+  expect(editor.openMap).toMatchObject({
+    [Open.mapColumns]: false,
+    [Open.automaticTablePlacement]: false,
+    [Open.timeTravel]: false,
+    [Open.tableProperties]: true,
+    [Open.diffViewer]: true,
+    [Open.exportImage]: true,
+  });
+}
+
+/** Waits out the change event's quiet period, and the search an edit asks for. */
+const settleChange = () => new Promise(resolve => setTimeout(resolve, 260));
+
+describe('useErdEditorAttachElement turned readonly at run time', () => {
+  it('ends the edit state a reader may not hold, keeping what reads open and every setting as it stood', async () => {
+    const { app, props } = await setup({}, { wired: true });
+    const closeColorPicker = vi.fn();
+    const dragendColumnAll = vi.fn();
+    const duplicateDragCancel = vi.fn();
+    const cancelElkPlacement = vi.fn();
+    app.emitter.on({
+      closeColorPicker,
+      dragendColumnAll,
+      duplicateDragCancel,
+      cancelElkPlacement,
+    });
+    openEditState(app);
+    app.store.dispatchSync(
+      scrollToAction({ originX: -120, originY: 80 }),
+      changeZoomLevelAction({ value: 0.75 }),
+      changeCanvasTypeAction({ value: CanvasType.schemaSQL })
+    );
+    const settings = cloneDeep(app.store.state.settings);
+
+    props.readonly = true;
+    await flush();
+
+    expectEditStateClosed(app);
+    expect(closeColorPicker).toHaveBeenCalledTimes(1);
+    expect(dragendColumnAll).toHaveBeenCalledTimes(1);
+    expect(duplicateDragCancel).toHaveBeenCalledTimes(1);
+    expect(cancelElkPlacement).toHaveBeenCalledTimes(1);
+    expect(app.store.state.settings).toEqual(settings);
+    expect(app.store.state.editor.screenBaseline).toBeNull();
+  });
+
+  it('ends them once as the element mounts readonly', async () => {
+    const closeColorPicker = vi.fn();
+    const dragendColumnAll = vi.fn();
+    const duplicateDragCancel = vi.fn();
+    const cancelElkPlacement = vi.fn();
+    const { app } = await setup(
+      { readonly: true },
+      {
+        seed: app => {
+          openEditState(app);
+          app.emitter.on({
+            closeColorPicker,
+            dragendColumnAll,
+            duplicateDragCancel,
+            cancelElkPlacement,
+          });
+        },
+      }
+    );
+
+    expectEditStateClosed(app);
+    expect(closeColorPicker).toHaveBeenCalledTimes(1);
+    expect(dragendColumnAll).toHaveBeenCalledTimes(1);
+    expect(duplicateDragCancel).toHaveBeenCalledTimes(1);
+    expect(cancelElkPlacement).toHaveBeenCalledTimes(1);
+  });
+
+  it('gives the settings back as it turns writable, the viewport, the tab and the name view kept on the screen', async () => {
+    const { app, ctx, props } = await setup({}, { wired: true });
+    const { store } = app;
+    const onChange = vi.fn();
+    ctx.addEventListener('change', onChange);
+    const value = ctx.value;
+    const saved = cloneDeep(store.state.settings);
+    expect(saved.language).not.toBe(Language.Kotlin);
+    expect(saved.database).not.toBe(Database.Oracle);
+    expect(saved.nameViewMode).not.toBe(NameViewMode.logical);
+
+    props.readonly = true;
+    await flush();
+    store.dispatchSync(
+      changeLanguageAction({ value: Language.Kotlin }),
+      changeDatabaseAction({ value: Database.Oracle }),
+      changeShowAction({
+        show: Show.tableComment,
+        value: !(saved.show & Show.tableComment),
+      }),
+      scrollToAction({ originX: -300, originY: 120 }),
+      changeZoomLevelAction({ value: 0.6 }),
+      changeCanvasTypeAction({ value: CanvasType.schemaSQL }),
+      toNameViewModeAction(store.state, NameViewMode.logical, true)
+    );
+    expect(store.state.settings.language).toBe(Language.Kotlin);
+    expect(ctx.value).toBe(value);
+
+    props.readonly = false;
+    await flush();
+    await settleChange();
+
+    const { settings, editor } = store.state;
+    expect(settings.language).toBe(saved.language);
+    expect(settings.database).toBe(saved.database);
+    expect(settings.show).toBe(saved.show);
+    expect(settings).toMatchObject({
+      originX: -300,
+      originY: 120,
+      zoomLevel: 0.6,
+      canvasType: CanvasType.schemaSQL,
+      nameViewMode: NameViewMode.logical,
+    });
+    expect(Object.keys(editor.screenBaseline ?? {}).sort()).toEqual([
+      'canvasType',
+      'nameViewMode',
+      'viewport',
+    ]);
+    expect(ctx.value).toBe(value);
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it('runs the search again over the View Option it gives back as it turns writable', async () => {
+    const { app, ctx, props } = await setup({}, { wired: true });
+    const { store } = app;
+    store.dispatchSync(
+      addMemoAction({ id: 'm1', ui: { x: 0, y: 0, zIndex: 1 } }),
+      changeMemoValueAction({ id: 'm1', value: 'read me' })
+    );
+    const stopViewport: Unsubscribe = observeViewport(store);
+    measureRoot(store, { width: 1200, height: 800 });
+    const controller = mount(html`<${ExplorerController} />`, app);
+    const settle = async () => {
+      await new Promise(resolve => setTimeout(resolve, EDIT_SEARCH_DELAY + 50));
+      await flush();
+    };
+    const matches = () => explorerViewOf(store).matches.length;
+
+    try {
+      openSearchOn(app, 'read me', [FindField.memo]);
+      await settle();
+      expect(matches()).toBe(1);
+      const value = ctx.value;
+
+      props.readonly = true;
+      await flush();
+      store.dispatchSync(
+        changeShowAction({ show: Show.hideMemo, value: true })
+      );
+      await settle();
+      expect(matches()).toBe(0);
+
+      props.readonly = false;
+      await flush();
+      await settle();
+
+      expect(store.state.settings.show & Show.hideMemo).toBe(0);
+      expect(matches()).toBe(1);
+      expect(ctx.value).toBe(value);
+    } finally {
+      controller.unmount();
+      stopViewport();
+    }
+  });
+
+  it('sends a pan its shared store still held as it turns readonly, so a replica lands where the element stands once writable', async () => {
+    vi.useFakeTimers();
+    try {
+      const { app, ctx, props } = await setup({}, { wired: true });
+      const { store } = app;
+      // Every lock off, so the file holds the live viewport the pans move.
+      ctx.setInitialValue('{"version":"3.0.0","settings":{"lockSettings":0}}');
+      const replica = createReplicationStore({
+        toWidth: text => text.length * 10,
+      });
+      replica.setInitialValue(ctx.value);
+      const sharedStore = ctx.getSharedStore({
+        mouseTracker: false,
+        focusTracker: false,
+      });
+      const unsubscribe = sharedStore.subscribe(actions =>
+        replica.dispatchSync(cloneDeep(actions))
+      );
+      const originX = (value: string) => JSON.parse(value).settings.originX;
+
+      try {
+        store.dispatchSync(scrollToAction({ originX: 0, originY: 0 }));
+        await vi.advanceTimersByTimeAsync(300);
+        expect(originX(replica.value)).toBe(0);
+
+        // Within the outbound pipe's 200 ms window, so it still holds the pan.
+        store.dispatchSync(
+          streamScrollToAction({ movementX: 30, movementY: 0 })
+        );
+        await vi.advanceTimersByTimeAsync(50);
+        props.readonly = true;
+        await vi.advanceTimersByTimeAsync(0);
+        // Sent at the turn, well before the window would have let it go.
+        expect(originX(replica.value)).toBe(30);
+        store.dispatchSync(
+          streamScrollToAction({ movementX: 100, movementY: 0 })
+        );
+        await vi.advanceTimersByTimeAsync(50);
+        // Nothing of the reader's own pan has reached the replica.
+        expect(originX(replica.value)).toBe(30);
+        props.readonly = false;
+        await vi.advanceTimersByTimeAsync(0);
+        store.dispatchSync(
+          streamScrollToAction({ movementX: 7, movementY: 0 })
+        );
+        await vi.advanceTimersByTimeAsync(500);
+
+        expect(originX(ctx.value)).toBe(137);
+        expect(replica.value).toBe(ctx.value);
+      } finally {
+        unsubscribe();
+        sharedStore.destroy();
+        replica.destroy();
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

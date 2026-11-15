@@ -7,7 +7,10 @@ import {
   addTableAction,
   changeTableColorAction,
   changeTableCommentAction,
+  changeTableGroupAction,
+  changeTableLogicalNameAction,
   changeTableNameAction,
+  changeTableNameDerivedAction,
   moveTableAction,
   moveToTableAction,
   removeTableAction,
@@ -51,8 +54,11 @@ describe('table/history maps', () => {
         ActionType.removeTable,
         ActionType.changeTableName,
         ActionType.changeTableComment,
+        ActionType.changeTableGroup,
         ActionType.moveToTable,
         ActionType.sortTable,
+        ActionType.changeTableLogicalName,
+        ActionType.changeTableNameDerived,
       ]
         .slice()
         .sort()
@@ -214,6 +220,107 @@ describe('table/history changeTableName', () => {
 
     expect(table(TABLE_A).name).toBe('before_name');
     expect(table(TABLE_A).ui.widthName).toBe(110);
+  });
+});
+
+describe('table/history changeTableLogicalName', () => {
+  it('undoes with the previous logical name, and pushes nothing for an unknown table', () => {
+    addTable(TABLE_A);
+    store.dispatchSync(
+      changeTableLogicalNameAction({ id: TABLE_A, value: 'Members' })
+    );
+
+    tablePushUndoHistoryMap[ActionType.changeTableLogicalName](
+      undoActions,
+      changeTableLogicalNameAction({ id: TABLE_A, value: 'Users' }),
+      store.state
+    );
+    tablePushUndoHistoryMap[ActionType.changeTableLogicalName](
+      undoActions,
+      changeTableLogicalNameAction({ id: 'ghost', value: 'Users' }),
+      store.state
+    );
+
+    expect(undoActions).toEqual([
+      changeTableLogicalNameAction({ id: TABLE_A, value: 'Members' }),
+    ]);
+  });
+});
+
+describe('table/history changeTableNameDerived', () => {
+  it('undoes with the flag the table held, so an undo of a write that changed nothing keeps it', () => {
+    addTable(TABLE_A);
+    store.dispatchSync(
+      changeTableNameDerivedAction({ id: TABLE_A, value: true })
+    );
+
+    tablePushUndoHistoryMap[ActionType.changeTableNameDerived](
+      undoActions,
+      changeTableNameDerivedAction({ id: TABLE_A, value: true }),
+      store.state
+    );
+    tablePushUndoHistoryMap[ActionType.changeTableNameDerived](
+      undoActions,
+      changeTableNameDerivedAction({ id: TABLE_A, value: false }),
+      store.state
+    );
+
+    expect(undoActions).toEqual([
+      changeTableNameDerivedAction({ id: TABLE_A, value: true }),
+      changeTableNameDerivedAction({ id: TABLE_A, value: true }),
+    ]);
+  });
+
+  it('pushes nothing for an unknown table', () => {
+    tablePushUndoHistoryMap[ActionType.changeTableNameDerived](
+      undoActions,
+      changeTableNameDerivedAction({ id: 'ghost', value: true }),
+      store.state
+    );
+
+    expect(undoActions).toEqual([]);
+  });
+});
+
+describe('table/history changeTableGroup', () => {
+  it('undoes with the group the table was in', () => {
+    addTable(TABLE_A);
+    store.dispatchSync(changeTableGroupAction({ id: TABLE_A, value: 'g1' }));
+
+    tablePushUndoHistoryMap[ActionType.changeTableGroup](
+      undoActions,
+      changeTableGroupAction({ id: TABLE_A, value: '' }),
+      store.state
+    );
+
+    expect(undoActions).toEqual([
+      changeTableGroupAction({ id: TABLE_A, value: 'g1' }),
+    ]);
+  });
+
+  it('undoes a drop with the group it carries, the state read after its reducer', () => {
+    addTable(TABLE_A);
+    store.dispatchSync(changeTableGroupAction({ id: TABLE_A, value: 'g2' }));
+
+    tablePushUndoHistoryMap[ActionType.changeTableGroup](
+      undoActions,
+      changeTableGroupAction({ id: TABLE_A, value: 'g2', prevValue: 'g1' }),
+      store.state
+    );
+
+    expect(undoActions).toEqual([
+      changeTableGroupAction({ id: TABLE_A, value: 'g1' }),
+    ]);
+  });
+
+  it('pushes nothing for an unknown table', () => {
+    tablePushUndoHistoryMap[ActionType.changeTableGroup](
+      undoActions,
+      changeTableGroupAction({ id: 'ghost', value: 'g1' }),
+      store.state
+    );
+
+    expect(undoActions).toEqual([]);
   });
 });
 

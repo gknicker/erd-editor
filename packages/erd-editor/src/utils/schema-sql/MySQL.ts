@@ -1,79 +1,82 @@
 import { query } from '@dineug/erd-editor-schema';
-import { nanoid } from 'nanoid';
+import { uuid25 } from '@dineug/uuid';
 
-import { ColumnOption } from '@/constants/schema';
+import { ColumnOption, Database } from '@/constants/schema';
 import { RootState } from '@/engine/state';
+import { Column, Index, Relationship, Table } from '@/internal-types';
 import { bHas } from '@/utils/bit';
-
 import {
-  autoName,
+  autoNameIgnoreCase,
+  getBracket,
+  primaryKeyColumns,
+  tableNamePart,
+} from '@/utils/tableName';
+
+import { SchemaSQLHeader, SchemaSQLStatements } from './options';
+import {
+  commentToWrite,
+  CreateSchemaOptions,
   FormatColumnOptions,
+  formatDefault,
   FormatIndexOptions,
   formatNames,
+  formatReferentialActions,
   FormatRelationOptions,
   formatSize,
   formatSpace,
   FormatTableOptions,
-  getBracket,
-  KeyColumn,
+  ifNotExists,
   Name,
-  orderByNameASC,
   primaryKey,
-  primaryKeyColumns,
+  referentialActionSupport,
+  selectIndexColumns,
+  toForeignKeyPairs,
   toOrderName,
+  toSchemaEntities,
+  toStringLiteral,
   unique,
   uniqueColumns,
+  WrittenObjects,
 } from './utils';
 
-export function createSchema(state: RootState): string {
-  const {
-    settings: { bracketType },
-    doc: { tableIds, relationshipIds, indexIds },
-    collections,
-  } = state;
+const ACTION_SUPPORT = referentialActionSupport(Database.MySQL);
+
+// A foreign key may name a table not created yet, or one about to be dropped,
+// while the checks are off; the session gets its own setting back after.
+const FOREIGN_KEY_CHECKS_OFF =
+  'SET @OLD_FOREIGN_KEY_CHECKS=@@FOREIGN_KEY_CHECKS, FOREIGN_KEY_CHECKS=0;';
+const FOREIGN_KEY_CHECKS_RESTORE =
+  'SET FOREIGN_KEY_CHECKS=@OLD_FOREIGN_KEY_CHECKS;';
+
+export function createSchema(
+  state: RootState,
+  tableIds?: readonly string[],
+  { statements, written, logicalNameAsComment }: CreateSchemaOptions = {}
+): string {
+  if (statements === SchemaSQLStatements.ifNotExists) {
+    return createInlineSchema(state, tableIds, written, logicalNameAsComment);
+  }
+
   const fkNames: Name[] = [];
   const indexNames: Name[] = [];
   const stringBuffer: string[] = [''];
-  const bracket = getBracket(bracketType);
-  const tables = query(collections)
-    .collection('tableEntities')
-    .selectByIds(tableIds)
-    .sort(orderByNameASC);
-  const relationships = query(collections)
-    .collection('relationshipEntities')
-    .selectByIds(relationshipIds);
-  const indexes = query(collections)
-    .collection('indexEntities')
-    .selectByIds(indexIds);
+  const { tables, relationships, indexes } = toSchemaEntities(state, tableIds);
 
   tables.forEach(table => {
-    formatTable(state, { table, buffer: stringBuffer });
+    written?.tables.push(table);
+    formatTable(state, { table, buffer: stringBuffer, logicalNameAsComment });
     stringBuffer.push('');
 
-    const columns = query(collections)
-      .collection('tableColumnEntities')
-      .selectByIds(table.columnIds);
-
-    // unique
-    if (unique(columns)) {
-      const uqColumns = uniqueColumns(columns);
-      uqColumns.forEach(column => {
-        stringBuffer.push(`ALTER TABLE ${bracket}${table.name}${bracket}`);
-        stringBuffer.push(
-          `  ADD CONSTRAINT ${bracket}UQ_${table.name}_${column.name}${bracket} UNIQUE (${bracket}${column.name}${bracket});`
-        );
-        stringBuffer.push('');
-      });
-    }
+    formatUnique(state, { table, buffer: stringBuffer });
   });
 
   relationships.forEach(relationship => {
-    formatRelation(state, {
+    const wrote = formatRelation(state, {
       relationship,
       buffer: stringBuffer,
       fkNames,
     });
-    stringBuffer.push('');
+    if (wrote) stringBuffer.push('');
   });
 
   indexes.forEach(index => {
@@ -88,9 +91,93 @@ export function createSchema(state: RootState): string {
   return stringBuffer.join('\n');
 }
 
+/**
+ * The ifNotExists batch: each table holds its unique constraints, indexes and
+ * foreign keys, since MySQL has no IF NOT EXISTS for them, named as the create
+ * batch names them, between the foreign key checks turned off and back.
+ */
+function createInlineSchema(
+  state: RootState,
+  tableIds: readonly string[] | undefined,
+  written: WrittenObjects | undefined,
+  logicalNameAsComment: boolean | undefined
+): string {
+  const {
+    settings: { bracketType },
+    collections,
+  } = state;
+  const { tables, relationships, indexes } = toSchemaEntities(state, tableIds);
+  if (tables.length === 0) return '';
+
+  const fkNames: Name[] = [];
+  const foreignKeys = new Map<string, string[][]>();
+  relationships.forEach(relationship => {
+    const foreignKey = toForeignKey(state, relationship, fkNames);
+    if (!foreignKey) return;
+
+    const [constraint, ...clauses] = foreignKey.lines;
+    const held = foreignKeys.get(foreignKey.table.id) ?? [];
+    held.push([`  ${constraint}`, ...clauses]);
+    foreignKeys.set(foreignKey.table.id, held);
+  });
+
+  const indexNames: Name[] = [];
+  const tableIndexes = new Map<string, string[][]>();
+  indexes.forEach(index => {
+    const target = toIndex(state, index, indexNames);
+    if (!target) return;
+
+    const held = tableIndexes.get(target.table.id) ?? [];
+    held.push([
+      `  ${index.unique ? 'UNIQUE ' : ''}INDEX ${target.name} (${target.columns})`,
+    ]);
+    tableIndexes.set(target.table.id, held);
+  });
+
+  const stringBuffer: string[] = ['', FOREIGN_KEY_CHECKS_OFF, ''];
+  tables.forEach(table => {
+    written?.tables.push(table);
+    const columns = query(collections)
+      .collection('tableColumnEntities')
+      .selectByIds(table.columnIds);
+
+    writeTable(
+      state,
+      stringBuffer,
+      table,
+      SchemaSQLStatements.ifNotExists,
+      [
+        ...uniqueColumns(columns).map(column => [
+          `  ${uniqueConstraint(bracketType, table, column)}`,
+        ]),
+        ...(tableIndexes.get(table.id) ?? []),
+        ...(foreignKeys.get(table.id) ?? []),
+      ],
+      logicalNameAsComment
+    );
+    stringBuffer.push('');
+  });
+  stringBuffer.push(FOREIGN_KEY_CHECKS_RESTORE, '');
+
+  return stringBuffer.join('\n');
+}
+
 export function formatTable(
   state: RootState,
-  { buffer, table }: FormatTableOptions
+  { buffer, table, statements, logicalNameAsComment }: FormatTableOptions
+) {
+  writeTable(state, buffer, table, statements, [], logicalNameAsComment);
+}
+
+// The CREATE TABLE, its columns, its primary key and then the elements handed
+// in, each but the last ending with a comma.
+function writeTable(
+  state: RootState,
+  buffer: string[],
+  table: Table,
+  statements: SchemaSQLStatements | undefined,
+  elements: string[][],
+  logicalNameAsComment: boolean | undefined
 ) {
   const {
     settings: { bracketType },
@@ -101,43 +188,82 @@ export function formatTable(
     .collection('tableColumnEntities')
     .selectByIds(table.columnIds);
 
-  buffer.push(`CREATE TABLE ${bracket}${table.name}${bracket}`);
+  buffer.push(
+    `CREATE TABLE${ifNotExists(statements)} ${bracket}${table.name}${bracket}`
+  );
   buffer.push(`(`);
   const pk = primaryKey(columns);
   const spaceSize = formatSize(columns);
+  const more = elements.length !== 0;
 
   columns.forEach((column, i) => {
-    if (pk) {
-      formatColumn(state, {
-        column,
-        isComma: true,
-        spaceSize,
-        buffer,
-      });
-    } else {
-      formatColumn(state, {
-        column,
-        isComma: columns.length !== i + 1,
-        spaceSize,
-        buffer,
-      });
-    }
+    formatColumn(state, {
+      column,
+      isComma: pk || more || columns.length !== i + 1,
+      spaceSize,
+      buffer,
+      logicalNameAsComment,
+    });
   });
   // PK
   if (pk) {
     const pkColumns = primaryKeyColumns(columns);
-    buffer.push(`  PRIMARY KEY (${formatNames(pkColumns, bracket)})`);
+    buffer.push(
+      `  PRIMARY KEY (${formatNames(pkColumns, bracket)})${more ? ',' : ''}`
+    );
   }
-  if (table.comment.trim() === '') {
+  elements.forEach((lines, i) => {
+    buffer.push(...lines);
+    if (i !== elements.length - 1) buffer[buffer.length - 1] += ',';
+  });
+  const comment = commentToWrite(table, logicalNameAsComment);
+  if (comment === '') {
     buffer.push(`);`);
   } else {
-    buffer.push(`) COMMENT '${table.comment}';`);
+    buffer.push(`) COMMENT ${toStringLiteral(comment)};`);
   }
+}
+
+function uniqueConstraint(
+  bracketType: number,
+  table: Table,
+  column: Column
+): string {
+  const bracket = getBracket(bracketType);
+  return `CONSTRAINT ${bracket}UQ_${tableNamePart(table.name, bracketType)}_${column.name}${bracket} UNIQUE (${bracket}${column.name}${bracket})`;
+}
+
+/**
+ * One named constraint per column the diagram marks unique, after the table.
+ * The whole export and the per-table Schema SQL tab both write it.
+ */
+export function formatUnique(
+  { settings: { bracketType }, collections }: RootState,
+  { buffer, table }: FormatTableOptions
+) {
+  const bracket = getBracket(bracketType);
+  const columns = query(collections)
+    .collection('tableColumnEntities')
+    .selectByIds(table.columnIds);
+
+  if (!unique(columns)) return;
+
+  uniqueColumns(columns).forEach(column => {
+    buffer.push(`ALTER TABLE ${bracket}${table.name}${bracket}`);
+    buffer.push(`  ADD ${uniqueConstraint(bracketType, table, column)};`);
+    buffer.push('');
+  });
 }
 
 function formatColumn(
   { settings: { bracketType } }: RootState,
-  { buffer, column, isComma, spaceSize }: FormatColumnOptions
+  {
+    buffer,
+    column,
+    isComma,
+    spaceSize,
+    logicalNameAsComment,
+  }: FormatColumnOptions
 ) {
   const bracket = getBracket(bracketType);
   const stringBuffer: string[] = [];
@@ -159,112 +285,163 @@ function formatColumn(
     stringBuffer.push(`AUTO_INCREMENT`);
   } else {
     if (column.default.trim() !== '') {
-      stringBuffer.push(`DEFAULT ${column.default}`);
+      stringBuffer.push(
+        `DEFAULT ${formatDefault(column.default, Database.MySQL, column.dataType)}`
+      );
     }
   }
-  if (column.comment.trim() !== '') {
-    stringBuffer.push(`COMMENT '${column.comment}'`);
+  const comment = commentToWrite(column, logicalNameAsComment);
+  if (comment !== '') {
+    stringBuffer.push(`COMMENT ${toStringLiteral(comment)}`);
   }
   buffer.push(stringBuffer.join(' ') + `${isComma ? ',' : ''}`);
 }
 
-function formatRelation(
-  { settings: { bracketType }, collections }: RootState,
-  { buffer, relationship, fkNames }: FormatRelationOptions
-) {
+// A relationship's foreign key named in turn, the CONSTRAINT line first, or
+// null where it writes none.
+function toForeignKey(
+  state: RootState,
+  relationship: Relationship,
+  fkNames: Name[]
+): { table: Table; lines: string[] } | null {
+  const {
+    settings: { bracketType },
+  } = state;
+  const columns = toForeignKeyPairs(state, relationship);
+  if (!columns) return null;
+
+  const { startTable, endTable } = columns;
   const bracket = getBracket(bracketType);
-  const tableCollection = query(collections).collection('tableEntities');
-  const columnCollection = query(collections).collection('tableColumnEntities');
-  const startTable = tableCollection.selectById(relationship.start.tableId);
-  const endTable = tableCollection.selectById(relationship.end.tableId);
 
-  if (startTable && endTable) {
-    buffer.push(`ALTER TABLE ${bracket}${endTable.name}${bracket}`);
+  // FK
+  const startName = tableNamePart(startTable.name, bracketType);
+  const endName = tableNamePart(endTable.name, bracketType);
+  const fkName = autoNameIgnoreCase(fkNames, `FK_${startName}_TO_${endName}`);
+  fkNames.push({
+    id: uuid25(),
+    name: fkName,
+  });
 
-    // FK
-    let fkName = `FK_${startTable.name}_TO_${endTable.name}`;
-    fkName = autoName(fkNames, '', fkName);
-    fkNames.push({
-      id: nanoid(),
-      name: fkName,
-    });
-
-    buffer.push(`  ADD CONSTRAINT ${bracket}${fkName}${bracket}`);
-
-    // key
-    const columns: KeyColumn = {
-      start: [],
-      end: [],
-    };
-    relationship.end.columnIds.forEach(columnId => {
-      const column = columnCollection.selectById(columnId);
-      if (column) {
-        columns.end.push(column);
-      }
-    });
-    relationship.start.columnIds.forEach(columnId => {
-      const column = columnCollection.selectById(columnId);
-      if (column) {
-        columns.start.push(column);
-      }
-    });
-
-    buffer.push(`    FOREIGN KEY (${formatNames(columns.end, bracket)})`);
-    buffer.push(
+  return {
+    table: endTable,
+    lines: [
+      `CONSTRAINT ${bracket}${fkName}${bracket}`,
+      `    FOREIGN KEY (${formatNames(columns.end, bracket)})`,
       `    REFERENCES ${bracket}${startTable.name}${bracket} (${formatNames(
         columns.start,
         bracket
-      )});`
-    );
-  }
+      )})`,
+      ...formatReferentialActions(relationship, ACTION_SUPPORT).map(
+        clause => `    ${clause}`
+      ),
+    ],
+  };
 }
 
-export function formatIndex(
+function formatRelation(
+  state: RootState,
+  { buffer, relationship, fkNames }: FormatRelationOptions
+): boolean {
+  const foreignKey = toForeignKey(state, relationship, fkNames);
+  if (!foreignKey) return false;
+
+  const bracket = getBracket(state.settings.bracketType);
+  const [constraint, ...clauses] = foreignKey.lines;
+  buffer.push(
+    `ALTER TABLE ${bracket}${foreignKey.table.name}${bracket}`,
+    `  ADD ${constraint}`,
+    ...clauses
+  );
+  buffer[buffer.length - 1] += ';';
+  return true;
+}
+
+// An index's table, its name, quoted, and its column list, or null where it
+// writes nothing; an automatic name is numbered in turn.
+function toIndex(
   { settings: { bracketType }, collections }: RootState,
-  { buffer, index, indexNames }: FormatIndexOptions
-) {
+  index: Index,
+  indexNames: Name[]
+): { table: Table; name: string; columns: string } | null {
   const bracket = getBracket(bracketType);
   const table = query(collections)
     .collection('tableEntities')
     .selectById(index.tableId);
-  if (!table) return;
+  if (!table) return null;
 
-  const columnNames = query(collections)
-    .collection('indexColumnEntities')
-    .selectByIds(index.indexColumnIds)
-    .map(indexColumn => {
-      const column = query(collections)
-        .collection('tableColumnEntities')
-        .selectById(indexColumn.columnId);
-      if (column) {
-        return {
-          name: `${bracket}${column.name}${bracket} ${toOrderName(
-            indexColumn.orderType
-          )}`,
-        };
-      }
-      return null;
+  const columnNames = selectIndexColumns(collections, table, index).map(
+    ({ indexColumn, column }) => ({
+      name: `${bracket}${column.name}${bracket} ${toOrderName(
+        indexColumn.orderType
+      )}`,
     })
-    .filter(columnName => columnName !== null) as { name: string }[];
+  );
 
-  if (columnNames.length !== 0) {
-    let indexName = index.name;
-    if (index.name.trim() === '') {
-      indexName = `IDX_${table.name}`;
-      indexName = autoName(indexNames, '', indexName);
-      indexNames.push({
-        id: nanoid(),
-        name: indexName,
-      });
-    }
+  if (columnNames.length === 0) return null;
 
-    if (index.unique) {
-      buffer.push(`CREATE UNIQUE INDEX ${bracket}${indexName}${bracket}`);
-    } else {
-      buffer.push(`CREATE INDEX ${bracket}${indexName}${bracket}`);
-    }
-    buffer.push(
-      `  ON ${bracket}${table.name}${bracket} (${formatNames(columnNames)});`
-    );
+  let indexName = index.name;
+  if (index.name.trim() === '') {
+    const tableName = tableNamePart(table.name, bracketType);
+    indexName = autoNameIgnoreCase(indexNames, `IDX_${tableName}`);
+    indexNames.push({
+      id: uuid25(),
+      name: indexName,
+    });
   }
+
+  return {
+    table,
+    name: `${bracket}${indexName}${bracket}`,
+    columns: formatNames(columnNames),
+  };
+}
+
+export function formatIndex(
+  state: RootState,
+  { buffer, index, indexNames }: FormatIndexOptions
+) {
+  const target = toIndex(state, index, indexNames);
+  if (!target) return;
+
+  const bracket = getBracket(state.settings.bracketType);
+  buffer.push(`CREATE ${index.unique ? 'UNIQUE ' : ''}INDEX ${target.name}`);
+  buffer.push(
+    `  ON ${bracket}${target.table.name}${bracket} (${target.columns});`
+  );
+}
+
+/** USE, after CREATE DATABASE IF NOT EXISTS for createAndUse; MariaDB's too. */
+export function formatHeader(
+  { settings: { bracketType } }: RootState,
+  header: Exclude<SchemaSQLHeader, 'none'>,
+  name: string
+): string {
+  const bracket = getBracket(bracketType);
+  const database = `${bracket}${name}${bracket}`;
+  const use = `USE ${database};`;
+
+  return header === SchemaSQLHeader.createAndUse
+    ? `CREATE DATABASE IF NOT EXISTS ${database};\n${use}`
+    : use;
+}
+
+/**
+ * Every table written dropped while the foreign key checks are off, so the
+ * order does not matter, and the checks back on before the tables are created;
+ * MariaDB's too.
+ */
+export function formatDropBlock(
+  { settings: { bracketType } }: RootState,
+  { tables }: WrittenObjects
+): string {
+  if (tables.length === 0) return '';
+
+  const bracket = getBracket(bracketType);
+  return [
+    FOREIGN_KEY_CHECKS_OFF,
+    tables
+      .map(table => `DROP TABLE IF EXISTS ${bracket}${table.name}${bracket};`)
+      .join('\n'),
+    FOREIGN_KEY_CHECKS_RESTORE,
+  ].join('\n\n');
 }

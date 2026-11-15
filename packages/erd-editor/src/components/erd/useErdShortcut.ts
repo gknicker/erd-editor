@@ -1,10 +1,12 @@
 import { onMounted } from '@dineug/r-html';
 
 import { useAppContext } from '@/components/appContext';
+import { addTableGroupAndRename } from '@/components/erd/table-group/tableGroupName';
 import { Open } from '@/constants/open';
 import { RelationshipType } from '@/constants/schema';
 import { ZOOM_RESET, ZOOM_STEP } from '@/constants/zoom';
 import {
+  changeDrawTableGroupAction,
   changeHandToolAction,
   changeOpenMapAction,
   changeZenModeAction,
@@ -12,6 +14,7 @@ import {
   editMemoEndAction,
   editTableAction,
   editTableEndAction,
+  editTableGroupEndAction,
   focusMoveTableAction,
   selectAllAction,
   selectAllColumnAction,
@@ -31,6 +34,10 @@ import {
   SelectType,
 } from '@/engine/modules/editor/state';
 import {
+  getFocusedColumnIds,
+  getRemovableColumns,
+} from '@/engine/modules/editor/utils/focus';
+import {
   focusCentersOf,
   focusFlowTableAction$,
 } from '@/engine/modules/editor/view.generator.actions';
@@ -45,17 +52,19 @@ import {
 } from '@/engine/modules/table/generator.actions';
 import {
   addColumnAction$,
-  changeColumnPrimaryKeyAction$,
+  changeColumnsPrimaryKeyAction$,
   isToggleColumnTypes,
   removeColumnAction$,
   toggleColumnValueAction$,
 } from '@/engine/modules/table-column/generator.actions';
+import { addTableGroupFromTablesAction$ } from '@/engine/modules/table-group/generator.actions';
 import { useUnmounted } from '@/hooks/useUnmounted';
 import { Column, Ctx } from '@/internal-types';
 import { arrayHas } from '@/utils/arrayHas';
 import { openTablePropertiesAction } from '@/utils/emitter';
 import { focusEvent, forceFocusEvent } from '@/utils/internalEvents';
 import { isComposing, KeyBindingName } from '@/utils/keyboard-shortcut';
+import { isMemoShown } from '@/utils/memo';
 import { fromCopy } from '@/utils/rx-operators/fromCopy';
 import { fromPaste } from '@/utils/rx-operators/fromPaste';
 import {
@@ -74,6 +83,7 @@ import {
   tablePasteFromTextToColumns,
 } from '@/utils/table-clipboard/paste';
 import { CLIPBOARD_MIME, PayloadKind } from '@/utils/table-clipboard/payload';
+import { isTableGroupShown } from '@/utils/tableGroup';
 import { isEditableTarget, isHighLevelTable } from '@/utils/validation';
 
 import { erdShortcutPerformCheck } from './erdShortcutPerformCheck';
@@ -91,6 +101,31 @@ const keyBindingNameToRelationshipType: Record<string, number> = {
   [KeyBindingName.relationshipOneOnly]: RelationshipType.OneOnly,
   [KeyBindingName.relationshipOneN]: RelationshipType.OneN,
 };
+
+/**
+ * The chords a readonly reader's keys skip: each adds, removes or edits, arms
+ * a draw or the hand, or selects past what a jump left. The store's filter
+ * drops the writes alone, never the select or focus a chord sends after them.
+ */
+const isEditKeyBindingName = arrayHas<string>([
+  KeyBindingName.edit,
+  KeyBindingName.addTable,
+  KeyBindingName.addColumn,
+  KeyBindingName.addMemo,
+  KeyBindingName.addTableGroup,
+  KeyBindingName.groupSelectedTables,
+  KeyBindingName.removeTable,
+  KeyBindingName.removeColumn,
+  KeyBindingName.removeSelection,
+  KeyBindingName.primaryKey,
+  KeyBindingName.selectAllTable,
+  KeyBindingName.selectAllColumn,
+  KeyBindingName.relationshipZeroOne,
+  KeyBindingName.relationshipZeroN,
+  KeyBindingName.relationshipOneOnly,
+  KeyBindingName.relationshipOneN,
+  KeyBindingName.handTool,
+]);
 
 export function useErdShortcut(ctx: Ctx) {
   const app = useAppContext(ctx);
@@ -127,15 +162,23 @@ export function useErdShortcut(ctx: Ctx) {
       event.key !== MoveKey.Tab &&
       hasMoveKeys(event.key)
     ) {
+      // Shift adds each column reached to the selection, which a reader's
+      // keys never widen past what a jump left, so its arrows only move.
       store.dispatch(
         focusMoveTableAction({
           moveKey: event.key,
-          shiftKey: event.shiftKey,
+          shiftKey: event.shiftKey && !store.getReadonly(),
         })
       );
     }
 
-    if (editor.focusTable && event.key === MoveKey.Tab) {
+    // Tab opens the next cell's editor, past the last one a new column, so a
+    // reader's goes on to the page unprevented, as in the read-only view.
+    if (
+      editor.focusTable &&
+      event.key === MoveKey.Tab &&
+      !store.getReadonly()
+    ) {
       event.preventDefault();
       store.dispatch(focusMoveTableAction$(event.key, event.shiftKey));
 
@@ -163,10 +206,26 @@ export function useErdShortcut(ctx: Ctx) {
     const { editor, settings } = store.state;
     const showHighLevelTable = isHighLevelTable(settings.zoomLevel);
 
+    if (store.getReadonly() && isEditKeyBindingName(type)) return;
+
     if (!isEditingText(editor)) {
       type === KeyBindingName.addTable && store.dispatch(addTableAction$());
       type === KeyBindingName.addColumn && store.dispatch(addColumnAction$());
-      type === KeyBindingName.addMemo && store.dispatch(addMemoAction$());
+      // A memo added while memos are hidden could be neither seen nor ended.
+      type === KeyBindingName.addMemo &&
+        isMemoShown(store.state) &&
+        store.dispatch(addMemoAction$());
+
+      // A group comes only where the menus offer one, while groups are shown.
+      // The draw's chord toggles it, as a notation's does.
+      if (isTableGroupShown(store.state)) {
+        type === KeyBindingName.addTableGroup &&
+          store.dispatch(
+            changeDrawTableGroupAction({ value: !editor.drawTableGroup })
+          );
+        type === KeyBindingName.groupSelectedTables &&
+          addTableGroupAndRename(store, addTableGroupFromTablesAction$());
+      }
 
       type === KeyBindingName.selectAllTable &&
         store.dispatch(selectAllAction());
@@ -179,6 +238,18 @@ export function useErdShortcut(ctx: Ctx) {
       if (type === KeyBindingName.removeTable) {
         ctx.host.dispatchEvent(focusEvent());
         store.dispatch(removeSelectedAction$());
+      }
+
+      // A held key removes once: the press after a column removal reaches the
+      // column above it, or the table once the first column is gone.
+      if (type === KeyBindingName.removeSelection && !event.repeat) {
+        const columns = getRemovableColumns(store.state);
+        ctx.host.dispatchEvent(focusEvent());
+        store.dispatch(
+          columns
+            ? removeColumnAction$(columns.tableId, columns.columnIds)
+            : removeSelectedAction$()
+        );
       }
 
       if (type === KeyBindingName.tableProperties) {
@@ -234,9 +305,9 @@ export function useErdShortcut(ctx: Ctx) {
 
         if (type === KeyBindingName.primaryKey && editor.focusTable.columnId) {
           store.dispatch(
-            changeColumnPrimaryKeyAction$(
+            changeColumnsPrimaryKeyAction$(
               editor.focusTable.tableId,
-              editor.focusTable.columnId
+              getFocusedColumnIds(store.state)
             )
           );
         }
@@ -269,7 +340,9 @@ export function useErdShortcut(ctx: Ctx) {
       // unselects. Read before the host takes the focus, whose blur ends an
       // open editor on its own.
       const endsEdit =
-        isEditingText(editor) || Boolean(editor.drawRelationship);
+        isEditingText(editor) ||
+        Boolean(editor.drawRelationship) ||
+        editor.drawTableGroup;
       ctx.host.dispatchEvent(forceFocusEvent());
 
       if (endsEdit) {
@@ -277,8 +350,10 @@ export function useErdShortcut(ctx: Ctx) {
         event.preventDefault();
         store.dispatch(
           drawEndRelationshipAction(),
+          changeDrawTableGroupAction({ value: false }),
           editTableEndAction(),
-          editMemoEndAction()
+          editMemoEndAction(),
+          editTableGroupEndAction()
         );
       } else {
         store.dispatch(drawEndRelationshipAction(), unselectAllAction$());
@@ -313,13 +388,10 @@ export function useErdShortcut(ctx: Ctx) {
       event.clipboardData.setData('text/plain', tableCopyToText(state));
       event.clipboardData.setData('text/html', tableCopyToHtml(state));
     } else {
-      event.clipboardData.setData(
-        'text/plain',
-        entitiesToTsv(payload, settings)
-      );
+      event.clipboardData.setData('text/plain', entitiesToTsv(payload, state));
       event.clipboardData.setData(
         'text/html',
-        payloadToHtml(payload, entitiesToHtmlTable(payload, settings))
+        payloadToHtml(payload, entitiesToHtmlTable(payload, state))
       );
     }
 
@@ -328,6 +400,8 @@ export function useErdShortcut(ctx: Ctx) {
 
   const handlePaste = (event: ClipboardEvent) => {
     const { store } = app.value;
+    // A reader adds nothing, so the paste is left to the page as it came.
+    if (store.getReadonly()) return;
     const { state } = store;
     const { editor, settings } = state;
     const showHighLevelTable = isHighLevelTable(settings.zoomLevel);

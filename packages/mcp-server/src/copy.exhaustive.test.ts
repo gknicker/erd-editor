@@ -16,7 +16,17 @@ const SURFACE: Array<{ name: string; args: string[] }> = [
   { name: 'erd_open_document', args: ['path', 'create'] },
   {
     name: 'erd_read',
-    args: ['path', 'format', 'vendor', 'tableIds', 'tableNames'],
+    args: [
+      'path',
+      'format',
+      'vendor',
+      'statements',
+      'header',
+      'logicalNameAsComment',
+      'tableIds',
+      'tableNames',
+      'groupNames',
+    ],
   },
   {
     name: 'erd_list',
@@ -31,7 +41,15 @@ const SURFACE: Array<{ name: string; args: string[] }> = [
       'relationshipIds',
       'indexIds',
       'memoIds',
+      'tableGroupIds',
+      'wordIds',
+      'termIds',
+      'domainIds',
     ],
+  },
+  {
+    name: 'erd_list_checks',
+    args: ['path', 'level', 'tableIds', 'tableNames', 'offset', 'limit'],
   },
   { name: 'erd_save', args: ['path'] },
   { name: 'erd_undo', args: ['path'] },
@@ -45,7 +63,7 @@ const SURFACE: Array<{ name: string; args: string[] }> = [
 
 describe('the prose table covers the surface exactly', () => {
   it('names the session tools the surface above lists', () => {
-    expect(SURFACE.slice(0, 8).map(({ name }) => name)).toEqual([
+    expect(SURFACE.slice(0, 9).map(({ name }) => name)).toEqual([
       ...SESSION_TOOL_NAMES,
     ]);
   });
@@ -124,5 +142,394 @@ describe('the words sent before any editor is found', () => {
 
   it('keeps the server instructions in plain sentences too', () => {
     expect(SERVER_INSTRUCTIONS).not.toMatch(/[`*#]|\n/);
+  });
+});
+
+describe('the words on a color', () => {
+  it('say on both color tools that an empty string removes the color', () => {
+    for (const name of ['erd_change_table_color', 'erd_change_memo_color']) {
+      expect(describeArg(name, 'color')).toContain(
+        'an empty string removes the color'
+      );
+    }
+  });
+});
+
+describe('the words on a referential action', () => {
+  const ACTION_ARGS = ['onDelete', 'onUpdate'];
+  const texts = [
+    describeTool('erd_change_relationship_on_delete'),
+    describeTool('erd_change_relationship_on_update'),
+    ...actionTools.flatMap(({ name, args }) =>
+      args
+        .filter(arg => ACTION_ARGS.includes(arg.name))
+        .map(arg => describeArg(name, arg.name))
+    ),
+  ];
+
+  it('reach both change tools and the six arguments that take an action', () => {
+    expect(texts).toHaveLength(8);
+  });
+
+  it('say an editor released before referential actions drops them, so the user updates it', () => {
+    for (const text of texts) {
+      expect(text).toContain(
+        'An ERD Editor extension or plugin released before referential actions ignores this setting, so the user should update it.'
+      );
+    }
+  });
+
+  it('name no release, which the next one would make wrong', () => {
+    for (const text of texts) {
+      expect(text).not.toMatch(/\d+\.\d+/);
+    }
+  });
+});
+
+describe('the words on a table group', () => {
+  const GROUP_TOOLS = [
+    'erd_add_table_group',
+    'erd_remove_table_group',
+    'erd_change_table_group_name',
+    'erd_change_table_group_color',
+    'erd_move_table_group',
+    'erd_resize_table_group',
+    'erd_set_table_group',
+  ];
+  const OLDER =
+    'An ERD Editor extension or plugin released before table groups ignores this edit and drops every group when it saves, so the user should update it.';
+  // A group move also sends table.move, which an older editor still applies.
+  const OLDER_MOVE =
+    'An ERD Editor extension or plugin released before table groups moves only the tables of the group and drops every group when it saves, so the user should update it.';
+
+  it('reach every group tool the registry has', () => {
+    expect(
+      actionTools
+        .map(({ name }) => name)
+        .filter(name => name.includes('table_group'))
+    ).toEqual(GROUP_TOOLS);
+  });
+
+  it('end each group tool on an editor released before groups dropping them, so the user updates it', () => {
+    for (const name of GROUP_TOOLS) {
+      const ending = name === 'erd_move_table_group' ? OLDER_MOVE : OLDER;
+      expect(describeTool(name).endsWith(ending), name).toBe(true);
+    }
+  });
+
+  it('name no release, which the next one would make wrong', () => {
+    for (const name of GROUP_TOOLS) {
+      expect(describeTool(name)).not.toMatch(/\d+\.\d+/);
+    }
+  });
+});
+
+describe('the words on the dictionaries and logical names', () => {
+  const DICTIONARY_TOOLS = [
+    'erd_set_table_logical_name',
+    'erd_set_column_logical_name',
+    'erd_set_column_domain',
+    'erd_add_word',
+    'erd_update_word',
+    'erd_remove_word',
+    'erd_add_term',
+    'erd_update_term',
+    'erd_remove_term',
+    'erd_add_domain',
+    'erd_update_domain',
+    'erd_remove_domain',
+    'erd_derive_physical_names',
+  ];
+  const OLDER =
+    'An ERD Editor extension or plugin released before dictionaries, logical names and domains ignores what this edit writes of them and leaves them out when it saves, so the user should update it.';
+
+  it('reach the nine dictionary tools, the three that set a logical name or a domain and the one that derives names again', () => {
+    expect(
+      actionTools
+        .map(({ name }) => name)
+        .filter(name =>
+          /logical_name|physical_names|domain|word|term/.test(name)
+        )
+    ).toEqual(DICTIONARY_TOOLS);
+  });
+
+  it('end each of them on an editor released before dictionaries leaving out what it writes, so the user updates it', () => {
+    for (const name of DICTIONARY_TOOLS) {
+      expect(describeTool(name).endsWith(` ${OLDER}`), name).toBe(true);
+      expect(describeTool(name), name).not.toMatch(/\d+\.\d+/);
+    }
+  });
+
+  it('say a rename by hand turns the derived flag off, so a logical name leaves a name that is not empty', () => {
+    for (const name of ['erd_change_table_name', 'erd_change_column_name']) {
+      expect(describeTool(name), name).toContain(
+        'The name is then its own: nameDerived goes off, so a later logical name leaves a name that is not empty as it is.'
+      );
+    }
+  });
+
+  it('say a domain type the sync spreads unlinks a column it reaches off its own domain', () => {
+    for (const name of [
+      'erd_update_domain',
+      'erd_set_column_domain',
+      'erd_set_column_logical_name',
+    ]) {
+      expect(describeTool(name), name).toContain(
+        "A column the sync reaches whose new type differs from its own domain's is unlinked from that domain."
+      );
+    }
+    expect(describeTool('erd_set_column_logical_name')).toContain(
+      'The domain a term links gives the column its data type, spread along relationships while relationship data type sync is on.'
+    );
+  });
+
+  it('end erd_import_json, which brings them with table groups, on both older editor sentences', () => {
+    expect(
+      describeTool('erd_import_json').endsWith(
+        ` An ERD Editor extension or plugin released before table groups drops every group when it saves, so the user should update it. ${OLDER}`
+      )
+    ).toBe(true);
+  });
+
+  it('say the four schema imports keep the dictionaries, by replace and in the mode argument', () => {
+    for (const name of [
+      'erd_import_sql',
+      'erd_import_graphql',
+      'erd_import_dbml',
+      'erd_import_aml',
+    ]) {
+      expect(describeTool(name), name).toContain(
+        'which goes to the start of the canvas, and keeping its word, term and domain dictionaries; erd_undo restores'
+      );
+      expect(describeArg(name, 'mode'), name).toContain(
+        'which goes to the start of the canvas, and keeps the word, term and domain dictionaries; append adds'
+      );
+    }
+  });
+
+  it('name the logical name tools in the server instructions, and that a name set by hand stays while it is not empty', () => {
+    expect(SERVER_INSTRUCTIONS).toContain(
+      'erd_set_table_logical_name and erd_set_column_logical_name write it and derive from the word, term and domain dictionaries'
+    );
+    expect(SERVER_INSTRUCTIONS).toContain(
+      'unless a name that is not empty was set by hand'
+    );
+  });
+
+  it('say an append of erd_import_json links no domain and adds no dictionary row, by tool and in the mode argument', () => {
+    expect(describeTool('erd_import_json')).toContain(
+      'the tables bring their logical names and derived flags, but no column links a domain and none of the document'
+    );
+    expect(describeArg('erd_import_json', 'mode')).toContain(
+      'with no domain link on any column and no word, term or domain row'
+    );
+  });
+
+  it('say erd_list pages through the dictionary rows it never searches, and erd_get gives them whole', () => {
+    expect(describeTool('erd_list')).toContain(
+      'then the rows of the domain, term and word dictionaries'
+    );
+    expect(describeArg('erd_list', 'query')).toContain(
+      'Dictionary rows are not searched.'
+    );
+    expect(describeTool('erd_get')).toContain(
+      'and words, terms and domains with every field'
+    );
+  });
+});
+
+describe('the words on a foreign key data type', () => {
+  it('give erd_add_relationship the integer each serial key copies as', () => {
+    const text = describeTool('erd_add_relationship');
+
+    for (const phrase of [
+      'serial4 integer',
+      'smallserial and serial2 smallint',
+      'bigserial and serial8 bigint',
+      'serial integer under PostgreSQL',
+      'bigint unsigned under MySQL and MariaDB',
+      'serial elsewhere',
+    ]) {
+      expect(text).toContain(phrase);
+    }
+  });
+
+  it('say the sync of erd_change_column_data_type runs both ways and stops at a serial key', () => {
+    const text = describeTool('erd_change_column_data_type');
+
+    expect(text).toContain('both ways');
+    expect(text).toContain('into the foreign keys that copy the column');
+    expect(text).toContain('from a foreign key back to the key it copies');
+    expect(text).toContain(
+      'except a serial key, which keeps its type and stops the change there'
+    );
+  });
+
+  it('say erd_change_column_data_type unlinks a domain the new type leaves, on any column the sync reaches too', () => {
+    const text = describeTool('erd_change_column_data_type');
+
+    expect(text).toContain(
+      "A column linked to a dictionary domain is unlinked from it when set to another type than the domain's"
+    );
+    expect(text).toContain(
+      "and so is any column the sync reaches, a foreign key or the key it copies, whose new type differs from its own domain's"
+    );
+  });
+
+  it('say erd_add_relationship copies the key’s logical name and links its domain, unless a serial key changes the type', () => {
+    expect(describeTool('erd_add_relationship')).toContain(
+      "Each foreign key column also takes the logical name of its key, whatever name it gets, and links the dictionary domain its key links, unless a serial key gives it another type than the domain's"
+    );
+  });
+});
+
+describe('the words on an import', () => {
+  const schemaImports = [
+    'erd_import_sql',
+    'erd_import_graphql',
+    'erd_import_dbml',
+    'erd_import_aml',
+  ];
+
+  it('say the four schema imports keep the settings but the view, and none that it discards the document', () => {
+    for (const name of schemaImports) {
+      const text = describeTool(name);
+
+      expect(text, name).toContain(
+        'Replaces every table, relationship, index, memo and table group of the document'
+      );
+      expect(text, name).toContain(
+        'keeping its settings but the view, which goes to the start of the canvas'
+      );
+      expect(describeArg(name, 'mode'), name).toContain(
+        'in place of every table, relationship, index, memo and table group and keeps the settings but the view, which goes to the start of the canvas'
+      );
+    }
+    for (const { description, args } of Object.values(TOOL_COPY)) {
+      for (const prose of [description, ...Object.values(args ?? {})]) {
+        expect(prose).not.toMatch(/discard/i);
+      }
+    }
+  });
+
+  it('warn on the two imports that bring table groups that an editor released before groups drops them', () => {
+    const older =
+      'An ERD Editor extension or plugin released before table groups drops every group when it saves, so the user should update it.';
+
+    expect(describeTool('erd_import_dbml').endsWith(` ${older}`)).toBe(true);
+    expect(describeTool('erd_import_json')).toContain(` ${older} `);
+    for (const name of ['erd_import_dbml', 'erd_import_json']) {
+      expect(describeTool(name), name).not.toMatch(/\d+\.\d+/);
+    }
+  });
+
+  it('say erd_import_json takes the settings and locks it carries, and how to keep this document’s', () => {
+    const text = describeTool('erd_import_json');
+
+    expect(text).toContain('its settings included');
+    expect(text).toContain(
+      'one without lockSettings turns every lock on and puts the view at the start of the canvas'
+    );
+    expect(text).toContain(
+      "To keep this document's settings, start from the text erd_read json gives."
+    );
+    expect(describeArg('erd_import_json', 'mode')).toContain(
+      'its settings included'
+    );
+  });
+});
+
+describe('the words on a Schema SQL script', () => {
+  const text = describeTool('erd_set_ddl_script');
+
+  it('say where each script goes, that it goes in as is, and how to remove it', () => {
+    expect(text).toContain('before, written ahead of the tables');
+    expect(text).toContain('after, written past the generated DDL');
+    expect(text).toContain(
+      'The text goes as is into the DDL of every database'
+    );
+    expect(text).toContain(
+      'SQL Server output gets GO after a script that does not end with GO'
+    );
+    expect(text).toContain('An empty string removes it.');
+    expect(describeArg('erd_set_ddl_script', 'sql')).toContain(
+      'an empty string removes it'
+    );
+  });
+
+  it('give the longest script a call takes', () => {
+    expect(describeArg('erd_set_ddl_script', 'sql')).toContain(
+      'at most 10,000 characters'
+    );
+    expect(describeArg('erd_set_ddl_script', 'position')).toBe(
+      'before or after the generated tables.'
+    );
+  });
+
+  it('say a call replaces the whole script, so the agent reads the current one first', () => {
+    expect(text).toContain(
+      'or after, written past the generated DDL, such as GRANT or CREATE VIEW. It replaces the whole script, so read the current one first with erd_read format scripts. The text goes'
+    );
+  });
+
+  it('say erd_read sql shows the script where it goes', () => {
+    expect(text).toContain(
+      'An empty string removes it. erd_read sql shows it in place. An ERD Editor'
+    );
+  });
+
+  it('say an editor released before the scripts loses them, so the user updates it, naming no release', () => {
+    expect(text).toContain(
+      'An ERD Editor extension or plugin released before scripts neither shows nor keeps them, so the user should update it.'
+    );
+    expect(text).not.toMatch(/\d+\.\d+/);
+  });
+});
+
+describe('the words on how erd_read writes the DDL', () => {
+  it('say the whole document’s DDL carries its scripts', () => {
+    expect(describeTool('erd_read')).toContain(
+      "The sql format of the whole document includes the document's before and after scripts."
+    );
+  });
+
+  it('name the scripts format, which answers the scripts alone whatever the schema', () => {
+    expect(describeTool('erd_read')).toContain(
+      'as its raw JSON or, with the scripts format, its before and after scripts alone.'
+    );
+    expect(describeArg('erd_read', 'format')).toMatch(
+      /^snapshot: .+ sql: .+ json: .+ scripts: just the document's before and after scripts, as JSON \{ before, after \}, each empty when unset, whatever the size of the schema\.$/
+    );
+  });
+
+  it('name each statements value, where IF NOT EXISTS is written and what recreate does', () => {
+    const text = describeArg('erd_read', 'statements');
+
+    expect(text).toMatch(
+      /^For the sql format: create \(default\), ifNotExists/
+    );
+    expect(text).toContain(
+      'CREATE TABLE IF NOT EXISTS on MySQL, MariaDB, PostgreSQL, SQLite and Databricks and falls back to create elsewhere'
+    );
+    expect(text).toContain('recreate, which drops the tables first');
+    expect(text).toContain('(Snowflake writes CREATE OR REPLACE TABLE)');
+  });
+
+  it('name each header value, what each database short of one writes and when none is written', () => {
+    const text = describeArg('erd_read', 'header');
+
+    expect(text).toMatch(/^For the sql format: none \(default\), use/);
+    expect(text).toContain('createAndUse, which creates it first');
+    expect(text).toContain(
+      'Oracle has use alone, so createAndUse writes use there'
+    );
+    expect(text).toContain(
+      'PostgreSQL has createAndUse alone, so use writes no header there'
+    );
+    expect(text).toContain('SQLite has neither and writes none');
+    expect(text).not.toMatch(/falls back to what/);
+    expect(text).toContain(
+      'No header is written while the database name is empty or not a plain identifier'
+    );
   });
 });

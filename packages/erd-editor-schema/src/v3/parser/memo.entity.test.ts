@@ -19,8 +19,7 @@ describe('createMemo', () => {
       height: 100,
       color: '',
     });
-    expect(memo.meta.createAt).toBe(memo.meta.updateAt);
-    expect(typeof memo.meta.createAt).toBe('number');
+    expect(memo).not.toHaveProperty('meta');
   });
 });
 
@@ -34,22 +33,25 @@ describe('createAndMergeMemoEntities', () => {
     expect(createAndMergeMemoEntities(source as any)).toEqual({});
   });
 
-  it('skips falsy entries', () => {
+  it('skips an entry that is not an object', () => {
     const entities = createAndMergeMemoEntities({
       a: null as any,
       b: undefined,
       c: 0 as any,
+      d: 'hello' as any,
     });
 
     expect(entities).toEqual({});
   });
 
-  it('drops entries without an id', () => {
+  it('keys an entry without an id by its key, and drops one without either', () => {
     const entities = createAndMergeMemoEntities({
       a: { value: 'hello' },
+      '': { value: 'no key' },
     });
 
-    expect(entities).toEqual({});
+    expect(Object.keys(entities)).toEqual(['a']);
+    expect(entities.a).toMatchObject({ id: 'a', value: 'hello' });
   });
 
   it('keys the entity by its own id, not the record key', () => {
@@ -74,7 +76,6 @@ describe('createAndMergeMemoEntities', () => {
           height: 5,
           color: '#fff',
         },
-        meta: { updateAt: 10, createAt: 20 },
       },
     });
 
@@ -82,7 +83,6 @@ describe('createAndMergeMemoEntities', () => {
       id: 'memo1',
       value: 'note',
       ui: { x: 1, y: 2, zIndex: 3, width: 4, height: 5, color: '#fff' },
-      meta: { updateAt: 10, createAt: 20 },
     });
   });
 
@@ -96,7 +96,6 @@ describe('createAndMergeMemoEntities', () => {
           color: 1 as any,
           height: null as any,
         },
-        meta: { updateAt: 'x' as any },
       },
     });
 
@@ -105,7 +104,6 @@ describe('createAndMergeMemoEntities', () => {
     expect(memo.ui.x).toBe(200);
     expect(memo.ui.color).toBe('');
     expect(memo.ui.height).toBe(100);
-    expect(memo.meta.updateAt).toBe(memo.meta.createAt);
   });
 
   it('keeps the ui defaults when ui is missing', () => {

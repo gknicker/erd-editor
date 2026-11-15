@@ -24,8 +24,6 @@ vi.mock('@/utils', async importOriginal => {
 
 const createSettings = (partial: Partial<Settings> = {}): Settings => ({
   ...schemaV3Parser({}).settings,
-  width: 2000,
-  height: 2000,
   originX: 0,
   originY: 0,
   zoomLevel: 1,
@@ -380,6 +378,19 @@ describe('resolvePlacement', () => {
     expect(placement.get('b')?.zIndex).toBe(10);
     expect(placement.get('a')?.zIndex).toBe(11);
     expect(placement.get('c')?.zIndex).toBe(12);
+  });
+
+  it('stacks a copied memo over a copied table of the same z-index, whichever id sorts first', () => {
+    const placement = resolve({
+      entities: [
+        { ...createEntity('z-table', 0, 0, 4), kind: 'table' },
+        { ...createEntity('a-memo', 100, 0, 4), kind: 'memo' },
+      ],
+    });
+
+    expect(placement.get('a-memo')!.zIndex).toBeGreaterThan(
+      placement.get('z-table')!.zIndex
+    );
   });
 
   it('mutates neither the entities it was given nor the document collections', () => {

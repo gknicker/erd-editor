@@ -1,7 +1,6 @@
 import { css } from '@dineug/r-html';
 
 import { TOOLBAR_HEIGHT } from '@/constants/layout';
-import { typography } from '@/styles/typography.styles';
 
 export const root = css`
   display: flex;
@@ -15,7 +14,27 @@ export const root = css`
   background-color: var(--toolbar-background);
 
   & > input {
-    margin-right: 15px;
+    margin-inline-end: 15px;
+  }
+`;
+
+/*
+ * A readonly editor's database name: text where the field stood, as wide and
+ * spaced as it, and the field's placeholder, dimmed, while there is no name.
+ */
+export const databaseName = css`
+  /* the field's font: the control font each engine gives an input, in the reset's family */
+  font: -moz-field;
+  font: -webkit-small-control;
+  font-family: var(--text-font-family);
+  flex-shrink: 0;
+  margin-inline-end: 15px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--active);
+
+  &[data-empty] {
+    color: var(--placeholder);
   }
 `;
 
@@ -47,12 +66,10 @@ export const menu = css`
     cursor: pointer;
     color: var(--active);
   }
-`;
 
-export const tableCount = css`
-  display: flex;
-  align-self: center;
-  margin-left: auto;
-  white-space: nowrap;
-  ${typography.paragraph};
+  &.disabled {
+    cursor: not-allowed;
+    color: var(--foreground);
+    opacity: 0.4;
+  }
 `;

@@ -1,10 +1,16 @@
 import { beforeEach, describe, expect, it } from 'vite-plus/test';
 
-import { createTestAppContext, flush } from '@/__test-utils__/index';
+import {
+  createTestAppContext,
+  flush,
+  pseudoMessages,
+} from '@/__test-utils__/index';
 import { AppContext } from '@/components/appContext';
 import { createShowMenus } from '@/components/erd/erd-context-menu/menus/showMenus';
 import { Show } from '@/constants/schema';
 import { changeShowAction } from '@/engine/modules/settings/atom.actions';
+import { sourceI18n } from '@/i18n/source';
+import { createI18n } from '@/i18n/translate';
 import { bHas } from '@/utils/bit';
 
 let app: AppContext;
@@ -17,25 +23,129 @@ const NAME_TO_SHOW: Array<[string, number]> = [
   ['Table Comment', Show.tableComment],
   ['Column Comment', Show.columnComment],
   ['DataType', Show.columnDataType],
+  ['Domain', Show.columnDomain],
   ['Default', Show.columnDefault],
   ['Not Null', Show.columnNotNull],
   ['Unique', Show.columnUnique],
+  ['Alternate Key', Show.columnAlternateKey],
   ['Auto Increment', Show.columnAutoIncrement],
   ['Relationship', Show.relationship],
 ];
 
+const ALL_MENUS = [
+  ...NAME_TO_SHOW.map(([name]) => name),
+  'Referential Actions',
+  'Table Groups',
+  'Memos',
+];
+const referentialActions = () =>
+  createShowMenus(app, sourceI18n).find(
+    menu => menu.name === 'Referential Actions'
+  );
+const tableGroups = () =>
+  createShowMenus(app, sourceI18n).find(menu => menu.name === 'Table Groups');
+const memos = () =>
+  createShowMenus(app, sourceI18n).find(menu => menu.name === 'Memos');
+
 describe('showMenus', () => {
   it('exposes one menu per view option in declaration order', () => {
-    expect(createShowMenus(app).map(menu => menu.name)).toEqual(
-      NAME_TO_SHOW.map(([name]) => name)
+    expect(createShowMenus(app, sourceI18n).map(menu => menu.name)).toEqual(
+      ALL_MENUS
     );
+  });
+
+  it('names each option in the language it is handed, English where none is', () => {
+    expect(createShowMenus(app).map(menu => menu.name)).toEqual(ALL_MENUS);
+    expect(
+      createShowMenus(app, createI18n('ko-KR', pseudoMessages('ko'))).map(
+        menu => menu.name
+      )
+    ).toEqual(ALL_MENUS.map(name => `ko:${name}`));
+  });
+
+  it('checks Referential Actions while its hide bit is off, which a new document leaves it', () => {
+    expect(
+      bHas(app.store.state.settings.show, Show.hideReferentialAction)
+    ).toBe(false);
+    expect(referentialActions()?.checked).toBe(true);
+  });
+
+  it('sets the hide bit as Referential Actions is turned off, and clears it as it is turned on', async () => {
+    referentialActions()?.onClick();
+    await flush();
+
+    expect(
+      bHas(app.store.state.settings.show, Show.hideReferentialAction)
+    ).toBe(true);
+    expect(referentialActions()?.checked).toBe(false);
+
+    referentialActions()?.onClick();
+    await flush();
+
+    expect(
+      bHas(app.store.state.settings.show, Show.hideReferentialAction)
+    ).toBe(false);
+    expect(referentialActions()?.checked).toBe(true);
+  });
+
+  it('checks Table Groups while its hide bit is off, and flips the bit as it is toggled', async () => {
+    expect(bHas(app.store.state.settings.show, Show.hideTableGroup)).toBe(
+      false
+    );
+    expect(tableGroups()?.checked).toBe(true);
+
+    tableGroups()?.onClick();
+    await flush();
+
+    expect(bHas(app.store.state.settings.show, Show.hideTableGroup)).toBe(true);
+    expect(tableGroups()?.checked).toBe(false);
+    expect(referentialActions()?.checked).toBe(true);
+
+    tableGroups()?.onClick();
+    await flush();
+
+    expect(bHas(app.store.state.settings.show, Show.hideTableGroup)).toBe(
+      false
+    );
+    expect(tableGroups()?.checked).toBe(true);
+  });
+
+  it('checks Memos while its hide bit is off, and flips the bit as it is toggled', async () => {
+    expect(memos()?.checked).toBe(true);
+
+    memos()?.onClick();
+    await flush();
+
+    expect(bHas(app.store.state.settings.show, Show.hideMemo)).toBe(true);
+    expect(memos()?.checked).toBe(false);
+    expect(tableGroups()?.checked).toBe(true);
+
+    memos()?.onClick();
+    await flush();
+
+    expect(bHas(app.store.state.settings.show, Show.hideMemo)).toBe(false);
+    expect(memos()?.checked).toBe(true);
+  });
+
+  it('shows the domain cell under its own bit, which a new document leaves off', async () => {
+    const domain = () =>
+      createShowMenus(app, sourceI18n).find(menu => menu.name === 'Domain');
+    expect(domain()?.checked).toBe(false);
+
+    domain()?.onClick();
+    await flush();
+
+    expect(bHas(app.store.state.settings.show, Show.columnDomain)).toBe(true);
+    expect(domain()?.checked).toBe(true);
   });
 
   it('derives checked from the settings show bitmask', () => {
     const { show } = app.store.state.settings;
 
     for (const [name, bit] of NAME_TO_SHOW) {
-      const menu = createShowMenus(app).find(item => item.name === name);
+      const menu = createShowMenus(app, sourceI18n).find(
+        item => item.name === name
+      );
       expect(menu?.checked).toBe(bHas(show, bit));
     }
   });
@@ -46,7 +156,7 @@ describe('showMenus', () => {
     );
     expect(bHas(app.store.state.settings.show, Show.tableComment)).toBe(true);
 
-    createShowMenus(app)
+    createShowMenus(app, sourceI18n)
       .find(menu => menu.name === 'Table Comment')
       ?.onClick();
     await flush();
@@ -60,7 +170,7 @@ describe('showMenus', () => {
     );
     expect(bHas(app.store.state.settings.show, Show.columnComment)).toBe(false);
 
-    createShowMenus(app)
+    createShowMenus(app, sourceI18n)
       .find(menu => menu.name === 'Column Comment')
       ?.onClick();
     await flush();
@@ -72,7 +182,7 @@ describe('showMenus', () => {
     for (const [name, bit] of NAME_TO_SHOW) {
       const before = bHas(app.store.state.settings.show, bit);
 
-      createShowMenus(app)
+      createShowMenus(app, sourceI18n)
         .find(menu => menu.name === name)
         ?.onClick();
       await flush();
@@ -86,7 +196,7 @@ describe('showMenus', () => {
       changeShowAction({ show: Show.relationship, value: true })
     );
 
-    createShowMenus(app)
+    createShowMenus(app, sourceI18n)
       .find(menu => menu.name === 'Unique')
       ?.onClick();
     await flush();

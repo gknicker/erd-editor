@@ -2,12 +2,19 @@ import { query } from '@dineug/erd-editor-schema';
 import { DOMTemplateLiterals, FC, repeat } from '@dineug/r-html';
 
 import { useAppContext } from '@/components/appContext';
+import { useI18n } from '@/components/localeContext';
 import EditInput from '@/components/primitives/edit-input/EditInput';
 import * as columnStyles from '@/components/table-view/column/Column.styles';
 import ColumnDataType from '@/components/table-view/column/column-data-type/ColumnDataType';
 import ColumnKey from '@/components/table-view/column/column-key/ColumnKey';
 import ColumnNotNull from '@/components/table-view/column/column-not-null/ColumnNotNull';
 import ColumnOption from '@/components/table-view/column/column-option/ColumnOption';
+import {
+  domainCellText,
+  logicalNameCellText,
+  nameCellText,
+  typeCellText,
+} from '@/components/table-view/column/columnViewText';
 import {
   COLUMN_AUTO_INCREMENT_WIDTH,
   COLUMN_UNIQUE_WIDTH,
@@ -17,6 +24,7 @@ import {
   ColumnType,
   Show,
 } from '@/constants/schema';
+import { isBothNameView } from '@/engine/modules/editor/utils/nameView';
 import {
   addIndexColumnAction$,
   removeIndexColumnAction$,
@@ -34,6 +42,13 @@ export type IndexesCheckboxColumnProps = {
   // The panel renders this column before an index is picked; the body already
   // reads it as !index and index?.indexColumnIds ?? [].
   index: Index | null;
+  /**
+   * The columns of a key the columns declare, picked instead of an index: they
+   * show checked, and every box stays disabled, since no index owns them.
+   */
+  keyColumnIds?: string[] | null;
+  /** The editor's readonly mode, which disables every box as a picked key does. */
+  readonly?: boolean;
 };
 
 type ColumnOrderTpl = {
@@ -43,6 +58,7 @@ type ColumnOrderTpl = {
 
 const IndexesCheckboxColumn: FC<IndexesCheckboxColumnProps> = (props, ctx) => {
   const app = useAppContext(ctx);
+  const i18n = useI18n(ctx);
 
   const getColumnOrder = (
     column: Column,
@@ -50,28 +66,65 @@ const IndexesCheckboxColumn: FC<IndexesCheckboxColumnProps> = (props, ctx) => {
   ): ColumnOrderTpl[] => {
     const { store } = app.value;
     const { settings } = store.state;
+    const { t } = i18n.value;
 
     return settings.columnOrder
       .map((columnType: number) => {
         let template: DOMTemplateLiterals | null = null;
 
         switch (columnType) {
-          case ColumnType.columnName:
+          case ColumnType.columnName: {
+            const { value, placeholder } = nameCellText(
+              settings,
+              column,
+              i18n.value
+            );
             template = (
               <div class="column-col">
                 <EditInput
-                  placeholder="column"
+                  placeholder={placeholder}
                   width={columnWidth.name}
-                  value={column.name}
+                  value={value}
                 />
               </div>
             );
+            break;
+          }
+          case ColumnType.columnLogicalName: {
+            if (!isBothNameView(settings)) break;
+            const { value, placeholder } = logicalNameCellText(
+              settings,
+              column,
+              'common.placeholder.column',
+              i18n.value
+            );
+            template = (
+              <div class="column-col">
+                <EditInput
+                  placeholder={placeholder}
+                  width={columnWidth.logicalName}
+                  value={value}
+                />
+              </div>
+            );
+            break;
+          }
+          case ColumnType.columnDomain:
+            template = bHas(settings.show, Show.columnDomain) ? (
+              <div class="column-col">
+                <EditInput
+                  placeholder={t('common.placeholder.domain')}
+                  width={columnWidth.domain}
+                  value={domainCellText(store.state, column)}
+                />
+              </div>
+            ) : null;
             break;
           case ColumnType.columnDefault:
             template = bHas(settings.show, Show.columnDefault) ? (
               <div class="column-col">
                 <EditInput
-                  placeholder="default"
+                  placeholder={t('common.placeholder.default')}
                   width={columnWidth.default}
                   value={column.default}
                 />
@@ -82,7 +135,7 @@ const IndexesCheckboxColumn: FC<IndexesCheckboxColumnProps> = (props, ctx) => {
             template = bHas(settings.show, Show.columnComment) ? (
               <div class="column-col">
                 <EditInput
-                  placeholder="comment"
+                  placeholder={t('common.placeholder.comment')}
                   width={columnWidth.comment}
                   value={column.comment}
                 />
@@ -96,7 +149,7 @@ const IndexesCheckboxColumn: FC<IndexesCheckboxColumnProps> = (props, ctx) => {
                   tableId={column.tableId}
                   columnId={column.id}
                   width={columnWidth.dataType}
-                  value={column.dataType}
+                  value={typeCellText(store.state, column)}
                 />
               </div>
             ) : null;
@@ -115,7 +168,7 @@ const IndexesCheckboxColumn: FC<IndexesCheckboxColumnProps> = (props, ctx) => {
                   checked={bHas(column.options, ColumnOptionType.unique)}
                   width={COLUMN_UNIQUE_WIDTH}
                   text="UQ"
-                  title="Unique"
+                  title={t('common.column.unique')}
                 />
               </div>
             ) : null;
@@ -127,7 +180,7 @@ const IndexesCheckboxColumn: FC<IndexesCheckboxColumnProps> = (props, ctx) => {
                   checked={bHas(column.options, ColumnOptionType.autoIncrement)}
                   width={COLUMN_AUTO_INCREMENT_WIDTH}
                   text="AI"
-                  title="Auto Increment"
+                  title={t('common.column.autoIncrement')}
                 />
               </div>
             ) : null;
@@ -151,12 +204,13 @@ const IndexesCheckboxColumn: FC<IndexesCheckboxColumnProps> = (props, ctx) => {
       ? addIndexColumnAction$
       : removeIndexColumnAction$;
 
-    if (!props.index) return;
+    if (!props.index || props.readonly) return;
     store.dispatch(attachChangeOnlyTag$(action$(props.index.id, column.id)));
   };
 
   return () => {
     const { tableId, index } = props;
+    const idle = !index || Boolean(props.readonly);
     const { store } = app.value;
     const { collections } = store.state;
 
@@ -171,23 +225,28 @@ const IndexesCheckboxColumn: FC<IndexesCheckboxColumnProps> = (props, ctx) => {
 
     const tableWidths = calcTableWidths(table, store.state);
 
-    const checkedColumnIds = query(collections)
-      .collection('indexColumnEntities')
-      .selectByIds(index?.indexColumnIds ?? [])
-      .map(indexColumn => indexColumn.columnId);
+    const checkedColumnIds =
+      props.keyColumnIds ??
+      query(collections)
+        .collection('indexColumnEntities')
+        .selectByIds(index?.indexColumnIds ?? [])
+        .map(indexColumn => indexColumn.columnId);
     const hasChecked = arrayHas(checkedColumnIds);
 
     return (
-      <div class={['scrollbar', styles.root]}>
+      <div class={styles.root} bool:data-idle={idle}>
         {repeat(
           columns,
           column => column.id,
           column => (
-            <div class={['column-row', columnStyles.root]}>
+            <div
+              class={['column-row', columnStyles.root]}
+              bool:data-selected={hasChecked(column.id)}
+            >
               <div class="column-col">
                 <input
                   type="checkbox"
-                  bool:disabled={!index}
+                  bool:disabled={idle}
                   prop:checked={hasChecked(column.id)}
                   on:change={event => handleChangeIndexColumn(event, column)}
                 />

@@ -18,15 +18,19 @@ describe('createColumn', () => {
       dataType: '',
       default: '',
       options: 0,
+      logicalName: '',
+      domainId: '',
       ui: {
         keys: 0,
         widthName: 60,
+        widthLogicalName: 60,
         widthComment: 60,
         widthDataType: 60,
+        widthDomain: 60,
         widthDefault: 60,
       },
     });
-    expect(column.meta.createAt).toBe(column.meta.updateAt);
+    expect(column).not.toHaveProperty('meta');
   });
 });
 
@@ -40,13 +44,16 @@ describe('createAndMergeTableColumnEntities', () => {
     expect(createAndMergeTableColumnEntities(source as any)).toEqual({});
   });
 
-  it('skips falsy entries and entries without an id', () => {
-    expect(
-      createAndMergeTableColumnEntities({
-        a: undefined,
-        b: { name: 'no-id' },
-      })
-    ).toEqual({});
+  it('skips an entry that is not an object, and keys one without an id by its key', () => {
+    const entities = createAndMergeTableColumnEntities({
+      a: undefined,
+      b: { name: 'no-id' },
+      c: ['id'] as any,
+      '': { name: 'no key' },
+    });
+
+    expect(Object.keys(entities)).toEqual(['b']);
+    expect(entities.b).toMatchObject({ id: 'b', name: 'no-id' });
   });
 
   it('merges every field', () => {
@@ -58,15 +65,18 @@ describe('createAndMergeTableColumnEntities', () => {
         comment: 'pk',
         dataType: 'int',
         default: '0',
-        options: ColumnOption.primaryKey | ColumnOption.notNull,
+        options: ColumnOption.primaryKey | ColumnOption.nameDerived,
+        logicalName: 'Member ID',
+        domainId: 'd1',
         ui: {
           keys: ColumnUIKey.primaryKey,
           widthName: 70,
+          widthLogicalName: 74,
           widthComment: 71,
           widthDataType: 72,
+          widthDomain: 75,
           widthDefault: 73,
         },
-        meta: { updateAt: 3, createAt: 4 },
       },
     });
 
@@ -77,15 +87,18 @@ describe('createAndMergeTableColumnEntities', () => {
       comment: 'pk',
       dataType: 'int',
       default: '0',
-      options: ColumnOption.primaryKey | ColumnOption.notNull,
+      options: ColumnOption.primaryKey | ColumnOption.nameDerived,
+      logicalName: 'Member ID',
+      domainId: 'd1',
       ui: {
         keys: ColumnUIKey.primaryKey,
         widthName: 70,
+        widthLogicalName: 74,
         widthComment: 71,
         widthDataType: 72,
+        widthDomain: 75,
         widthDefault: 73,
       },
-      meta: { updateAt: 3, createAt: 4 },
     });
   });
 
@@ -96,6 +109,8 @@ describe('createAndMergeTableColumnEntities', () => {
         tableId: 1 as any,
         dataType: null as any,
         options: '2' as any,
+        logicalName: 3 as any,
+        domainId: false as any,
         ui: { keys: '1' as any, widthDefault: 99 },
       },
     });
@@ -103,6 +118,8 @@ describe('createAndMergeTableColumnEntities', () => {
     const column = entities.c1;
     expect(column.tableId).toBe('');
     expect(column.dataType).toBe('');
+    expect(column.logicalName).toBe('');
+    expect(column.domainId).toBe('');
     expect(column.options).toBe(0);
     expect(column.ui.keys).toBe(0);
     expect(column.ui.widthDefault).toBe(99);
@@ -114,8 +131,10 @@ describe('createAndMergeTableColumnEntities', () => {
     expect(entities.c1.ui).toEqual({
       keys: 0,
       widthName: 60,
+      widthLogicalName: 60,
       widthComment: 60,
       widthDataType: 60,
+      widthDomain: 60,
       widthDefault: 60,
     });
   });

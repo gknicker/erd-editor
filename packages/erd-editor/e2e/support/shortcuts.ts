@@ -1,19 +1,22 @@
 /**
- * The editor binds shortcuts through tinykeys, which matches on
- * KeyboardEvent.code and resolves the modifier by platform. Playwright follows
- * the same rule, so these stay correct on a workstation and on a CI runner.
+ * The editor's key bindings match on KeyboardEvent.code and resolve $mod by
+ * platform. Playwright's ControlOrMeta follows the same rule, so these stay
+ * correct on a workstation and on a CI runner.
  */
 export const Shortcut = {
   edit: 'Enter',
   stop: 'Escape',
   search: 'ControlOrMeta+KeyK',
+  findReplace: 'ControlOrMeta+KeyF',
   undo: 'ControlOrMeta+KeyZ',
   redo: 'ControlOrMeta+Shift+KeyZ',
   addTable: 'Alt+KeyN',
   addColumn: 'Alt+Enter',
   addMemo: 'Alt+KeyM',
+  addTableGroup: 'Alt+KeyG',
   removeTable: 'ControlOrMeta+Backspace',
   removeColumn: 'Alt+Backspace',
+  removeSelection: 'Delete',
   primaryKey: 'Alt+KeyK',
   selectAllTable: 'ControlOrMeta+Alt+KeyA',
   /** The second binding of the same command, and the one a caret owns first. */

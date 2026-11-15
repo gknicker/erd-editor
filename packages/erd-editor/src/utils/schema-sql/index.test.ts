@@ -102,11 +102,24 @@ describe('schema-sql/index', () => {
       expect(createSchemaSQL(state)).toContain('GENERATED ALWAYS AS IDENTITY');
     });
 
-    it('generates MariaDB output identical to MySQL output', () => {
+    it('generates MariaDB output identical to MySQL output but under ifNotExists', () => {
       const { state } = createFixture();
 
-      expect(createSchemaSQL(state, Database.MariaDB)).toBe(
-        createSchemaSQL(state, Database.MySQL)
+      (['create', 'recreate'] as const).forEach(statements => {
+        expect(
+          createSchemaSQL(state, Database.MariaDB, undefined, { statements })
+        ).toBe(
+          createSchemaSQL(state, Database.MySQL, undefined, { statements })
+        );
+      });
+      expect(
+        createSchemaSQL(state, Database.MariaDB, undefined, {
+          statements: 'ifNotExists',
+        })
+      ).not.toBe(
+        createSchemaSQL(state, Database.MySQL, undefined, {
+          statements: 'ifNotExists',
+        })
       );
     });
 
@@ -154,6 +167,119 @@ describe('schema-sql/index', () => {
 
       expect(createSchemaSQL(state, 0)).toContain('AUTOINCREMENT');
     });
+
+    it.each([
+      ['MySQL', Database.MySQL],
+      ['MariaDB', Database.MariaDB],
+      ['PostgreSQL', Database.PostgreSQL],
+      ['MSSQL', Database.MSSQL],
+      ['Oracle', Database.Oracle],
+      ['Snowflake', Database.Snowflake],
+      ['Databricks', Database.Databricks],
+      ['SQLite', Database.SQLite],
+    ])(
+      'writes only the tables named and their indexes in %s',
+      (_, database) => {
+        const { state } = createFixture();
+
+        const users = createSchemaSQL(state, database, ['tbl-users']);
+        const posts = createSchemaSQL(state, database, ['tbl-posts']);
+
+        expect(users).toMatch(/CREATE TABLE \W?users/);
+        expect(users).not.toMatch(/CREATE TABLE \W?posts/);
+        expect(users).not.toContain('IDX_posts');
+        expect(posts).not.toMatch(/CREATE TABLE \W?users/);
+        expect(posts).toContain('IDX_posts');
+      }
+    );
+
+    /**
+     * The fixture with what a session keeps after removals: a posts column
+     * taken out of its table that the posts index still names, and a table
+     * taken out of the document with an index the document still lists.
+     */
+    function withRemovals(name: string) {
+      const fixture = createFixture();
+      const { collections, doc } = fixture.state;
+      collections.tableColumnEntities['col-gone'] = createColumn({
+        id: 'col-gone',
+        tableId: 'tbl-posts',
+        name: 'gone_column',
+        dataType: 'INT',
+      });
+      collections.indexColumnEntities['idx-col-gone'] = createIndexColumn({
+        id: 'idx-col-gone',
+        indexId: 'idx-1',
+        columnId: 'col-gone',
+      });
+      collections.indexEntities['idx-1'].indexColumnIds.push('idx-col-gone');
+      collections.tableEntities['tbl-removed'] = createTable({
+        id: 'tbl-removed',
+        name: 'removed_table',
+        columnIds: ['col-gone'],
+      });
+      collections.indexEntities['idx-removed'] = createIndex({
+        id: 'idx-removed',
+        name,
+        tableId: 'tbl-removed',
+        indexColumnIds: ['idx-col-gone'],
+      });
+      doc.indexIds.push('idx-removed');
+      return fixture;
+    }
+
+    it.each([
+      ['MySQL', Database.MySQL],
+      ['MariaDB', Database.MariaDB],
+      ['PostgreSQL', Database.PostgreSQL],
+      ['MSSQL', Database.MSSQL],
+      ['Oracle', Database.Oracle],
+      ['Snowflake', Database.Snowflake],
+      ['Databricks', Database.Databricks],
+      ['SQLite', Database.SQLite],
+    ])(
+      'writes in %s the indexes a saved file keeps: no removed column, no index of a removed table',
+      (_, database) => {
+        const { state } = withRemovals('IDX_removed');
+        const sql = createSchemaSQL(state, database);
+
+        expect(sql).toBe(createSchemaSQL(createFixture().state, database));
+        expect(sql).toContain('IDX_posts');
+        expect(sql).not.toContain('gone_column');
+        expect(sql).not.toContain('removed_table');
+        expect(sql).not.toContain('IDX_removed');
+      }
+    );
+
+    it.each([
+      ['MySQL', Database.MySQL],
+      ['MariaDB', Database.MariaDB],
+      ['PostgreSQL', Database.PostgreSQL],
+      ['MSSQL', Database.MSSQL],
+      ['Oracle', Database.Oracle],
+      ['Snowflake', Database.Snowflake],
+      ['Databricks', Database.Databricks],
+      ['SQLite', Database.SQLite],
+    ])(
+      'writes in %s no index whose every column its table took out',
+      (_, database) => {
+        const { state } = withRemovals('IDX_removed');
+        const { collections, doc } = state;
+        collections.indexEntities['idx-only-gone'] = createIndex({
+          id: 'idx-only-gone',
+          name: 'IDX_only_gone',
+          tableId: 'tbl-posts',
+          indexColumnIds: ['idx-col-gone'],
+        });
+        doc.indexIds.push('idx-only-gone');
+
+        const sql = createSchemaSQL(state, database);
+
+        expect(sql).toContain('IDX_posts');
+        expect(sql).not.toContain('IDX_only_gone');
+        expect(sql).not.toContain('gone_column');
+      }
+    );
 
     it('returns an empty string when settings.database is unsupported', () => {
       const { state } = createFixture();
@@ -252,6 +378,63 @@ describe('schema-sql/index', () => {
         'CREATE INDEX IDX_posts'
       );
     });
+
+    it('writes the constraint of a unique column after the table', () => {
+      const { state, posts } = createFixture();
+      state.collections.tableColumnEntities['col-title'].options |=
+        ColumnOption.unique;
+
+      expect(createSchemaSQLTable(state, posts).split('\n')).toEqual([
+        '',
+        'CREATE TABLE posts',
+        '(',
+        '  title   VARCHAR(20) NOT NULL,',
+        '  user_id INT         NULL    ',
+        ');',
+        '',
+        'ALTER TABLE posts',
+        '  ADD CONSTRAINT UQ_posts_title UNIQUE (title);',
+        '',
+        'CREATE INDEX IDX_posts',
+        '  ON posts (title ASC);',
+        '',
+      ]);
+    });
+
+    it.each([
+      Database.MySQL,
+      Database.MariaDB,
+      Database.MSSQL,
+      Database.Oracle,
+      Database.Databricks,
+      Database.PostgreSQL,
+      Database.SQLite,
+      Database.Snowflake,
+    ])(
+      'carries the uniqueness the whole %s export writes for the table',
+      database => {
+        const { state, posts } = createFixture();
+        state.collections.tableColumnEntities['col-title'].options |=
+          ColumnOption.unique;
+        state.settings.database = database;
+        // The lines that declare title unique, whether a statement of their
+        // own, a comment or an inline UNIQUE on the column.
+        const uniqueLines = (sql: string) => {
+          const lines = sql.split('\n');
+          return lines
+            .map((line, index) =>
+              /UQ_posts_title|UNIQUE constraints|^ {2}title .*UNIQUE/.test(line)
+                ? [lines[index - 1], line]
+                : null
+            )
+            .filter(pair => pair !== null);
+        };
+        const table = uniqueLines(createSchemaSQLTable(state, posts));
+
+        expect(table).toHaveLength(1);
+        expect(table).toEqual(uniqueLines(createSchemaSQL(state, database)));
+      }
+    );
 
     it('returns only the leading empty buffer entry for an unsupported database', () => {
       const { state, posts } = createFixture();

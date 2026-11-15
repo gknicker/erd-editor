@@ -1,4 +1,5 @@
 import { Doc } from '@/v3/schema/doc';
+import { Domain } from '@/v3/schema/domain.entity';
 import { Index } from '@/v3/schema/index.entity';
 import {
   IndexColumn,
@@ -9,6 +10,8 @@ import { Memo } from '@/v3/schema/memo.entity';
 import {
   Direction,
   DirectionList,
+  ReferentialAction,
+  ReferentialActionList,
   Relationship,
   RelationshipType,
   RelationshipTypeList,
@@ -28,11 +31,18 @@ import {
   ColumnTypeList,
   Database,
   DatabaseList,
+  DDLScriptPosition,
+  DDLScriptPositionList,
+  InvertedLockSettings,
   Language,
   LanguageList,
+  LockSettingFields,
+  LockSettingType,
+  LockSettingTypeList,
   NameCase,
   NameCaseList,
-  SaveSettingType,
+  NameViewMode,
+  NameViewModeList,
   Settings,
   Show,
 } from '@/v3/schema/settings';
@@ -42,6 +52,9 @@ import {
   ColumnOption,
   ColumnUIKey,
 } from '@/v3/schema/tableColumn.entity';
+import { TableGroup } from '@/v3/schema/tableGroup.entity';
+import { Term } from '@/v3/schema/term.entity';
+import { Word } from '@/v3/schema/word.entity';
 
 export interface ERDEditorSchemaV3 {
   $schema: 'https://raw.githubusercontent.com/dineug/erd-editor/main/json-schema/schema.json';
@@ -55,6 +68,10 @@ export interface ERDEditorSchemaV3 {
     indexEntities: Record<string, Index>;
     indexColumnEntities: Record<string, IndexColumn>;
     memoEntities: Record<string, Memo>;
+    tableGroupEntities: Record<string, TableGroup>;
+    wordEntities: Record<string, Word>;
+    termEntities: Record<string, Term>;
+    domainEntities: Record<string, Domain>;
   };
 }
 
@@ -76,15 +93,24 @@ export const SchemaV3Constants = {
   RelationshipTypeList,
   StartRelationshipType,
   StartRelationshipTypeList,
+  ReferentialAction,
+  ReferentialActionList,
   Direction,
   DirectionList,
   ColumnOption,
   ColumnUIKey,
   OrderType,
   OrderTypeList,
-  SaveSettingType,
+  LockSettingType,
+  LockSettingTypeList,
+  LockSettingFields,
   CANVAS_SIZE_MAX,
   CANVAS_SIZE_MIN,
   CANVAS_ZOOM_MAX,
   CANVAS_ZOOM_MIN,
+  DDLScriptPosition,
+  DDLScriptPositionList,
+  NameViewMode,
+  NameViewModeList,
+  InvertedLockSettings,
 } as const;

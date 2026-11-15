@@ -4,12 +4,14 @@ import {
   hostExportFileCommand,
   hostImportFileCommand,
   hostInitialCommand,
+  hostSaveLocaleCommand,
   hostSaveReplicationCommand,
   hostSaveThemeCommand,
   hostSaveValueCommand,
   webviewImportFileCommand,
   webviewInitialValueCommand,
   webviewReplicationCommand,
+  webviewUpdateLocaleCommand,
   webviewUpdateReadonlyCommand,
   webviewUpdateThemeCommand,
 } from '@dineug/erd-editor-webview-bridge';
@@ -28,12 +30,18 @@ const mocks = vi.hoisted(() => ({
   setExportFileCallback: vi.fn(),
   setImportFileCallback: vi.fn(),
   createReplicationStoreWorker: vi.fn(),
+  definingEntryLoads: 0,
 }));
 
 vi.mock('@dineug/erd-editor', () => ({
   setExportFileCallback: mocks.setExportFileCallback,
   setImportFileCallback: mocks.setImportFileCallback,
 }));
+
+vi.mock('@dineug/erd-editor/erd-editor.js', () => {
+  mocks.definingEntryLoads += 1;
+  return {};
+});
 
 vi.mock('@dineug/erd-editor-replication-store-worker', () => ({
   createReplicationStoreWorker: mocks.createReplicationStoreWorker,
@@ -55,13 +63,19 @@ function fakeEditor() {
     value: '',
     readonly: false,
     enableThemeBuilder: false,
+    enableLocalePicker: false,
+    enableWelcomeScreen: false,
     setInitialValue: vi.fn(),
     setDiffValue: vi.fn(),
     setSchemaSQL: vi.fn(),
     setSchemaGraphQL: vi.fn(),
     setSchemaDBML: vi.fn(),
     setSchemaAML: vi.fn(),
+    setSchemaJSON: vi.fn(),
     setPresetTheme: vi.fn(),
+    setSystemAppearance: vi.fn(),
+    setLocale: vi.fn(),
+    setSystemLocale: vi.fn(),
     getSharedStore: () => sharedStore,
   });
 
@@ -123,6 +137,10 @@ afterEach(() => {
 });
 
 describe('mountWebview', () => {
+  it('loads the package entry that defines <erd-editor>', () => {
+    expect(mocks.definingEntryLoads).toBe(1);
+  });
+
   it('announces itself to the host and names the worker the host chose', () => {
     mount();
 
@@ -150,6 +168,29 @@ describe('mountWebview', () => {
     );
     expect(document.body.contains(editor.element)).toBe(true);
     expect(onMounted).toHaveBeenCalledTimes(1);
+  });
+
+  it('turns the language picker and the welcome screen on before the editor joins the page', () => {
+    mount();
+    const appended = vi.spyOn(document.body, 'appendChild');
+    let propsAtAppend: unknown;
+    appended.mockImplementation(node => {
+      propsAtAppend = {
+        enableLocalePicker: editor.element.enableLocalePicker,
+        enableWelcomeScreen: editor.element.enableWelcomeScreen,
+      };
+      return node;
+    });
+
+    fromHost(
+      Bridge.executeCommand(webviewInitialValueCommand, { value: '{}' })
+    );
+
+    expect(appended).toHaveBeenCalledWith(editor.element);
+    expect(propsAtAppend).toEqual({
+      enableLocalePicker: true,
+      enableWelcomeScreen: true,
+    });
   });
 
   it('sends what the editor changes to the replica and to the host', () => {
@@ -181,7 +222,7 @@ describe('mountWebview', () => {
     );
   });
 
-  it('routes every import type the bridge names to the editor method for it', () => {
+  it('routes every import type the bridge names to the editor method for it, placing the schemas', () => {
     mount();
     const send = (type: string, op: string, value: string) =>
       fromHost(
@@ -201,35 +242,139 @@ describe('mountWebview', () => {
 
     expect(editor.element.value).toBe('{"a":1}');
     expect(editor.element.setDiffValue).toHaveBeenCalledWith('{"b":2}');
+    const placed = { placement: 'auto' };
     expect(editor.element.setSchemaSQL).toHaveBeenCalledWith(
-      'CREATE TABLE t ();'
+      'CREATE TABLE t ();',
+      placed
     );
     expect(editor.element.setSchemaGraphQL).toHaveBeenCalledWith(
-      'type T { id: ID }'
+      'type T { id: ID }',
+      placed
     );
-    expect(editor.element.setSchemaDBML).toHaveBeenCalledWith('Table t {}');
-    expect(editor.element.setSchemaAML).toHaveBeenCalledWith('t\n  id uuid pk');
+    expect(editor.element.setSchemaDBML).toHaveBeenCalledWith(
+      'Table t {}',
+      placed
+    );
+    expect(editor.element.setSchemaAML).toHaveBeenCalledWith(
+      't\n  id uuid pk',
+      placed
+    );
   });
 
-  it('resolves an auto appearance through the host and refreshes only while it stays auto', () => {
+  it('hands an append to every setter with its mode, placing the schemas', () => {
+    mount();
+    const send = (type: string, value: string, mode?: string) =>
+      fromHost(
+        Bridge.executeCommand(webviewImportFileCommand, {
+          type,
+          op: 'set',
+          value,
+          mode,
+        } as never)
+      );
+
+    send('json', '{"a":1}', 'append');
+    send('sql', 'CREATE TABLE t ();', 'append');
+    send('graphql', 'type T { id: ID }', 'append');
+    send('dbml', 'Table t {}', 'append');
+    send('aml', 't\n  id uuid pk', 'append');
+    send('sql', 'CREATE TABLE r ();', 'replace');
+
+    const added = { placement: 'auto', mode: 'append' };
+    expect(editor.element.value).toBe('');
+    expect(editor.element.setSchemaJSON).toHaveBeenCalledExactlyOnceWith(
+      '{"a":1}',
+      { mode: 'append' }
+    );
+    expect(editor.element.setSchemaSQL.mock.calls).toEqual([
+      ['CREATE TABLE t ();', added],
+      ['CREATE TABLE r ();', { placement: 'auto' }],
+    ]);
+    expect(editor.element.setSchemaGraphQL).toHaveBeenCalledWith(
+      'type T { id: ID }',
+      added
+    );
+    expect(editor.element.setSchemaDBML).toHaveBeenCalledWith(
+      'Table t {}',
+      added
+    );
+    expect(editor.element.setSchemaAML).toHaveBeenCalledWith(
+      't\n  id uuid pk',
+      added
+    );
+  });
+
+  it('asks the host for a file with the mode the editor names', () => {
+    mount({ importFile: true });
+    const [callback] = mocks.setImportFileCallback.mock.calls[0];
+
+    callback({
+      type: 'sql',
+      op: 'set',
+      accept: '.sql',
+      mode: 'append',
+    });
+
+    expect(dispatch).toHaveBeenCalledWith(
+      Bridge.executeCommand(hostImportFileCommand, {
+        type: 'sql',
+        op: 'set',
+        accept: '.sql',
+        mode: 'append',
+      })
+    );
+  });
+
+  it('tells the editor what system shows as it mounts', () => {
+    mount({ resolveAppearance: () => 'light' });
+
+    expect(editor.element.setSystemAppearance).toHaveBeenCalledWith('light');
+  });
+
+  it('hands auto to the editor as system, shown as the host resolves it', () => {
     const resolveAppearance = vi.fn(() => 'light' as const);
-    const client = mount({ resolveAppearance });
+    mount({ resolveAppearance });
 
     fromHost(
       Bridge.executeCommand(webviewUpdateThemeCommand, { appearance: 'auto' })
     );
-    client.refreshAppearance();
-    fromHost(
-      Bridge.executeCommand(webviewUpdateThemeCommand, { appearance: 'dark' })
+
+    expect(editor.element.setPresetTheme).toHaveBeenLastCalledWith({
+      appearance: 'system',
+    });
+    expect(editor.element.setSystemAppearance).toHaveBeenLastCalledWith(
+      'light'
     );
-    client.refreshAppearance();
+  });
+
+  it('passes a light or dark appearance through as it is', () => {
+    mount();
+
+    fromHost(
+      Bridge.executeCommand(webviewUpdateThemeCommand, { appearance: 'light' })
+    );
+    fromHost(
+      Bridge.executeCommand(webviewUpdateThemeCommand, { accentColor: 'jade' })
+    );
 
     expect(editor.element.setPresetTheme.mock.calls).toEqual([
       [{ appearance: 'light' }],
-      [{ appearance: 'light' }],
-      [{ appearance: 'dark' }],
+      [{ accentColor: 'jade', appearance: undefined }],
     ]);
-    expect(resolveAppearance).toHaveBeenCalledTimes(2);
+  });
+
+  it('refreshes what system shows whichever appearance is picked', () => {
+    const resolveAppearance = vi.fn(() => 'light' as const);
+    const client = mount({ resolveAppearance });
+    fromHost(
+      Bridge.executeCommand(webviewUpdateThemeCommand, { appearance: 'dark' })
+    );
+
+    resolveAppearance.mockReturnValue('dark' as never);
+    client.refreshAppearance();
+
+    expect(editor.element.setSystemAppearance).toHaveBeenLastCalledWith('dark');
+    expect(editor.element.setPresetTheme).toHaveBeenCalledTimes(1);
   });
 
   it('means dark by auto where the host does not say', () => {
@@ -242,35 +387,169 @@ describe('mountWebview', () => {
       })
     );
 
+    expect(editor.element.setSystemAppearance).toHaveBeenLastCalledWith('dark');
     expect(editor.element.setPresetTheme).toHaveBeenCalledWith({
-      appearance: 'dark',
+      appearance: 'system',
       grayColor: 'slate',
     });
   });
 
-  it('saves a theme the editor changed and follows its appearance from then on', () => {
-    const resolveAppearance = vi.fn(() => 'light' as const);
+  it('takes what auto shows from a theme update that names it', () => {
+    const resolveAppearance = vi.fn(() => 'dark' as const);
+    mount({ resolveAppearance });
+    resolveAppearance.mockClear();
+
+    fromHost(
+      Bridge.executeCommand(webviewUpdateThemeCommand, {
+        appearance: 'auto',
+        systemAppearance: 'light',
+      })
+    );
+
+    expect(resolveAppearance).not.toHaveBeenCalled();
+    expect(editor.element.setSystemAppearance).toHaveBeenLastCalledWith(
+      'light'
+    );
+    expect(editor.element.setPresetTheme.mock.calls[0][0]).toEqual({
+      appearance: 'system',
+    });
+  });
+
+  it('keeps what a theme update named for auto through a refresh', () => {
+    const resolveAppearance = vi.fn(() => 'dark' as const);
     const client = mount({ resolveAppearance });
+    fromHost(
+      Bridge.executeCommand(webviewUpdateThemeCommand, {
+        appearance: 'auto',
+        systemAppearance: 'light',
+      })
+    );
+
+    client.refreshAppearance();
+    fromHost(
+      Bridge.executeCommand(webviewUpdateThemeCommand, { accentColor: 'jade' })
+    );
+
+    expect(editor.element.setSystemAppearance.mock.calls.slice(1)).toEqual([
+      ['light'],
+      ['light'],
+      ['light'],
+    ]);
+  });
+
+  it('saves a system pick of the theme builder as auto', () => {
+    mount();
+    fromHost(
+      Bridge.executeCommand(webviewInitialValueCommand, { value: '{}' })
+    );
+
+    editor.element.dispatchEvent(
+      new CustomEvent('changePresetTheme', {
+        detail: {
+          appearance: 'system',
+          grayColor: 'gray',
+          accentColor: 'blue',
+        },
+      })
+    );
+
+    expect(dispatch).toHaveBeenCalledWith(
+      Bridge.executeCommand(hostSaveThemeCommand, {
+        appearance: 'auto',
+        grayColor: 'gray',
+        accentColor: 'blue',
+      })
+    );
+  });
+
+  it('saves a light or dark pick of the theme builder as it is', () => {
+    mount();
     fromHost(
       Bridge.executeCommand(webviewInitialValueCommand, { value: '{}' })
     );
     const detail = {
-      appearance: 'auto',
+      appearance: 'light',
       grayColor: 'gray',
       accentColor: 'blue',
-    };
+    } as const;
 
     editor.element.dispatchEvent(
       new CustomEvent('changePresetTheme', { detail })
     );
-    client.refreshAppearance();
 
     expect(dispatch).toHaveBeenCalledWith(
-      Bridge.executeCommand(hostSaveThemeCommand, detail as never)
+      Bridge.executeCommand(hostSaveThemeCommand, detail)
     );
-    expect(editor.element.setPresetTheme).toHaveBeenCalledWith({
-      appearance: 'light',
-    });
+  });
+
+  it('hands auto to the editor as system, after what system means', () => {
+    mount();
+
+    fromHost(
+      Bridge.executeCommand(webviewUpdateLocaleCommand, {
+        locale: 'auto',
+        systemLocale: 'ko',
+      })
+    );
+
+    expect(editor.element.setSystemLocale).toHaveBeenCalledExactlyOnceWith(
+      'ko'
+    );
+    expect(editor.element.setLocale).toHaveBeenCalledExactlyOnceWith('system');
+    expect(
+      editor.element.setSystemLocale.mock.invocationCallOrder[0]
+    ).toBeLessThan(editor.element.setLocale.mock.invocationCallOrder[0]);
+  });
+
+  it('passes a named locale through and leaves system alone when the host names none', () => {
+    mount();
+
+    fromHost(
+      Bridge.executeCommand(webviewUpdateLocaleCommand, { locale: 'ja-JP' })
+    );
+
+    expect(editor.element.setLocale).toHaveBeenCalledExactlyOnceWith('ja-JP');
+    expect(editor.element.setSystemLocale).not.toHaveBeenCalled();
+  });
+
+  it('saves a system pick of the language as auto and a code as it is', () => {
+    mount();
+    fromHost(
+      Bridge.executeCommand(webviewInitialValueCommand, { value: '{}' })
+    );
+    const pick = (locale: string) =>
+      editor.element.dispatchEvent(
+        new CustomEvent('changeLocale', { detail: { locale } })
+      );
+
+    pick('system');
+    pick('he-IL');
+
+    expect(dispatch).toHaveBeenCalledWith(
+      Bridge.executeCommand(hostSaveLocaleCommand, { locale: 'auto' })
+    );
+    expect(dispatch).toHaveBeenLastCalledWith(
+      Bridge.executeCommand(hostSaveLocaleCommand, { locale: 'he-IL' })
+    );
+  });
+
+  it('saves no language pick once disposed', () => {
+    const client = mount();
+    fromHost(
+      Bridge.executeCommand(webviewInitialValueCommand, { value: '{}' })
+    );
+    client.dispose();
+    dispatch.mockClear();
+
+    editor.element.dispatchEvent(
+      new CustomEvent('changeLocale', { detail: { locale: 'ko-KR' } })
+    );
+    fromHost(
+      Bridge.executeCommand(webviewUpdateLocaleCommand, { locale: 'ko-KR' })
+    );
+
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(editor.element.setLocale).not.toHaveBeenCalled();
   });
 
   it('toggles readonly', () => {
@@ -281,13 +560,23 @@ describe('mountWebview', () => {
     expect(editor.element.readonly).toBe(true);
   });
 
-  it('relays the value the replica saved to the host', () => {
+  it('relays what the replica saved to the host as it came, runtime value included, whether it changed or not and while readonly', () => {
     mount();
-    const saved = Bridge.executeCommand(hostSaveValueCommand, { value: '{}' });
 
-    worker.listeners[0](new MessageEvent('message', { data: saved }));
+    for (const readonly of [false, true]) {
+      fromHost(Bridge.executeCommand(webviewUpdateReadonlyCommand, readonly));
 
-    expect(dispatch).toHaveBeenCalledWith(saved);
+      for (const changed of [true, false]) {
+        const saved = Bridge.executeCommand(hostSaveValueCommand, {
+          value: '{"doc":"saved"}',
+          changed,
+          runtimeValue: '{"doc":"held"}',
+        });
+        worker.listeners[0](new MessageEvent('message', { data: saved }));
+
+        expect(dispatch).toHaveBeenLastCalledWith(saved);
+      }
+    }
   });
 
   it('hands file dialogs to the host only when asked', () => {

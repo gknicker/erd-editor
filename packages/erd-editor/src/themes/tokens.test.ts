@@ -4,8 +4,8 @@ import { ThemeConfig } from '@/themes/radix-ui-theme.config';
 import { type Theme, ThemeTokens, themeToTokensString } from '@/themes/tokens';
 
 describe('ThemeTokens', () => {
-  it('lists 72 tokens with no duplicates', () => {
-    expect(ThemeTokens).toHaveLength(72);
+  it('lists 98 tokens with no duplicates', () => {
+    expect(ThemeTokens).toHaveLength(98);
     expect(new Set(ThemeTokens).size).toBe(ThemeTokens.length);
   });
 
@@ -44,14 +44,20 @@ describe('ThemeTokens', () => {
     ]);
   });
 
-  it('ends with the diff tokens', () => {
-    expect(ThemeTokens.slice(-6)).toEqual([
-      'diffInsertBackground',
-      'diffDeleteBackground',
-      'diffCrossBackground',
+  it('ends with the dictionary tokens, then the diff tokens', () => {
+    expect(ThemeTokens.slice(-12)).toEqual([
+      'dictionaryErrorForeground',
+      'dictionaryErrorBackground',
+      'dictionaryWarningForeground',
+      'dictionaryWarningBackground',
+      'dictionaryBackground',
+      'dictionaryHeaderBackground',
+      'dictionaryGridLine',
+      'dictionaryHeaderSelect',
       'diffInsertForeground',
       'diffDeleteForeground',
-      'diffCrossForeground',
+      'diffModifyForeground',
+      'diffRenameForeground',
     ]);
   });
 

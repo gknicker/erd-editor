@@ -1,0 +1,901 @@
+import { AnyAction } from '@dineug/r-html';
+import { disassembleToGroups } from 'es-hangul';
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  onTestFinished,
+  vi,
+} from 'vite-plus/test';
+
+import { seedFindDocument } from '@/__test-utils__/findSeed';
+import {
+  IME_CHOSEONG,
+  IME_CLUSTERS,
+  IME_SAYONG,
+  seedClusterTables,
+  seedHangulDocument,
+} from '@/__test-utils__/hangulSeed';
+import {
+  createTestAppContext,
+  flush,
+  pseudoMessages,
+} from '@/__test-utils__/index';
+import { AppContext } from '@/components/appContext';
+import { createScopeActions } from '@/components/quick-search/actions';
+import {
+  Action,
+  searchActions,
+} from '@/components/quick-search/documentSearch';
+import { clearHangulForms } from '@/components/quick-search/hangul';
+import {
+  PaletteScope,
+  parsePaletteQuery,
+} from '@/components/quick-search/paletteQuery';
+import {
+  createFieldActions,
+  createHelpActions,
+  createPrefixActions,
+  paletteRows,
+  rankTableActions,
+  scopeBase,
+  TEXT_FIELDS,
+} from '@/components/quick-search/scopedActions';
+import { CanvasType, NameViewMode } from '@/constants/schema';
+import { changeViewportAction } from '@/engine/modules/editor/atom.actions';
+import {
+  addMemoAction,
+  changeMemoValueAction,
+} from '@/engine/modules/memo/atom.actions';
+import {
+  changeCanvasTypeAction,
+  toNameViewModeAction,
+} from '@/engine/modules/settings/atom.actions';
+import {
+  addTableAction,
+  changeTableLogicalNameAction,
+  changeTableNameAction,
+} from '@/engine/modules/table/atom.actions';
+import {
+  addColumnAction,
+  changeColumnCommentAction,
+  changeColumnLogicalNameAction,
+  changeColumnNameAction,
+} from '@/engine/modules/table-column/atom.actions';
+import { createI18n, type I18n } from '@/i18n/translate';
+import { getColumnRect } from '@/konva/scene/metrics';
+import { toScreenPoint } from '@/konva/scene/viewport';
+import { FindField } from '@/utils/find-replace';
+
+/** Counts each text the palette spells into jamo, the work that grows with the document. */
+vi.mock('es-hangul', async importOriginal => {
+  const actual = await importOriginal<typeof import('es-hangul')>();
+  return { ...actual, disassembleToGroups: vi.fn(actual.disassembleToGroups) };
+});
+
+const spellings = vi.mocked(disassembleToGroups);
+
+let app: AppContext;
+
+const names = (actions: Action[]) => actions.map(action => action.name);
+
+const pairs = (actions: Action[]) =>
+  actions.map(({ name, keywords }) => [name, keywords]);
+
+const visible = () =>
+  createScopeActions(app).filter(action => action.filter?.(app) ?? true);
+
+/** The rows the palette shows for a value typed or pasted in one go at its top level. */
+const rowsFor = (value: string) => {
+  const query = parsePaletteQuery(value);
+  const base = scopeBase(visible(), query.scope);
+  const found = query.keyword ? searchActions(base, query.keyword) : base;
+  return paletteRows(app, found, query);
+};
+
+const addTables = (count: number, name: (index: number) => string) => {
+  const actions: AnyAction[] = [];
+  for (let index = 0; index < count; index++) {
+    actions.push(
+      addTableAction({ id: `t${index}`, ui: { x: 0, y: 0, zIndex: 1 } }),
+      changeTableNameAction({ id: `t${index}`, value: name(index) })
+    );
+  }
+  app.store.dispatchSync(actions);
+};
+
+const addColumns = (
+  tableId: string,
+  count: number,
+  name: (index: number) => string
+) => {
+  const actions: AnyAction[] = [];
+  for (let index = 0; index < count; index++) {
+    const id = `${tableId}_c${index}`;
+    actions.push(
+      addColumnAction({ id, tableId }),
+      changeColumnNameAction({ id, tableId, value: name(index) })
+    );
+  }
+  app.store.dispatchSync(actions);
+};
+
+const ERD_COMMANDS = [
+  'Tab',
+  'Name View',
+  'Derive Physical Names Again',
+  'Database',
+  'Import',
+  'Import and Add',
+  'Export',
+  'New Table',
+  'New Memo',
+  'New Table Group',
+  'Zero One',
+  'Zero N',
+  'One Only',
+  'One N',
+  'Auto Layout',
+  'Toggle Explorer',
+];
+
+/** A name holding history from index 42, past the 40 at which Fuse still lets a hit start. */
+const LONG_TABLE_NAME = 'application_user_notification_preferences_history';
+
+/** Logical names on the users table and its email column. */
+const addLogicalNames = () =>
+  app.store.dispatchSync(
+    changeTableLogicalNameAction({ id: 'users', value: 'Member Accounts' }),
+    changeColumnLogicalNameAction({
+      id: 'email',
+      tableId: 'users',
+      value: 'Login Mail',
+    })
+  );
+
+const showNames = (mode: (typeof NameViewMode)[keyof typeof NameViewMode]) =>
+  app.store.dispatchSync(toNameViewModeAction(app.store.state, mode, false));
+
+beforeEach(() => {
+  app = createTestAppContext();
+  seedFindDocument(app);
+});
+
+afterEach(() => {
+  app.store.destroy();
+});
+
+describe('scopeBase', () => {
+  it('hands the fuzzy search the commands with no prefix, the tables after #, and nothing for the rest', () => {
+    const level = visible();
+
+    expect(names(scopeBase(level, null))).toEqual(ERD_COMMANDS);
+    expect(names(scopeBase(level, PaletteScope.tables))).toEqual([
+      'orders',
+      'users',
+    ]);
+    for (const scope of [
+      PaletteScope.columns,
+      PaletteScope.text,
+      PaletteScope.help,
+    ]) {
+      expect(scopeBase(level, scope)).toEqual([]);
+    }
+  });
+});
+
+describe('paletteRows without a prefix', () => {
+  /** Whether a row is the document's: a table, or a column, comment or memo saying where it is. */
+  const isDocumentRow = (row: Action) =>
+    Boolean(row.tableId || row.keywords?.includes(' · '));
+
+  it('lists the commands alone for no keyword', () => {
+    expect(names(rowsFor(''))).toEqual(ERD_COMMANDS);
+    expect(names(rowsFor(' '))).toEqual(ERD_COMMANDS);
+    expect(names(visible())).toEqual([...ERD_COMMANDS, 'orders', 'users']);
+  });
+
+  it('keeps to what the tab offers', () => {
+    app.store.dispatchSync(
+      changeCanvasTypeAction({ value: CanvasType.generatorCode })
+    );
+
+    expect(names(rowsFor(''))).toEqual([
+      'Tab',
+      'Database',
+      'Language',
+      'Table Name Case',
+      'Column Name Case',
+      'Code Generator: Options panel',
+      'Toggle Explorer',
+    ]);
+  });
+
+  it('searches the commands for a > typed first, a character like any other', () => {
+    const rows = rowsFor('>auto');
+
+    expect(rows[0].name).toBe('Auto Layout');
+    expect(rows.some(isDocumentRow)).toBe(false);
+    // No command holds >auto as typed, so the word is offered as it stands.
+    expect(rows.slice(-3).map(row => row.insert)).toEqual([
+      '#>auto',
+      '@>auto',
+      ':>auto',
+    ]);
+    expect(rowsFor('>users').some(isDocumentRow)).toBe(false);
+  });
+
+  it('fuzzes the commands alone, however many tables, columns, comments and memos hold the keyword', () => {
+    expect(rowsFor('auto')[0].name).toBe('Auto Layout');
+    expect(names(rowsFor('replace'))[0]).toBe('Toggle Explorer');
+
+    for (const keyword of ['user', 'users', 'us', 'id', 'login', 'Every']) {
+      const rows = rowsFor(keyword);
+      expect(rows.some(isDocumentRow)).toBe(false);
+      expect(names(rows).some(name => name.startsWith('Show all'))).toBe(false);
+    }
+  });
+
+  it('offers the keyword to the prefixes that search the document once no command holds it', () => {
+    const rows = rowsFor('orders');
+
+    expect(rows.map(({ name, insert }) => [name, insert])).toEqual([
+      ['Search tables for "orders"', '#orders'],
+      ['Search columns for "orders"', '@orders'],
+      ['Search comments & memos for "orders"', ':orders'],
+    ]);
+    for (const row of rows) {
+      expect(row.icon).toBeTruthy();
+      expect(row.perform).toBeUndefined();
+      expect(row.next).toBeUndefined();
+    }
+    expect(rowsFor('  orders ')).toHaveLength(3);
+    expect(createPrefixActions('users.em').map(row => row.insert)).toEqual([
+      '#users.em',
+      '@users.em',
+      ':users.em',
+    ]);
+  });
+
+  it('lists the commands a word only fuzzes to, then offers the word to the prefixes', () => {
+    expect(names(rowsFor('tables'))).toEqual([
+      'New Table',
+      'Database',
+      'New Table Group',
+      'Search tables for "tables"',
+      'Search columns for "tables"',
+      'Search comments & memos for "tables"',
+    ]);
+
+    // Names a schema may give its tables, which Fuse still fuzzes to commands.
+    for (const keyword of ['memos', 'layouts', 'imports', 'exports', 'zones']) {
+      const rows = rowsFor(keyword);
+      const commands = rows.slice(0, -3);
+
+      expect(commands.length).toBeGreaterThan(0);
+      expect(commands.every(row => row.insert === undefined)).toBe(true);
+      expect(rows.slice(-3).map(row => row.insert)).toEqual([
+        `#${keyword}`,
+        `@${keyword}`,
+        `:${keyword}`,
+      ]);
+    }
+  });
+
+  it('offers a table name that fuzzes to no command to the prefixes alone', () => {
+    for (const keyword of ['users', 'posts', 'roles', 'accounts', 'notes']) {
+      expect(rowsFor(keyword).map(row => row.insert)).toEqual([
+        `#${keyword}`,
+        `@${keyword}`,
+        `:${keyword}`,
+      ]);
+    }
+  });
+
+  it('offers no prefix while a command listed holds the keyword, in its name or keywords, or by its Hangul letters', () => {
+    const held = ['auto', 'LAYOUT', 'new t', 'relationship', 'rename'];
+    for (const keyword of held) {
+      const offers = rowsFor(keyword).some(row => row.insert !== undefined);
+      expect(offers).toBe(false);
+    }
+
+    const choseong = parsePaletteQuery('ㅅㅇㅈ');
+    const korean: Action[] = [{ name: '사용자 추가' }];
+    expect(paletteRows(app, korean, choseong)).toEqual(korean);
+    expect(names(paletteRows(app, [{ name: 'Tab' }], choseong))).toEqual([
+      'Tab',
+      'Search tables for "ㅅㅇㅈ"',
+      'Search columns for "ㅅㅇㅈ"',
+      'Search comments & memos for "ㅅㅇㅈ"',
+    ]);
+  });
+
+  it('types in a query each of those rows lists the document by', () => {
+    const [tables, columns, text] = rowsFor('email');
+
+    expect(names(rowsFor(tables.insert as string))).toEqual([]);
+    expect(pairs(rowsFor(columns.insert as string))).toEqual([
+      ['email', 'users.email · Column'],
+    ]);
+    expect(pairs(rowsFor(text.insert as string))).toEqual([
+      ['login email', 'users.email · Column comment'],
+    ]);
+    expect(rowsFor(rowsFor('orders')[0].insert as string)[0].name).toBe(
+      'orders'
+    );
+  });
+
+  it('offers nothing after a prefix whose scope holds no row', () => {
+    for (const value of ['#email', '@qqqq', ':qqqq']) {
+      expect(rowsFor(value)).toEqual([]);
+    }
+  });
+});
+
+describe('paletteRows / # tables', () => {
+  it('lists every table by name and fuzzes them alone', () => {
+    expect(names(rowsFor('#'))).toEqual(['orders', 'users']);
+    expect(rowsFor('#us')[0].name).toBe('users');
+    expect(rowsFor('#us').every(row => row.tableId)).toBe(true);
+    // A column or a command naming the keyword stays out.
+    expect(rowsFor('#email')).toEqual([]);
+    expect(rowsFor('#auto')).toEqual([]);
+  });
+
+  it('lists every table the keyword names, however many, with nothing handed over', () => {
+    const count = 120;
+    addTables(count, index => `item_${index}`);
+
+    const rows = rowsFor('#item');
+
+    expect(rows).toHaveLength(count);
+    expect(rows.every(row => row.tableId)).toBe(true);
+  });
+
+  it('lists every table for an empty keyword too', () => {
+    addTables(120, index => `item_${index}`);
+
+    expect(rowsFor('#')).toHaveLength(122);
+  });
+
+  it('puts the tables holding the keyword first, then those that only fuzz to it, keeping every one', () => {
+    const found: Action[] = [
+      { name: 'orders_archive', tableId: 'a' },
+      { name: 'user_orders', tableId: 'b' },
+    ];
+
+    expect(names(rankTableActions(found, 'user'))).toEqual([
+      'user_orders',
+      'orders_archive',
+    ]);
+
+    const loose = Array.from({ length: 105 }, (_, index): Action => ({
+      name: `loose_${index}`,
+      tableId: `l${index}`,
+    }));
+    expect(rankTableActions(loose, 'lsoe')).toHaveLength(105);
+  });
+
+  it('goes to a table holding the keyword past index 40 of its name', () => {
+    addTables(1, () => LONG_TABLE_NAME);
+
+    for (const typed of ['#history', '#_history', '#preferences']) {
+      expect(names(rowsFor(typed))).toEqual([LONG_TABLE_NAME]);
+    }
+    expect(names(rowsFor('#us'))).not.toContain('orders');
+  });
+
+  it('finds a table by its name and its logical name, whatever the name view draws', () => {
+    addLogicalNames();
+
+    expect(names(rowsFor('#member'))).toEqual(['users']);
+    expect(names(rowsFor('#users'))).toEqual(['users']);
+
+    showNames(NameViewMode.logical);
+    expect(names(rowsFor('#member'))).toEqual(['Member Accounts']);
+    expect(names(rowsFor('#users'))).toEqual(['Member Accounts']);
+
+    showNames(NameViewMode.both);
+    expect(names(rowsFor('#accounts'))).toEqual(['Member Accounts (users)']);
+    expect(names(rowsFor('#users'))).toEqual(['Member Accounts (users)']);
+  });
+
+  it('stays quick over a schema of hundreds of tables', () => {
+    addTables(600, index => `table_${index}_items`);
+
+    const started = performance.now();
+    const rows = rowsFor('#items');
+    const elapsed = performance.now() - started;
+
+    expect(rows).toHaveLength(600);
+    // Not a benchmark, only a guard against a search that grows past linear.
+    expect(elapsed).toBeLessThan(5000);
+  });
+});
+
+describe('paletteRows / @ columns', () => {
+  it('lists the columns named like the keyword in any table, and no comment or memo', () => {
+    expect(pairs(rowsFor('@user'))).toEqual([
+      ['user_id', 'orders.user_id · Column'],
+    ]);
+    // login email is a comment, which the column scope leaves out.
+    expect(pairs(rowsFor('@em'))).toEqual([['email', 'users.email · Column']]);
+    expect(names(rowsFor('@ em'))).toEqual(['email']);
+  });
+
+  it('narrows by table before the first dot', () => {
+    expect(names(rowsFor('@users.em'))).toEqual(['email']);
+    expect(names(rowsFor('@orders.em'))).toEqual([]);
+    expect(names(rowsFor('@ord.id'))).toEqual(['order_id', 'user_id']);
+    expect(names(rowsFor('@users.'))).toEqual(['id', 'email']);
+    expect(names(rowsFor('@nothing.'))).toEqual([]);
+    expect(names(rowsFor('@.em'))).toEqual(['email']);
+  });
+
+  it('lists every column of every table for no keyword, the unnamed ones too', () => {
+    addColumns('users', 1, () => '');
+
+    expect(pairs(rowsFor('@'))).toEqual([
+      ['order_id', 'orders.order_id · Column'],
+      ['user_id', 'orders.user_id · Column'],
+      ['total', 'orders.total · Column'],
+      ['id', 'users.id · Column'],
+      ['email', 'users.email · Column'],
+      ['unnamed', 'users.unnamed · Column'],
+    ]);
+  });
+
+  it('stands the reader on the column cell picked, from any tab', async () => {
+    app.store.dispatchSync(
+      changeCanvasTypeAction({ value: CanvasType.schemaSQL })
+    );
+    const [email] = rowsFor('@users.email');
+
+    email.perform?.(app);
+    await flush();
+
+    expect(app.store.state.settings.canvasType).toBe(CanvasType.ERD);
+    expect(app.store.state.editor.focusTable).toMatchObject({
+      tableId: 'users',
+      columnId: 'email',
+      focusType: 'columnName',
+    });
+  });
+
+  it('lands the column by the one jump rule (AC-N10)', async () => {
+    app.store.dispatchSync(changeViewportAction({ width: 800, height: 600 }));
+
+    const [userId] = rowsFor('@orders.user_id');
+    userId.perform?.(app);
+    await flush();
+
+    const { state } = app.store;
+    const orders = state.collections.tableEntities.orders;
+    const row = getColumnRect(
+      state,
+      orders,
+      orders.columnIds.indexOf('orders_user_id')
+    );
+    // Across, the row shows whole and stays; down, its middle was above the middle half.
+    expect(toScreenPoint(state.settings, orders.ui).x).toBe(60);
+    expect(
+      toScreenPoint(state.settings, { x: row.x, y: row.y + row.height / 2 }).y
+    ).toBeCloseTo(300, 6);
+    expect(state.editor.focusTable).toMatchObject({
+      tableId: 'orders',
+      columnId: 'orders_user_id',
+    });
+  });
+
+  it("lists a column by its logical name too, whatever the name view draws, the table part reading a table's", () => {
+    addLogicalNames();
+
+    for (const mode of [NameViewMode.physical, NameViewMode.logical]) {
+      showNames(mode);
+      expect(pairs(rowsFor('@login'))).toEqual([
+        ['Login Mail', 'users.email · Logical name'],
+      ]);
+      expect(names(rowsFor('@mail'))).toEqual(['Login Mail', 'email']);
+      expect(names(rowsFor('@member.'))).toEqual(['id', 'email']);
+      expect(names(rowsFor('@member.login'))).toEqual(['Login Mail']);
+      // A table's logical name is no column of it.
+      expect(rowsFor('@member')).toEqual([]);
+      // With no keyword each column lists once, by its name.
+      expect(names(rowsFor('@'))).toEqual([
+        'order_id',
+        'user_id',
+        'total',
+        'id',
+        'email',
+      ]);
+    }
+  });
+
+  it('lists every column the keyword names, however many, the table part narrowing them', () => {
+    addColumns('users', 120, index => `col_${index}`);
+    addColumns('orders', 10, index => `col_${index}`);
+
+    expect(rowsFor('@col')).toHaveLength(130);
+    const users = rowsFor('@users.col');
+    expect(users).toHaveLength(120);
+    expect(users.every(row => row.keywords?.startsWith('users.'))).toBe(true);
+    expect(rowsFor('@orders.col')).toHaveLength(10);
+    expect(rowsFor('@users.')).toHaveLength(122);
+  });
+});
+
+describe('paletteRows / : comments and memos', () => {
+  it('lists the table comments, column comments and memos holding the keyword, and no name', () => {
+    expect(pairs(rowsFor(':user'))).toEqual([
+      ['user id', 'users.id · Column comment'],
+      ['Every user_id points at users.id', 'Memo'],
+    ]);
+    expect(pairs(rowsFor(': orders'))).toEqual([
+      ['Customer orders', 'orders · Table comment'],
+    ]);
+    expect(rowsFor(':email')).toHaveLength(1);
+  });
+
+  it('lists every text there is for no keyword, and skips the empty ones', () => {
+    expect(names(rowsFor(':'))).toEqual([
+      'Customer orders',
+      'primary id',
+      'buyer of the order',
+      'user id',
+      'login email',
+      'Every user_id points at users.id',
+    ]);
+  });
+
+  it('lists every text holding the keyword, however many, in the comment and memo scopes', () => {
+    const actions: AnyAction[] = [];
+    for (let index = 0; index < 120; index++) {
+      actions.push(
+        addMemoAction({ id: `m${index}`, ui: { x: 0, y: 0, zIndex: 1 } }),
+        changeMemoValueAction({ id: `m${index}`, value: 'many user' })
+      );
+    }
+    app.store.dispatchSync(actions);
+
+    // The seed's column comment and memo, then every memo added.
+    expect(rowsFor(':user')).toHaveLength(122);
+    expect(TEXT_FIELDS).toEqual([
+      FindField.tableComment,
+      FindField.columnComment,
+      FindField.memo,
+    ]);
+  });
+
+  it('builds the same rows for the kinds it is handed', () => {
+    expect(names(createFieldActions(app, [FindField.memo], 'user'))).toEqual([
+      'Every user_id points at users.id',
+    ]);
+    expect(
+      names(createFieldActions(app, [FindField.columnName], '', 'orders'))
+    ).toEqual(['order_id', 'user_id', 'total']);
+  });
+});
+
+describe('paletteRows / ? help', () => {
+  it('lists the prefixes, each typing its own when chosen', () => {
+    const rows = rowsFor('?');
+
+    expect(rows.map(({ name, insert }) => [name, insert])).toEqual([
+      ['Tables', '#'],
+      ['Columns', '@'],
+      ['Comments & memos', ':'],
+    ]);
+    for (const row of rows) {
+      expect(row.keywords).toBeTruthy();
+      expect(row.icon).toBeTruthy();
+      expect(row.perform).toBeUndefined();
+    }
+  });
+
+  it('fuzzes the prefixes by what follows the question mark', () => {
+    expect(rowsFor('?column')[0].name).toBe('Columns');
+    expect(names(createHelpActions('memos'))).toContain('Comments & memos');
+    expect(createHelpActions()).toHaveLength(3);
+  });
+});
+
+describe('paletteRows / Hangul', () => {
+  const STEPS = [...IME_SAYONG, ...IME_CHOSEONG];
+
+  const addMemos = (count: number, value: (index: number) => string) => {
+    const actions: AnyAction[] = [];
+    for (let index = 0; index < count; index++) {
+      const id = `ko-${app.store.state.doc.memoIds.length}-${index}`;
+      actions.push(
+        addMemoAction({ id, ui: { x: 0, y: 0, zIndex: 1 } }),
+        changeMemoValueAction({ id, value: value(index) })
+      );
+    }
+    app.store.dispatchSync(actions);
+  };
+
+  beforeEach(() => {
+    app.store.destroy();
+    app = createTestAppContext();
+    seedHangulDocument(app);
+  });
+
+  it('keeps 사용자 in every scope at each step an IME hands over, and offers each step to them with no prefix', () => {
+    for (const step of STEPS) {
+      expect(rowsFor(step).map(row => row.insert)).toEqual([
+        `#${step}`,
+        `@${step}`,
+        `:${step}`,
+      ]);
+      expect(names(rowsFor(`#${step}`))).toContain('사용자');
+      expect(names(rowsFor(`@${step}`))).toContain('사용자');
+      expect(names(rowsFor(`:${step}`))).toContain('주문한 사용자');
+      expect(rowsFor(`#${step}`).every(row => row.tableId)).toBe(true);
+    }
+  });
+
+  it('keeps a name in every scope through each cluster a Windows IME composes of its initials', () => {
+    seedClusterTables(app);
+
+    for (const [name, steps] of IME_CLUSTERS) {
+      for (const step of steps) {
+        for (const prefix of ['#', '@', ':']) {
+          expect(names(rowsFor(`${prefix}${step}`))).toContain(name);
+        }
+      }
+    }
+    expect(names(rowsFor('#ㅄ'))).toEqual(['부서', '배송지']);
+  });
+
+  it('goes to a table by its initials, and to a column by the syllables typed so far', () => {
+    expect(names(rowsFor('#ㅈㅁ'))).toEqual(['주문 내역']);
+    expect(names(rowsFor('#사요'))).toEqual(['사용자']);
+    expect(pairs(rowsFor('@사'))).toEqual([
+      ['사용자', '주문 내역.사용자 · Column'],
+      ['상품명', '상품.상품명 · Column'],
+    ]);
+  });
+
+  it('reads the table part of a column search by its Hangul letters too', () => {
+    const ofUsers = ['아이디', '이름', '이메일'];
+
+    expect(names(rowsFor('@사용자.'))).toEqual(ofUsers);
+    expect(names(rowsFor('@ㅅㅇㅈ.ㅇ'))).toEqual(ofUsers);
+    expect(names(rowsFor('@ㅈㅁ.ㅅ'))).toEqual(['사용자']);
+    expect(names(rowsFor('@사요.'))).toEqual(ofUsers);
+  });
+
+  it('lists the comments and the memo spelled, and no name', () => {
+    expect(pairs(rowsFor(':ㅅㅇㅈ'))).toEqual([
+      ['사용자 고유 번호', '사용자.아이디 · Column comment'],
+      ['사용자 한 명이 여러 주문을 남긴다', 'Memo'],
+      ['주문한 사용자', '주문 내역.사용자 · Column comment'],
+    ]);
+  });
+
+  it('lists the fields an IME step or the initials spell whole, from the start, then inside, each tier in document order', () => {
+    const fields = [FindField.columnName, ...TEXT_FIELDS];
+
+    expect(names(createFieldActions(app, fields, 'ㅅㅇㅈ'))).toEqual([
+      '사용자',
+      '사용자 고유 번호',
+      '사용자 한 명이 여러 주문을 남긴다',
+      '주문한 사용자',
+    ]);
+    expect(names(createFieldActions(app, fields, '사요'))).toEqual([
+      '사용자 고유 번호',
+      '사용자',
+      '사용자 한 명이 여러 주문을 남긴다',
+      '주문한 사용자',
+    ]);
+    // 상품명 holds 상 as typed; 사용 only spells it across two syllables.
+    expect(names(createFieldActions(app, fields, '상'))).toEqual([
+      '상품명',
+      '사용자 고유 번호',
+      '사용자',
+      '사용자 한 명이 여러 주문을 남긴다',
+      '주문한 사용자',
+    ]);
+  });
+
+  it('lists a column holding the keyword as typed above one its letters spell across syllables', () => {
+    expect(pairs(rowsFor('@상'))).toEqual([
+      ['상품명', '상품.상품명 · Column'],
+      ['사용자', '주문 내역.사용자 · Column'],
+    ]);
+  });
+
+  it('lists every table a Hangul keyword or its letters name, with nothing handed over', () => {
+    const keywords = ['#ㅅㅇㅈ', '#사요', '#사용'];
+    const seeded = keywords.map(keyword => rowsFor(keyword).length);
+    addTables(105, index => `사용자_${index}`);
+
+    keywords.forEach((keyword, index) => {
+      expect(rowsFor(keyword)).toHaveLength(seeded[index] + 105);
+    });
+  });
+
+  it('lists every column a Hangul keyword or its letters name', () => {
+    const seeded = rowsFor('@ㅅㅇㅈ').length;
+    addColumns('orders', 105, index => `사용자_${index}`);
+
+    expect(rowsFor('@ㅅㅇㅈ')).toHaveLength(seeded + 105);
+  });
+
+  it('lists every text its letters spell, one holding the keyword as typed first', () => {
+    const seeded = rowsFor(':ㅅㅇㅈ').length;
+    addMemos(100, index => `사용자 메모 ${index}`);
+
+    expect(rowsFor(':ㅅㅇㅈ')).toHaveLength(seeded + 100);
+
+    // 상 spells 사용 in every memo above; this one holds it as typed, so it
+    // comes before them all.
+    addMemos(1, () => '상품 설명');
+    const listed = names(rowsFor(':상'));
+    expect(listed.indexOf('상품 설명')).toBeLessThan(
+      listed.indexOf('사용자 메모 0')
+    );
+    expect(listed.filter(name => name.startsWith('사용자 메모'))).toHaveLength(
+      100
+    );
+  });
+
+  it('spells each text of two hundred Korean tables once, and again only the rows a field list draws', () => {
+    onTestFinished(() => {
+      clearHangulForms();
+      spellings.mockClear();
+    });
+    const actions: AnyAction[] = [];
+    const texts = new Set<string>();
+    const named = (value: string) => {
+      texts.add(value);
+      return value;
+    };
+    // Every text differs, so the first keystroke spells them all afresh.
+    for (let table = 0; table < 200; table++) {
+      const tableId = `ko${table}`;
+      actions.push(
+        addTableAction({ id: tableId, ui: { x: 0, y: 0, zIndex: 1 } }),
+        changeTableNameAction({
+          id: tableId,
+          value: named(`주문_${table}_내역`),
+        })
+      );
+      for (let column = 0; column < 10; column++) {
+        const id = `${tableId}c${column}`;
+        actions.push(
+          addColumnAction({ id, tableId }),
+          changeColumnNameAction({
+            id,
+            tableId,
+            value: named(`사용자_${table}_${column}`),
+          }),
+          changeColumnCommentAction({
+            id,
+            tableId,
+            value: named(`${table}번 표 ${column}번 사용자 설명`),
+          })
+        );
+      }
+    }
+    app.store.dispatchSync(actions);
+
+    clearHangulForms();
+    spellings.mockClear();
+    for (const prefix of ['', '#', '@', ':']) {
+      for (const step of [...STEPS, 'ㅈㅁ']) {
+        rowsFor(`${prefix}${step}`);
+      }
+    }
+    const spelled = spellings.mock.calls
+      .map(([text]) => text)
+      .filter(text => texts.has(text));
+
+    // A count, not a clock, which a loaded machine stretches: every text is
+    // spelled once for its forms, and a list spells one again, for where its
+    // hit lies, only as it draws that row.
+    expect(new Set(spelled).size).toBe(texts.size);
+    expect(spelled).toHaveLength(texts.size);
+    expect(
+      rowsFor('#ㅈㅁ').filter(row => row.tableId?.startsWith('ko'))
+    ).toHaveLength(200);
+
+    spellings.mockClear();
+    const columns = rowsFor('@ㅅㅇㅈ');
+    // The seed's own 사용자 column, then every one added.
+    expect(columns).toHaveLength(2001);
+    names(columns.slice(0, 17));
+    // The seed's own column, first, is no text of these tables.
+    expect(
+      spellings.mock.calls.filter(([text]) => texts.has(text))
+    ).toHaveLength(16);
+  });
+});
+
+describe('paletteRows / translated', () => {
+  const pseudo = createI18n('de-DE', pseudoMessages('de'));
+
+  /** What rowsFor lists, every row read in the language given. */
+  const translatedRowsFor = (value: string, i18n: I18n = pseudo) => {
+    const query = parsePaletteQuery(value);
+    const level = createScopeActions(app, i18n).filter(
+      action => action.filter?.(app) ?? true
+    );
+    const base = scopeBase(level, query.scope);
+    const found = query.keyword ? searchActions(base, query.keyword) : base;
+    return paletteRows(app, found, query, i18n);
+  };
+
+  it('offers the keyword to each prefix in one sentence of the language given', () => {
+    expect(
+      translatedRowsFor('orders').map(({ name, insert }) => [name, insert])
+    ).toEqual([
+      ['de:Search tables for "orders"', '#orders'],
+      ['de:Search columns for "orders"', '@orders'],
+      ['de:Search comments & memos for "orders"', ':orders'],
+    ]);
+  });
+
+  it('isolates the keyword inside a right-to-left sentence, and types it in as typed', () => {
+    const rows = createPrefixActions(
+      'users',
+      createI18n('ar-SA', pseudoMessages('ar'))
+    );
+
+    expect(rows[0].name).toBe('ar:Search tables for "\u2068users\u2069"');
+    expect(rows.map(row => row.insert)).toEqual(['#users', '@users', ':users']);
+  });
+
+  it('names the prefixes after ? in the language given, their English kept to search by', () => {
+    expect(
+      translatedRowsFor('?').map(({ name, keywords, alias }) => [
+        name,
+        keywords,
+        alias,
+      ])
+    ).toEqual([
+      [
+        'de:Tables',
+        'de:Go to a table by its name',
+        ['Tables', 'Go to a table by its name'],
+      ],
+      [
+        'de:Columns',
+        'de:Go to a column by its name, or by table.column',
+        ['Columns', 'Go to a column by its name, or by table.column'],
+      ],
+      [
+        'de:Comments & memos',
+        'de:Search table comments, column comments and memos',
+        [
+          'Comments & memos',
+          'Search table comments, column comments and memos',
+        ],
+      ],
+    ]);
+    expect(names(createHelpActions('memos', pseudo))).toContain(
+      'de:Comments & memos'
+    );
+  });
+
+  it('names a field with no name and where a field sits in the language given', () => {
+    addColumns('users', 1, () => '');
+    const [, unnamed] = translatedRowsFor('@users.').slice(-2);
+    expect(unnamed.name).toBe('de:unnamed');
+    expect(unnamed.keywords).toContain('de:');
+
+    const [comment] = translatedRowsFor(':login');
+    expect(comment.keywords).toContain('de:');
+    expect(translatedRowsFor('@').at(-1)?.keywords).toContain('de:');
+  });
+
+  it('names the tables in the language given, however many', () => {
+    addTables(120, index => `item_${index}`);
+
+    const rows = translatedRowsFor('#item');
+    expect(rows).toHaveLength(120);
+    expect(rows.every(row => row.keywords === 'de:Table')).toBe(true);
+  });
+});

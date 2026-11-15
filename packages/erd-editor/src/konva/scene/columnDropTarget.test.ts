@@ -5,6 +5,7 @@ import { schemaV3Parser } from '@dineug/erd-editor-schema';
 import { describe, expect, it } from 'vite-plus/test';
 
 import {
+  COLUMN_DRAG_HANDLE_LANE,
   COLUMN_HEIGHT,
   TABLE_BORDER,
   TABLE_HEADER_HEIGHT,
@@ -168,6 +169,51 @@ describe('the row a column drag drops on (AC-G5)', () => {
     ).toBeNull();
   });
 
+  it('names the row beside the pointer in the handle lane left of a table, and nothing past it', () => {
+    const state = createState();
+    const table = addTable(state, 't1', 100, 100, ['c1', 'c2']);
+    const rect = getTableRect(state, table);
+    const { y } = rowCentre(state, 't1', 1);
+
+    for (const x of [rect.x - 1, rect.x - COLUMN_DRAG_HANDLE_LANE]) {
+      expect(findColumnDropTarget(state, { x, y })).toEqual({
+        tableId: 't1',
+        columnId: 'c2',
+        index: 1,
+      });
+    }
+    expect(
+      findColumnDropTarget(state, {
+        x: rect.x - COLUMN_DRAG_HANDLE_LANE - 1,
+        y,
+      })
+    ).toBeNull();
+  });
+
+  it('leaves a card under the pointer ahead of the handle lane of a card drawn over it', () => {
+    const state = createState();
+    const left = addTable(state, 't1', 100, 100, ['c1']);
+    const leftRect = getTableRect(state, left);
+    // Its lane reaches back over the right end of t1, and it is drawn on top.
+    const right = addTable(
+      state,
+      't2',
+      leftRect.x + leftRect.width + COLUMN_DRAG_HANDLE_LANE / 2,
+      100,
+      ['x1']
+    );
+    left.ui.zIndex = 1;
+    right.ui.zIndex = 2;
+    const { y } = rowCentre(state, 't1', 0);
+
+    expect(
+      findColumnDropTarget(state, { x: leftRect.x + leftRect.width - 2, y })
+    ).toEqual({ tableId: 't1', columnId: 'c1', index: 0 });
+    expect(
+      findColumnDropTarget(state, { x: leftRect.x + leftRect.width + 2, y })
+    ).toEqual({ tableId: 't2', columnId: 'x1', index: 0 });
+  });
+
   it('leaves a card under the pointer ahead of the band under a card drawn over it', () => {
     const state = createState();
     const upper = addTable(state, 't1', 100, 100, ['c1']);
@@ -207,6 +253,23 @@ describe('the row a column drag drops on (AC-G5)', () => {
       index: 0,
     });
   });
+
+  it.each([
+    [['t1', 't2'], 't2'],
+    [['t2', 't1'], 't1'],
+  ])(
+    'takes the row of the table later in the document of two at one zIndex, drawn last (%j)',
+    (tableIds, expected) => {
+      const state = createState();
+      addTable(state, 't1', 100, 100, ['c1']);
+      addTable(state, 't2', 100, 100, ['c2']);
+      state.doc.tableIds = tableIds;
+
+      expect(
+        findColumnDropTarget(state, rowCentre(state, 't1', 0))?.tableId
+      ).toBe(expected);
+    }
+  );
 
   it('names the row under a pointer on a canvas the zoom has shrunk', () => {
     const state = createState();

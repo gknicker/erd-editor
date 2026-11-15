@@ -1,44 +1,62 @@
 import { query } from '@dineug/erd-editor-schema';
-import { nanoid } from 'nanoid';
+import { uuid25 } from '@dineug/uuid';
 
-import { ColumnOption } from '@/constants/schema';
+import { ColumnOption, Database } from '@/constants/schema';
 import { RootState } from '@/engine/state';
 import { bHas } from '@/utils/bit';
+import {
+  autoNameIgnoreCase,
+  getBracket,
+  primaryKeyColumns,
+  splitTableName,
+  tableNamePart,
+} from '@/utils/tableName';
 
 import {
-  autoName,
+  commentToWrite,
+  CreateSchemaOptions,
   FormatColumnOptions,
+  formatDefault,
   FormatIndexOptions,
   formatNames,
+  formatReferentialActions,
   formatSize,
   formatSpace,
   FormatTableOptions,
-  getBracket,
-  KeyColumn,
+  ifNotExists,
   Name,
-  orderByNameASC,
   primaryKey,
-  primaryKeyColumns,
+  referentialActionSupport,
+  selectIndexColumns,
+  toForeignKeyPairs,
   toOrderName,
+  toSchemaEntities,
+  WrittenObjects,
 } from './utils';
 
-export function createSchema(state: RootState): string {
-  const {
-    doc: { tableIds, indexIds },
-    collections,
-  } = state;
+const ACTION_SUPPORT = referentialActionSupport(Database.SQLite);
+
+// A line break would end the comment line and run the text after it as SQL.
+const toCommentLine = (comment: string) =>
+  `-- ${comment.replace(/[\r\n]+/g, ' ')}`;
+
+export function createSchema(
+  state: RootState,
+  tableIds?: readonly string[],
+  { statements, written, logicalNameAsComment }: CreateSchemaOptions = {}
+): string {
   const indexNames: Name[] = [];
   const stringBuffer: string[] = [''];
-  const tables = query(collections)
-    .collection('tableEntities')
-    .selectByIds(tableIds)
-    .sort(orderByNameASC);
-  const indexes = query(collections)
-    .collection('indexEntities')
-    .selectByIds(indexIds);
+  const { tables, indexes } = toSchemaEntities(state, tableIds);
 
   tables.forEach(table => {
-    formatTable(state, { table, buffer: stringBuffer });
+    written?.tables.push(table);
+    formatTable(state, {
+      table,
+      buffer: stringBuffer,
+      statements,
+      logicalNameAsComment,
+    });
     stringBuffer.push('');
   });
 
@@ -47,6 +65,7 @@ export function createSchema(state: RootState): string {
       index,
       buffer: stringBuffer,
       indexNames,
+      statements,
     });
     stringBuffer.push('');
   });
@@ -54,9 +73,19 @@ export function createSchema(state: RootState): string {
   return stringBuffer.join('\n');
 }
 
+/**
+ * An integer type name, with or without a width, which an AUTOINCREMENT key
+ * is written as INTEGER for; the rest keep their type and lose the keyword.
+ */
+export function isIntegerFamily(dataType: string): boolean {
+  return /^(?:(?:TINY|SMALL|MEDIUM|BIG)?INT(?:EGER)?|INT[248]|UNSIGNED\s+BIG\s+INT)(?:\s*\(\s*\d+\s*\))?$/i.test(
+    dataType.trim()
+  );
+}
+
 export function formatTable(
   state: RootState,
-  { buffer, table }: FormatTableOptions
+  { buffer, table, statements, logicalNameAsComment }: FormatTableOptions
 ) {
   const {
     settings: { bracketType },
@@ -64,132 +93,113 @@ export function formatTable(
     collections,
   } = state;
   const bracket = getBracket(bracketType);
-  const tableCollection = query(collections).collection('tableEntities');
-  const columnCollection = query(collections).collection('tableColumnEntities');
-  const columns = columnCollection.selectByIds(table.columnIds);
-  const relationships = query(collections)
+  const tableColumns = query(collections)
+    .collection('tableColumnEntities')
+    .selectByIds(table.columnIds);
+  const pkColumns = primaryKeyColumns(tableColumns);
+  const autoIncrementColumn =
+    pkColumns.length === 1 &&
+    bHas(pkColumns[0].options, ColumnOption.autoIncrement)
+      ? pkColumns[0]
+      : null;
+  // SQLite takes AUTOINCREMENT only on a key written INTEGER, so an integer
+  // key is written that way and any other key goes without it.
+  const integerKey =
+    autoIncrementColumn !== null &&
+    isIntegerFamily(autoIncrementColumn.dataType);
+  const columns = integerKey
+    ? tableColumns.map(column =>
+        column === autoIncrementColumn
+          ? { ...column, dataType: 'INTEGER' }
+          : column
+      )
+    : tableColumns;
+  const foreignKeys = query(collections)
     .collection('relationshipEntities')
     .selectByIds(relationshipIds)
-    .filter(({ end }) => end.tableId === table.id);
+    .filter(({ end }) => end.tableId === table.id)
+    .flatMap(relationship => {
+      const pairs = toForeignKeyPairs(state, relationship);
+      return pairs ? [{ relationship, ...pairs }] : [];
+    });
+  // The commas count the foreign keys written, not the relationships ending
+  // here: one whose table or columns are gone writes no clause.
+  const hasForeignKey = foreignKeys.length !== 0;
 
-  if (table.comment.trim() !== '') {
-    buffer.push(`-- ${table.comment}`);
+  const comment = commentToWrite(table, logicalNameAsComment);
+  if (comment !== '') {
+    buffer.push(toCommentLine(comment));
   }
-  buffer.push(`CREATE TABLE ${bracket}${table.name}${bracket}`);
+  buffer.push(
+    `CREATE TABLE${ifNotExists(statements)} ${bracket}${table.name}${bracket}`
+  );
   buffer.push(`(`);
   const pk = primaryKey(columns);
   const spaceSize = formatSize(columns);
 
   columns.forEach((column, i) => {
-    if (pk) {
-      formatColumn(state, {
-        column,
-        isComma: true,
-        spaceSize,
-        buffer,
-      });
-    } else {
-      formatColumn(state, {
-        column,
-        isComma: columns.length !== i + 1,
-        spaceSize,
-        buffer,
-      });
-    }
+    formatColumn(state, {
+      column,
+      isComma: pk || hasForeignKey || columns.length !== i + 1,
+      spaceSize,
+      buffer,
+      logicalNameAsComment,
+    });
   });
 
   if (pk) {
-    const pkColumns = primaryKeyColumns(columns);
-    if (relationships.length !== 0) {
-      if (pkColumns.length === 1) {
-        const autoIncrement = bHas(
-          pkColumns[0].options,
-          ColumnOption.autoIncrement
-        )
-          ? ' AUTOINCREMENT'
-          : '';
-        buffer.push(
-          `  PRIMARY KEY (${formatNames(pkColumns, bracket)}${autoIncrement}),`
-        );
-      } else {
-        buffer.push(`  PRIMARY KEY (${formatNames(pkColumns, bracket)}),`);
-      }
-    } else {
-      if (pkColumns.length === 1) {
-        const autoIncrement = bHas(
-          pkColumns[0].options,
-          ColumnOption.autoIncrement
-        )
-          ? ' AUTOINCREMENT'
-          : '';
-        buffer.push(
-          `  PRIMARY KEY (${formatNames(pkColumns, bracket)}${autoIncrement})`
-        );
-      } else {
-        buffer.push(`  PRIMARY KEY (${formatNames(pkColumns, bracket)})`);
-      }
-    }
+    const autoIncrement = integerKey ? ' AUTOINCREMENT' : '';
+    buffer.push(
+      `  PRIMARY KEY (${formatNames(pkColumns, bracket)}${autoIncrement})` +
+        (hasForeignKey ? ',' : '')
+    );
   }
 
-  relationships.forEach((relationship, i) => {
-    const startTable = tableCollection.selectById(relationship.start.tableId);
-    const endTable = tableCollection.selectById(relationship.end.tableId);
+  foreignKeys.forEach(({ relationship, startTable, start, end }, i) => {
+    const actions = formatReferentialActions(relationship, ACTION_SUPPORT)
+      .map(clause => ` ${clause}`)
+      .join('');
+    // SQLite resolves a foreign key in the child table's own schema and
+    // refuses a qualified name there.
+    const [, referenced] = splitTableName(startTable.name, bracketType);
 
-    if (startTable && endTable) {
-      // key
-      const columns: KeyColumn = {
-        start: [],
-        end: [],
-      };
-      relationship.end.columnIds.forEach(columnId => {
-        const column = columnCollection.selectById(columnId);
-        if (column) {
-          columns.end.push(column);
-        }
-      });
-      relationship.start.columnIds.forEach(columnId => {
-        const column = columnCollection.selectById(columnId);
-        if (column) {
-          columns.start.push(column);
-        }
-      });
-
-      if (relationships.length - 1 > i) {
-        buffer.push(
-          `  FOREIGN KEY (${formatNames(
-            columns.end,
-            bracket
-          )}) REFERENCES ${bracket}${startTable.name}${bracket} (${formatNames(
-            columns.start,
-            bracket
-          )}),`
-        );
-      } else {
-        buffer.push(
-          `  FOREIGN KEY (${formatNames(
-            columns.end,
-            bracket
-          )}) REFERENCES ${bracket}${startTable.name}${bracket} (${formatNames(
-            columns.start,
-            bracket
-          )})`
-        );
-      }
-    }
+    buffer.push(
+      `  FOREIGN KEY (${formatNames(
+        end,
+        bracket
+      )}) REFERENCES ${bracket}${referenced}${bracket} (${formatNames(
+        start,
+        bracket
+      )})${actions}` + (foreignKeys.length - 1 > i ? ',' : '')
+    );
   });
 
   buffer.push(`);`);
+
+  if (autoIncrementColumn !== null && !integerKey) {
+    buffer.push('');
+    buffer.push(
+      `-- SQLite takes AUTOINCREMENT only on an INTEGER column, so ${bracket}${table.name}${bracket}.${bracket}${autoIncrementColumn.name}${bracket} is written without it.`
+    );
+  }
 }
 
 function formatColumn(
   { settings: { bracketType } }: RootState,
-  { buffer, column, isComma, spaceSize }: FormatColumnOptions
+  {
+    buffer,
+    column,
+    isComma,
+    spaceSize,
+    logicalNameAsComment,
+  }: FormatColumnOptions
 ) {
   const bracket = getBracket(bracketType);
   const stringBuffer: string[] = [];
+  const comment = commentToWrite(column, logicalNameAsComment);
 
-  if (column.comment.trim() !== '') {
-    buffer.push(`  -- ${column.comment}`);
+  if (comment !== '') {
+    buffer.push(`  ${toCommentLine(comment)}`);
   }
 
   stringBuffer.push(
@@ -210,14 +220,16 @@ function formatColumn(
     !bHas(column.options, ColumnOption.autoIncrement) &&
     column.default.trim() !== ''
   ) {
-    stringBuffer.push(`DEFAULT ${column.default}`);
+    stringBuffer.push(
+      `DEFAULT ${formatDefault(column.default, Database.SQLite)}`
+    );
   }
   buffer.push(stringBuffer.join(' ') + `${isComma ? ',' : ''}`);
 }
 
 export function formatIndex(
   { settings: { bracketType }, collections }: RootState,
-  { buffer, index, indexNames }: FormatIndexOptions
+  { buffer, index, indexNames, statements }: FormatIndexOptions
 ) {
   const bracket = getBracket(bracketType);
   const table = query(collections)
@@ -225,42 +237,60 @@ export function formatIndex(
     .selectById(index.tableId);
   if (!table) return;
 
-  const columnNames = query(collections)
-    .collection('indexColumnEntities')
-    .selectByIds(index.indexColumnIds)
-    .map(indexColumn => {
-      const column = query(collections)
-        .collection('tableColumnEntities')
-        .selectById(indexColumn.columnId);
-      if (column) {
-        return {
-          name: `${bracket}${column.name}${bracket} ${toOrderName(
-            indexColumn.orderType
-          )}`,
-        };
-      }
-      return null;
+  const columnNames = selectIndexColumns(collections, table, index).map(
+    ({ indexColumn, column }) => ({
+      name: `${bracket}${column.name}${bracket} ${toOrderName(
+        indexColumn.orderType
+      )}`,
     })
-    .filter(columnName => columnName !== null) as { name: string }[];
+  );
 
   if (columnNames.length !== 0) {
+    const [schema, tableName] = splitTableName(table.name, bracketType);
     let indexName = index.name;
     if (index.name.trim() === '') {
-      indexName = `IDX_${table.name}`;
-      indexName = autoName(indexNames, '', indexName);
+      const namePart = tableNamePart(table.name, bracketType);
+      indexName = autoNameIgnoreCase(indexNames, `IDX_${namePart}`);
       indexNames.push({
-        id: nanoid(),
+        id: uuid25(),
         name: indexName,
       });
     }
+    // SQLite takes the schema on the index name and the table bare after ON;
+    // a name the user already qualified keeps the schema it names.
+    const indexSchema =
+      schema === '' || indexName.includes('.') ? '' : `${schema}.`;
+    const indexRef = `${indexSchema}${bracket}${indexName}${bracket}`;
 
-    if (index.unique) {
-      buffer.push(`CREATE UNIQUE INDEX ${bracket}${indexName}${bracket}`);
-    } else {
-      buffer.push(`CREATE INDEX ${bracket}${indexName}${bracket}`);
-    }
     buffer.push(
-      `  ON ${bracket}${table.name}${bracket} (${formatNames(columnNames)});`
+      `CREATE ${index.unique ? 'UNIQUE ' : ''}INDEX${ifNotExists(statements)} ${indexRef}`
+    );
+    buffer.push(
+      `  ON ${bracket}${tableName}${bracket} (${formatNames(columnNames)});`
     );
   }
+}
+
+/** SQLite has no database or schema to create or select in a script. */
+export function formatHeader(): string {
+  return '';
+}
+
+/**
+ * Foreign key enforcement off, which stays off for the connection, and then
+ * each table written dropped, so the order does not matter.
+ */
+export function formatDropBlock(
+  { settings: { bracketType } }: RootState,
+  { tables }: WrittenObjects
+): string {
+  if (tables.length === 0) return '';
+
+  const bracket = getBracket(bracketType);
+  return [
+    'PRAGMA foreign_keys=OFF;',
+    tables
+      .map(({ name }) => `DROP TABLE IF EXISTS ${bracket}${name}${bracket};`)
+      .join('\n'),
+  ].join('\n\n');
 }

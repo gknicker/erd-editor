@@ -1,26 +1,33 @@
 # @dineug/erd-editor-mcp
 
-> An MCP server that lets a coding agent edit [erd-editor](https://github.com/dineug/erd-editor)
+> An MCP server that lets a coding agent edit [ERD Editor](https://github.com/dineug/erd-editor)
 > diagrams, live in VS Code, Obsidian or a JetBrains IDE, or straight on disk
 
-Claude Code, Codex and any other client of the [Model Context Protocol](https://modelcontextprotocol.io)
-get one tool per editing operation on an `.erd.json` document: add a table, rename a column,
-relate two tables, import a DDL dump, read the schema back as SQL. When the document is open in
-the [ERD Editor VS Code extension](https://marketplace.visualstudio.com/items?itemName=dineug.vuerd-vscode),
-the [ERD Editor Obsidian plugin](https://community.obsidian.md/plugins/erd-editor) or the
-[ERD Editor plugin](https://plugins.jetbrains.com/plugin/23594-erd-editor) for IntelliJ-based IDEs,
-the agent joins the editor as a collaborator: every call shows up on the canvas as it happens, with
-the agent's focus on the cell it is editing. With no editor around, the same tools edit the file
-itself.
+Ask Claude Code, Codex or any [Model Context Protocol](https://modelcontextprotocol.io) client to
+change your schema, and watch the change land on the canvas.
 
 ![coding agents](https://github.com/dineug/erd-editor/blob/main/img/coding-agents.webp?raw=true)
 
-The package is one self-contained file with no runtime dependencies. It needs Node.js 22.12 or
-later.
+- **One tool per edit** — add a table, rename a column, relate two tables, import a DDL dump, read
+  the schema back as SQL
+- **Live in your editor** — when
+  [VS Code](https://marketplace.visualstudio.com/items?itemName=dineug.vuerd-vscode),
+  [Obsidian](https://community.obsidian.md/plugins/erd-editor) or a
+  [JetBrains IDE](https://plugins.jetbrains.com/plugin/23594-erd-editor) holds the diagram, the
+  agent joins as one more collaborator, and its undo reverts only its own edits
+- **Headless on disk** — with no editor around, the same tools edit the file itself
+- **Large schemas** — paged, searchable reads, and DDL of just the tables the agent needs
+- **Self-contained** — one file with no runtime dependencies
 
 ## Install
 
+The server needs Node.js 22.12 or later; `npx` downloads it the first time the agent starts it.
+Keep ERD Editor and the server up to date together: when one speaks an older hub protocol than the
+other, the server refuses to connect and says which one to update.
+
 ### Claude Code
+
+Run in your project folder:
 
 ```sh
 claude mcp add --transport stdio erd-editor -- npx -y @dineug/erd-editor-mcp
@@ -28,7 +35,13 @@ claude mcp add --transport stdio erd-editor -- npx -y @dineug/erd-editor-mcp
 
 ### Codex
 
-Add to `~/.codex/config.toml`, or to `.codex/config.toml` in a trusted project:
+Run once; the Codex CLI, app and IDE extension share the setting:
+
+```sh
+codex mcp add erd-editor -- npx -y @dineug/erd-editor-mcp
+```
+
+Or add it to `~/.codex/config.toml`, or to `.codex/config.toml` in a trusted project:
 
 ```toml
 [mcp_servers.erd-editor]
@@ -38,110 +51,99 @@ args = ["-y", "@dineug/erd-editor-mcp"]
 
 ### Any other MCP client
 
-Run `npx -y @dineug/erd-editor-mcp` as a stdio server. It resolves relative document paths
-against its working directory, so start it in your project.
-
-On Windows it refuses a document name with a colon, such as `orders:v2.erd`, a device name such
-as `NUL.erd` or `CON.erd`, or a name ending in a dot or a space, and leaves such files out when it
-lists documents from disk: Windows would store another file than the one named. Use `-` in place
-of `:`.
+Run `npx -y @dineug/erd-editor-mcp` as a stdio server, started in your project folder: it resolves
+relative document paths against its working directory.
 
 ## Live and headless
 
-For every edit the server looks for an editor that holds the document, a VS Code window with the
-ERD Editor extension, an Obsidian vault window with the ERD Editor plugin or an IntelliJ-based IDE
-with the ERD Editor plugin, which keeps one lock for all its open projects, through the lock files
-each keeps in `~/.erd-editor/ide/`:
+For each call, the server looks in `~/.erd-editor/ide/` for an editor that holds the document: one
+that has it open, or whose workspace, vault or project contains it.
 
 | What it finds | What an edit does |
 | --- | --- |
-| A window whose workspace or vault contains the document, an IDE with a project that contains it, or an editor that has it open | **Live.** Opens the document in the ERD editor if needed, joins the editing session and applies the change there. Edits appear at once. VS Code keeps them unsaved until the agent calls `erd_save` (or you save); Obsidian saves them about two seconds later and a JetBrains IDE a fraction of a second after editing stops, as each saves your own edits, and `erd_save` writes them at once. The agent's `erd_undo` reverts only its own edits. |
-| No editor | **Headless.** Loads the file, applies the change and replaces the file atomically. `erd_save` has nothing to do. A read-only file, such as a Perforce or TFVC file not checked out, is refused with `readonly` until you make it writable. On Windows, a file with permissions of its own, unlike its folder's, is written in place so that it keeps them, and a file another program holds open is tried again for up to two seconds. |
-| An editor with its hub off | **Refused.** Reads still work, from disk. Writing the file under an open editor would be overwritten by its next save, so the server does not. |
-| On Windows, an editor that holds the document under another path to the same file: the agent named it through a network share or a mapped drive of this computer, such as `\\localhost\C$\…`, and the editor opened it by its drive path, or the other way round | **Refused**, reads included; the result names the path the editor holds the document by, to call again with. |
-| An editor Windows keeps the agent out of: one started as administrator while the agent was not, or any editor when the agent runs in a sandbox | **Refused**, reads included, with a result that says why. Run the editor and the agent with the same rights, for example by starting the editor again without administrator rights. With Windows 11's Administrator protection on, an editor started as administrator runs as a separate account whose lock files the agent never sees, so the edit goes headless under that editor: start it without administrator rights there. |
+| An editor that holds the document | **Live.** The change shows on the canvas at once. VS Code keeps it unsaved until you, Auto Save or `erd_save` save it; Obsidian and JetBrains IDEs save it as they save your own edits. |
+| No editor | **Headless.** The change is written to the file. |
+| An editor with its connection off, or an untrusted workspace or project | **Refused**, since the editor's next save would overwrite the change. Reads still come from disk. |
+| An editor on another hub protocol | **Refused**, naming the side to update. |
 
-In VS Code the live hub runs in trusted workspaces and is on by default. Turn it off with the
-setting `dineug.erd-editor.agentHub.enabled`; the window then still guards its documents from
-headless writes. The extension activates in workspaces that contain `.erd`, `.erd.json`, `.vuerd`
-or `.vuerd.json` files.
+The connection is on by default in each editor:
 
-In Obsidian the live hub runs in every vault window while the ERD Editor plugin is enabled, and is
-on by default. Turn it off with the plugin's coding-agent setting; the vault window then still
-guards its files from headless writes.
+- **VS Code** — a hub per window, in trusted workspaces, off with `dineug.erd-editor.agentHub.enabled`.
+  The extension starts once the folder holds an `.erd.json` file or you open a diagram.
+- **Obsidian** — a hub per vault window, off with **Settings → ERD Editor → Coding agents**.
+- **JetBrains IDEs** — one hub for every open project, off with
+  **Settings | Tools | ERD Editor → Coding agents**.
 
-In a JetBrains IDE the live hub runs while the ERD Editor plugin is enabled, one for the whole IDE
-and every project open in it, and is on by default. Turn it off with Coding agents under
-Settings | Tools | ERD Editor; the IDE then still guards the files of its projects from headless
-writes. Trust is per project: an agent reads the ERD files of a project the IDE does not trust but
-cannot change them. On Windows it listens on a named pipe, as the VS Code and Obsidian hubs do.
+Obsidian from Flathub and a JetBrains IDE installed as a Flatpak run no hub, so there the agent
+edits the file on disk even while the diagram is open. Close it first in a JetBrains IDE, which
+does not reload it and would overwrite the agent's change with your next edit; in Obsidian, an edit
+you have not saved yet gives way to the agent's.
 
-The server never falls back to the file on its own while an editor holds a document: if the
-connection drops it reconnects, and only when that editor has exited, or has closed the document
-and stopped serving it, as Obsidian does when the plugin is disabled and a JetBrains IDE does when
-a project closes or the plugin is disabled, does it edit the file and say so in the result.
+Windows paths, Flatpak sandboxes, reconnecting and conflicts on disk are in
+[Live and Headless](https://docs.erd-editor.io/docs/mcp/live-and-headless).
 
 ## Documents
 
-New documents are `.erd.json`: `erd_open_document` with `create` adds the extension to a name that
-has none. Existing `.erd`, `.vuerd` and `.vuerd.json` files open too. A file that is not an ERD
-document the editor can read, such as one left with merge conflict markers, is refused with
-`invalidDocument` and left as it is, never loaded as an empty diagram and written back.
-
-An agent finds ids with `erd_list`, which lists the settings, the counts and the tables by id, each
-with its position and its size on the canvas (the width approximate, the height exact), with their
-relationships and indexes, then the memos, and reads columns and other details with `erd_get`, then
-passes those ids to the edit tools. `erd_read` answers the whole document at once: the
-`snapshot` format lists every entity with its id, the `sql` format generates DDL for any of the
-eight supported databases and the `json` format is the raw file. Editing the JSON file by hand is
-not supported.
-
-Schemas of hundreds or thousands of tables work too. A read answers at most 40,000 characters,
-under the point where Claude Code sets a tool result aside in a file. `erd_list` answers a page of
-100 tables and says where the next one starts; its `query` finds tables by a word in a table or
-column name or comment, and `namesOnly` lists the table names alone, 2,000 short names in one
-answer. `erd_get` and `erd_read` take `tableNames` as well as ids, so an agent asked for a SQL query
-on a large schema reads the DDL of just the tables it needs. A read too large for one answer is
-refused with how to narrow it.
+- `erd_open_document` with `create` makes a missing file, adding `.erd.json` to a name with no
+  extension. In an Obsidian vault, name it `.erd`, which the file explorer lists.
+- `erd_list` lists the tables by id, 100 to a page, then the table groups, memos and dictionary
+  rows, and finds tables by name, logical name or comment with `query`. `erd_get` reads entities by
+  id or table name.
+- `erd_read` answers the whole document as a `snapshot`, as `sql` for any of the eight databases,
+  as `json` or as its `scripts`, or the DDL of just the tables or table groups it names.
+- A read answers at most 40,000 characters, or one larger entity whole: `erd_read` says how to
+  narrow a larger read, and `erd_get` lists the ids it had no room for.
+- Have the agent edit through the tools rather than write the JSON file itself.
 
 ## Tools
 
 | Group | Tools |
 | --- | --- |
-| Session | `erd_list_documents`, `erd_open_document`, `erd_list`, `erd_get`, `erd_read`, `erd_save`, `erd_undo`, `erd_redo` |
-| Tables | `erd_add_table`, `erd_remove_table`, `erd_change_table_name`, `erd_change_table_comment`, `erd_change_table_color`, `erd_move_table`, `erd_move_tables`, `erd_sort_tables` |
-| Columns | `erd_add_column`, `erd_remove_columns`, `erd_change_column_name`, `erd_change_column_data_type`, `erd_change_column_default`, `erd_change_column_comment`, `erd_set_column_primary_key`, `erd_set_column_unique`, `erd_set_column_not_null`, `erd_set_column_auto_increment`, `erd_move_column` |
-| Relationships | `erd_add_relationship`, `erd_link_columns`, `erd_remove_relationship`, `erd_change_relationship_type` |
+| Session | `erd_list_documents`, `erd_open_document`, `erd_list`, `erd_get`, `erd_read`, `erd_list_checks`, `erd_save`, `erd_undo`, `erd_redo` |
+| Tables | `erd_add_table`, `erd_remove_table`, `erd_change_table_name`, `erd_change_table_comment`, `erd_set_table_logical_name`, `erd_change_table_color`, `erd_move_table`, `erd_move_tables`, `erd_sort_tables` |
+| Columns | `erd_add_column`, `erd_remove_columns`, `erd_change_column_name`, `erd_change_column_data_type`, `erd_change_column_default`, `erd_change_column_comment`, `erd_set_column_logical_name`, `erd_set_column_domain`, `erd_set_column_primary_key`, `erd_set_column_unique`, `erd_set_column_not_null`, `erd_set_column_auto_increment`, `erd_move_column` |
+| Relationships | `erd_add_relationship`, `erd_link_columns`, `erd_remove_relationship`, `erd_change_relationship_type`, `erd_change_relationship_on_delete`, `erd_change_relationship_on_update` |
 | Indexes | `erd_add_index`, `erd_remove_index`, `erd_change_index_name`, `erd_set_index_unique`, `erd_add_index_column`, `erd_remove_index_column`, `erd_move_index_column`, `erd_set_index_column_order` |
 | Memos | `erd_add_memo`, `erd_remove_memo`, `erd_change_memo_value`, `erd_change_memo_color`, `erd_move_memo`, `erd_resize_memo` |
-| Settings | `erd_set_database`, `erd_set_database_name`, `erd_set_language`, `erd_set_table_name_case`, `erd_set_column_name_case`, `erd_set_bracket_type`, `erd_set_relationship_data_type_sync`, `erd_set_relationship_optimization`, `erd_set_column_order`, `erd_set_max_width_comment`, `erd_set_ignore_save_settings`, `erd_set_show` |
+| Table groups | `erd_add_table_group`, `erd_remove_table_group`, `erd_change_table_group_name`, `erd_change_table_group_color`, `erd_move_table_group`, `erd_resize_table_group`, `erd_set_table_group` |
+| Dictionaries | `erd_add_word`, `erd_update_word`, `erd_remove_word`, `erd_add_term`, `erd_update_term`, `erd_remove_term`, `erd_add_domain`, `erd_update_domain`, `erd_remove_domain`, `erd_derive_physical_names` |
+| Settings | `erd_set_database`, `erd_set_database_name`, `erd_set_ddl_script` |
 | Import | `erd_import_sql`, `erd_import_graphql`, `erd_import_dbml`, `erd_import_aml`, `erd_import_json` |
 | Batch | `erd_batch` |
 
-`erd_batch` runs several edit tools in order as one edit, all or none: the operations are tried on
-a copy of the document first, so a refused one is named and nothing is applied, and one `erd_undo`
-reverts the whole batch. An operation named with `as` lets a later one pass `$name` (or `$name.1`
-for its second created id) where it takes an entity id, so a table and its columns take one call.
+- `erd_batch` runs up to 100 edits in order as one, all or none, and one `erd_undo` reverts it. A
+  step named with `as` passes the ids it creates to later steps as `$name`, so a table and its
+  columns take one call.
+- A logical name set with `erd_set_table_logical_name` or `erd_set_column_logical_name` gives the
+  physical name, and a column its domain, from the word, term and domain dictionaries, as in the
+  editor; a name set by hand stays while it is not empty. `erd_derive_physical_names` derives the
+  names of a column, a table or the whole document again, as the editor's Derive Physical Names
+  Again does, after a word or term changed.
+- `erd_list_checks` lists what the dictionaries find, as the Dictionary tab's Checks sheet does:
+  forbidden words, words no dictionary lists, synonyms, names two rows share, links to a removed
+  domain, physical names other than a term gives and column types other than their domain's, with
+  what to use instead where the dictionaries have it.
+- The import tools replace the diagram by default and add to it with `mode: "append"`. The SQL,
+  GraphQL, DBML and AML imports keep the dictionaries.
+- The agent sets the database, its name and the Schema SQL scripts; the view and code settings stay
+  yours to set in the editor.
+- The edit and read tools refuse an unknown or mistyped argument before the document changes.
 
-Every edit tool takes the document `path`. Settings other than `erd_set_show`, and
-`erd_resize_memo`, make no undo entry in the editor, so `erd_undo` passes over them and the result
-says so.
-
-The edit tools, `erd_batch` and the read tools (`erd_list`, `erd_get`, `erd_read`) refuse an
-argument they do not declare, or one of the wrong type, with a JSON-RPC invalid params error
-(-32602) before touching the document, so a misspelled argument is never silently dropped. The
-other session tools ignore arguments they do not know.
+Every tool with its arguments and results is in [Tools](https://docs.erd-editor.io/docs/mcp/tools).
 
 ## Documentation
 
-- [Introduction](https://docs.erd-editor.io/docs/mcp/introduction) — what an agent can and cannot
-  do, how it works, requirements
-- [Install](https://docs.erd-editor.io/docs/mcp/installation) — Claude Code, Codex and any other
-  client, setting up VS Code, updating
-- [Live and Headless](https://docs.erd-editor.io/docs/mcp/live-and-headless) — where an edit
-  lands, saving, undo, a window that goes away, conflicts on disk
-- [Tools](https://docs.erd-editor.io/docs/mcp/tools) — every tool with its arguments, paging a
-  large schema, `erd_batch`, results and refusals
+- [Introduction](https://docs.erd-editor.io/docs/mcp/introduction) — what an agent can do and how it
+  works
+- [Install](https://docs.erd-editor.io/docs/mcp/installation) — each client and each editor
+- [Live and Headless](https://docs.erd-editor.io/docs/mcp/live-and-headless) — where an edit lands,
+  saving, undo, conflicts
+- [Tools](https://docs.erd-editor.io/docs/mcp/tools) — every tool, paging a large schema, results
+  and refusals
+
+## Issues
+
+Found a bug or want a feature? [Open an issue](https://github.com/dineug/erd-editor/issues).
 
 ## License
 

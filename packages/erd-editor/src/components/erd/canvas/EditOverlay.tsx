@@ -18,8 +18,11 @@ import {
 import {
   SCENE_FONT_FAMILY,
   SCENE_FONT_SIZE,
+  TABLE_GROUP_TITLE_FONT_WEIGHT,
 } from '@/components/erd/canvas/sceneTokens';
+import { blankLogicalName } from '@/components/erd/canvas/table/blankLogicalName';
 import {
+  type ColumnCellSlot,
   getCellTextHeight,
   getColumnCellSlots,
   getColumnTextY,
@@ -28,52 +31,77 @@ import {
   getHeaderTextY,
   HEADER_CELLS_X,
 } from '@/components/erd/canvas/table/cellLayout';
+import { getTableGroupNameBox } from '@/components/erd/canvas/table-group/titleLayout';
+import { useI18n } from '@/components/localeContext';
 import EditInput from '@/components/primitives/edit-input/EditInput';
 import { useSceneSource } from '@/components/sceneSourceContext';
 import ColumnDataType from '@/components/table-view/column/column-data-type/ColumnDataType';
+import ColumnDomain from '@/components/table-view/column/column-domain/ColumnDomain';
+import ColumnLogicalName from '@/components/table-view/column/column-logical-name/ColumnLogicalName';
 import {
   MEMO_BORDER,
   MEMO_HEADER_HEIGHT,
   MEMO_PADDING,
 } from '@/constants/layout';
+import { ColumnType } from '@/constants/schema';
+import { getLiveDomainName } from '@/engine/modules/dictionary/membership';
+import { ActionType as EditorActionType } from '@/engine/modules/editor/actions';
 import {
   editMemoEndAction,
   editTableEndAction,
+  editTableGroupEndAction,
   scrollMemoAction,
 } from '@/engine/modules/editor/atom.actions';
 import { FocusType } from '@/engine/modules/editor/state';
+import { drawsDomainInTypeCell } from '@/engine/modules/editor/utils/nameView';
 import { changeMemoValueAction } from '@/engine/modules/memo/atom.actions';
 import {
   changeTableCommentAction,
-  changeTableNameAction,
+  changeTableLogicalNameAction,
 } from '@/engine/modules/table/atom.actions';
+import { changeTableNameAction$ } from '@/engine/modules/table/generator.actions';
 import { changeColumnValueAction$ } from '@/engine/modules/table-column/generator.actions';
+import { changeTableGroupNameAction } from '@/engine/modules/table-group/atom.actions';
 import type { RootState } from '@/engine/state';
-import type { Column } from '@/internal-types';
+import { useUnmounted } from '@/hooks/useUnmounted';
+import type { PlainMessageKey } from '@/i18n/translate';
+import type { Column, Table } from '@/internal-types';
 import {
   getColumnRect,
   getTableRect,
   getTableWidths,
 } from '@/konva/scene/metrics';
 import { toScreenPoint } from '@/konva/scene/viewport';
+import { lastCursorFocus } from '@/utils/focus';
 import { focusEvent } from '@/utils/internalEvents';
+import { isComposing } from '@/utils/keyboard-shortcut';
 import { isPinchWheel } from '@/utils/pinch';
+import {
+  getTableGroupColors,
+  getTableGroupRect,
+  getTableHeaderTint,
+  isTableGroupShown,
+} from '@/utils/tableGroup';
 import { isHighLevelTable } from '@/utils/validation';
 
 import * as styles from './EditOverlay.styles';
 
-/** What an editor writes into, and what it shows while the value is empty. */
-const EDITABLE: Partial<Record<FocusType, string>> = {
-  [FocusType.tableName]: 'table',
-  [FocusType.tableComment]: 'comment',
-  [FocusType.columnName]: 'column',
-  [FocusType.columnDataType]: 'dataType',
-  [FocusType.columnDefault]: 'default',
-  [FocusType.columnComment]: 'comment',
+/** What an editor writes into, and the key of what it shows while the value is empty. */
+const EDITABLE: Partial<Record<FocusType, PlainMessageKey>> = {
+  [FocusType.tableName]: 'common.placeholder.table',
+  [FocusType.tableLogicalName]: 'common.placeholder.logicalName',
+  [FocusType.tableComment]: 'common.placeholder.comment',
+  [FocusType.columnName]: 'common.placeholder.column',
+  [FocusType.columnLogicalName]: 'common.placeholder.logicalName',
+  [FocusType.columnDataType]: 'common.placeholder.dataType',
+  [FocusType.columnDomain]: 'common.placeholder.domain',
+  [FocusType.columnDefault]: 'common.placeholder.default',
+  [FocusType.columnComment]: 'common.placeholder.comment',
 };
 
 type CellTarget = {
   kind: 'cell';
+  /** The field the editor writes, which picks the editor too (toEditedFocusType). */
   focusType: FocusType;
   tableId: string;
   columnId: string | null;
@@ -82,7 +110,11 @@ type CellTarget = {
   y: number;
   width: number;
   value: string;
-  placeholder: string;
+  placeholderKey: PlainMessageKey;
+  /** The name the cell draws dimmed in its place while the value is blank, shown in the key's stead; '' for none. */
+  standIn: string;
+  /** The text color a header its group tints takes, its value and placeholder alike; null for the theme's. */
+  textColor: string | null;
 };
 
 type MemoTarget = {
@@ -96,18 +128,35 @@ type MemoTarget = {
   value: string;
 };
 
-type EditTarget = CellTarget | MemoTarget;
+type TableGroupTarget = {
+  kind: 'tableGroup';
+  groupId: string;
+  /** Where the name this replaces is drawn, in canvas coordinates. */
+  x: number;
+  y: number;
+  width: number;
+  value: string;
+  /** The text color the group's color takes, its value and placeholder alike; null for the theme's. */
+  textColor: string | null;
+};
+
+type EditTarget = CellTarget | MemoTarget | TableGroupTarget;
 
 /**
- * The column field a cell editor writes into. Only the four column focus types
- * EDITABLE names reach here, so the comment cell is what is left over.
+ * The column field a cell editor writes into. Only the six column focus types
+ * EDITABLE names reach here, so the comment cell is what is left over; the
+ * domain picker opens on no text, since it searches and writes none.
  */
 function getColumnValue(column: Column, focusType: FocusType): string {
   switch (focusType) {
     case FocusType.columnName:
       return column.name;
+    case FocusType.columnLogicalName:
+      return column.logicalName;
     case FocusType.columnDataType:
       return column.dataType;
+    case FocusType.columnDomain:
+      return '';
     case FocusType.columnDefault:
       return column.default;
     default:
@@ -115,10 +164,68 @@ function getColumnValue(column: Column, focusType: FocusType): string {
   }
 }
 
+/** The header field a cell editor writes into, the comment again what is left over. */
+function getTableValue(table: Table, focusType: FocusType): string {
+  switch (focusType) {
+    case FocusType.tableName:
+      return table.name;
+    case FocusType.tableLogicalName:
+      return table.logicalName;
+    default:
+      return table.comment;
+  }
+}
+
+/**
+ * The placeholder a logical name editor shows: what its cell draws while it is
+ * blank, the name in the logical view, so the editor opens on the text it hides.
+ */
+const toPlaceholder = (
+  state: RootState,
+  focusType: FocusType,
+  name: string,
+  placeholderKey: PlainMessageKey
+): Pick<CellTarget, 'placeholderKey' | 'standIn'> => {
+  if (
+    focusType !== FocusType.tableLogicalName &&
+    focusType !== FocusType.columnLogicalName
+  ) {
+    return { placeholderKey, standIn: '' };
+  }
+
+  const { standIn, key } = blankLogicalName(
+    state.settings,
+    name,
+    focusType === FocusType.tableLogicalName
+      ? 'common.placeholder.table'
+      : 'common.placeholder.column'
+  );
+  return { placeholderKey: key, standIn };
+};
+
+/**
+ * The field a row's cell editor writes: the one its slot's focus names, but
+ * the type for the logical view's type cell while it draws the type, since a
+ * row that links no listed domain by a name shows its type there.
+ */
+function toEditedFocusType(
+  state: RootState,
+  column: Column,
+  slot: ColumnCellSlot
+): FocusType {
+  return slot.focusType === FocusType.columnDomain &&
+    slot.columnType === ColumnType.columnDataType &&
+    !drawsDomainInTypeCell(state, column)
+    ? FocusType.columnDataType
+    : slot.focusType;
+}
+
 const keyOf = (target: EditTarget) =>
   target.kind === 'memo'
     ? `memo:${target.memoId}`
-    : `${target.tableId}:${target.columnId ?? ''}:${target.focusType}`;
+    : target.kind === 'tableGroup'
+      ? `tableGroup:${target.groupId}`
+      : `${target.tableId}:${target.columnId ?? ''}:${target.focusType}`;
 
 /**
  * The cell the editor is open on, or null while none is. Every box comes out of
@@ -134,8 +241,8 @@ function resolveCellTarget(state: RootState): CellTarget | null {
   // table's tombstone keeps its columns, so this covers a column cell as well.
   if (!doc.tableIds.includes(focusTable.tableId)) return null;
 
-  const placeholder = EDITABLE[focusTable.focusType];
-  if (placeholder === undefined) return null;
+  const placeholderKey = EDITABLE[focusTable.focusType];
+  if (placeholderKey === undefined) return null;
 
   const table = query(collections)
     .collection('tableEntities')
@@ -158,9 +265,9 @@ function resolveCellTarget(state: RootState): CellTarget | null {
       x: rect.x + HEADER_CELLS_X + slot.x,
       y: rect.y + getHeaderCellsY() + getHeaderTextY(),
       width: slot.width,
-      value:
-        slot.focusType === FocusType.tableName ? table.name : table.comment,
-      placeholder,
+      value: getTableValue(table, slot.focusType),
+      ...toPlaceholder(state, slot.focusType, table.name, placeholderKey),
+      textColor: getTableHeaderTint(state, table)?.foreground ?? null,
     };
   }
 
@@ -177,16 +284,27 @@ function resolveCellTarget(state: RootState): CellTarget | null {
   );
   if (!slot) return null;
 
+  const focusType = toEditedFocusType(state, column, slot);
+  // EDITABLE names the type's key too, so the lookup always finds one.
+  const key = EDITABLE[focusType] as PlainMessageKey;
+
   return {
     kind: 'cell',
-    focusType: slot.focusType,
+    focusType,
     tableId: table.id,
     columnId: column.id,
     x: rect.x + slot.x,
     y: getColumnRect(state, table, index).y + getColumnTextY(),
     width: slot.width,
-    value: getColumnValue(column, slot.focusType),
-    placeholder,
+    value: getColumnValue(column, focusType),
+    // A domain picker shows the name its cell drew, or the placeholder a blank one drew.
+    ...(focusType === FocusType.columnDomain
+      ? {
+          placeholderKey: key,
+          standIn: getLiveDomainName(state, column.domainId),
+        }
+      : toPlaceholder(state, focusType, column.name, key)),
+    textColor: null,
   };
 }
 
@@ -198,8 +316,8 @@ function resolveCellTarget(state: RootState): CellTarget | null {
 function resolveMemoTarget(state: RootState): MemoTarget | null {
   const { editor, collections, doc } = state;
   const { editMemoId } = editor;
-  // The document's own list, because a removed entity is still in collections
-  // until the next gc and would keep an editor open over nothing.
+  // The document's own list, because a removed entity stays in collections as
+  // a tombstone and would keep an editor open over nothing.
   if (!editMemoId || !doc.memoIds.includes(editMemoId)) return null;
 
   const memo = query(collections)
@@ -218,12 +336,51 @@ function resolveMemoTarget(state: RootState): MemoTarget | null {
   };
 }
 
-/** The one editor open over the scene: a memo body outranks a table cell. */
+/**
+ * The group whose name the editor is open on, or null while none is or groups
+ * are hidden. The box is the one the bar draws the name in, past the padding at
+ * each end, so the caret lands where the name was.
+ */
+function resolveTableGroupTarget(state: RootState): TableGroupTarget | null {
+  const { editor, collections, doc } = state;
+  const { editTableGroupId } = editor;
+  if (
+    !editTableGroupId ||
+    !doc.tableGroupIds.includes(editTableGroupId) ||
+    !isTableGroupShown(state)
+  ) {
+    return null;
+  }
+
+  const group = query(collections)
+    .collection('tableGroupEntities')
+    .selectById(editTableGroupId);
+  if (!group) return null;
+
+  const { x, y, width } = getTableGroupRect(state, group);
+  const nameBox = getTableGroupNameBox(width);
+
+  return {
+    kind: 'tableGroup',
+    groupId: group.id,
+    x: x + nameBox.x,
+    y: y + nameBox.y,
+    width: nameBox.width,
+    value: group.name,
+    textColor: getTableGroupColors(group)?.foreground ?? null,
+  };
+}
+
+/** The one editor open over the scene: a memo body, then a group name, then a table cell. */
 const resolveEditTarget = (state: RootState): EditTarget | null =>
-  resolveMemoTarget(state) ?? resolveCellTarget(state);
+  resolveMemoTarget(state) ??
+  resolveTableGroupTarget(state) ??
+  resolveCellTarget(state);
 
 type MemoEditorProps = {
   target: MemoTarget;
+  /** Whether a close hands the keyboard back to the editor root (EditOverlay). */
+  handsFocusBack: () => boolean;
 };
 
 /**
@@ -248,7 +405,7 @@ const MemoEditor: FC<MemoEditorProps> = (props, ctx) => {
   const handleBlur = () => {
     const { store } = app.value;
     store.dispatch(editMemoEndAction());
-    ctx.host.dispatchEvent(focusEvent());
+    props.handsFocusBack() && ctx.host.dispatchEvent(focusEvent());
   };
 
   /**
@@ -326,6 +483,122 @@ const MemoEditor: FC<MemoEditorProps> = (props, ctx) => {
   );
 };
 
+type TableGroupNameEditorProps = {
+  target: TableGroupTarget;
+  placeholder: string;
+  /** Whether a close hands the keyboard back to the editor root (EditOverlay). */
+  handsFocusBack: () => boolean;
+};
+
+/**
+ * The input a group's name is edited in, in the bar's font and text color. It
+ * writes once: Enter, a blur or hidden groups commit a changed name as one
+ * action, while an Escape or a load opening a document over it writes nothing.
+ */
+const TableGroupNameEditor: FC<TableGroupNameEditorProps> = (props, ctx) => {
+  const app = useAppContext(ctx);
+  const { addUnsubscribe } = useUnmounted();
+  const input = createRef<HTMLInputElement>();
+  let cancelled = false;
+  let ended = false;
+  // Such a load closes it over another document, where the group may be
+  // another's; a replacing one leaves it open, or hides the groups.
+  let closedByLoad = false;
+
+  addUnsubscribe(
+    app.value.store.subscribe(actions => {
+      if (actions.some(({ type }) => type === EditorActionType.initialClear)) {
+        closedByLoad = true;
+      }
+    })
+  );
+
+  const end = (commit: boolean) => {
+    if (ended) return;
+    ended = true;
+
+    const { store } = app.value;
+    const { doc, collections, editor } = store.state;
+    const { groupId } = props.target;
+    const handBack = () =>
+      props.handsFocusBack() && ctx.host.dispatchEvent(focusEvent());
+    // The store closed it before its input left the page: hidden groups keep
+    // the name typed, as the blur would have.
+    const closedByStore = editor.editTableGroupId !== groupId;
+    if (closedByStore && closedByLoad) return;
+    const value = input.value?.value ?? props.target.value;
+    // The document's own list, since a removed group stays in collections as a
+    // tombstone and a name written to it would be an edit of nothing.
+    const group = doc.tableGroupIds.includes(groupId)
+      ? query(collections).collection('tableGroupEntities').selectById(groupId)
+      : undefined;
+    const changed = Boolean(commit && group && group.name !== value);
+
+    const actions = [
+      ...(changed ? [changeTableGroupNameAction({ id: groupId, value })] : []),
+      ...(closedByStore ? [] : [editTableGroupEndAction()]),
+    ];
+    if (actions.length) store.dispatch(...actions);
+    handBack();
+  };
+
+  // Escape goes on to the stop branch, whose focus change blurs this input,
+  // so the flag is what keeps that blur from committing.
+  const handleKeydown = (event: KeyboardEvent) => {
+    if (isComposing(event)) return;
+
+    if (event.key === 'Escape') {
+      cancelled = true;
+    } else if (event.key === 'Enter') {
+      end(true);
+    }
+  };
+
+  const handleBlur = () => {
+    end(!cancelled);
+  };
+
+  // The name goes in once as it opens, so a peer's rename while it is open
+  // never overwrites what is being typed.
+  onMounted(() => {
+    const el = input.value;
+    if (!el) return;
+
+    el.value = props.target.value;
+    lastCursorFocus(el);
+  });
+
+  return () => (
+    <input
+      class="table-group-name-input"
+      use:ref={ref(input)}
+      type="text"
+      spellcheck="false"
+      placeholder={props.placeholder}
+      style={{
+        display: 'block',
+        width: `${props.target.width}px`,
+        height: `${getTableGroupNameBox().height}px`,
+        margin: '0',
+        padding: '0',
+        border: '0',
+        outline: 'none',
+        'box-sizing': 'border-box',
+        'background-color': 'transparent',
+        color: 'var(--cell-text-color, var(--active))',
+        'caret-color': 'var(--cell-text-color, var(--active))',
+        'font-family': SCENE_FONT_FAMILY,
+        'font-size': `${SCENE_FONT_SIZE}px`,
+        'font-weight': TABLE_GROUP_TITLE_FONT_WEIGHT,
+        'line-height': 'normal',
+        'letter-spacing': '0em',
+      }}
+      on:keydown={handleKeydown}
+      on:blur={handleBlur}
+    />
+  );
+};
+
 /**
  * The one editing surface over the Stage. A canvas has no caret, no selection
  * and no IME, so the edited cell hides its konva text and a real input takes
@@ -333,7 +606,13 @@ const MemoEditor: FC<MemoEditorProps> = (props, ctx) => {
  */
 const EditOverlay: FC = (_, ctx) => {
   const app = useAppContext(ctx);
+  const i18n = useI18n(ctx);
   const sourceRef = useSceneSource(ctx);
+  // The document the last pass that drew an editor stood over. An editor a
+  // load takes away hands the keyboard to nothing, or the root would take the
+  // next key meant for the text as a chord, a removal of what stays selected.
+  let shownOver: RootState['doc'] | null = null;
+  const handsFocusBack = () => app.value.store.state.doc === shownOver;
 
   const handleEditEnd = () => {
     const { store } = app.value;
@@ -358,17 +637,68 @@ const EditOverlay: FC = (_, ctx) => {
       return;
     }
 
+    // A key writes the logical name alone and derives no name from it.
     const payload = { id: target.tableId, value: input.value };
     store.dispatch(
       target.focusType === FocusType.tableName
-        ? changeTableNameAction(payload)
-        : changeTableCommentAction(payload)
+        ? changeTableNameAction$(target.tableId, input.value)
+        : target.focusType === FocusType.tableLogicalName
+          ? changeTableLogicalNameAction(payload)
+          : changeTableCommentAction(payload)
     );
   };
 
-  const editor = (target: EditTarget): DOMTemplateLiterals => {
+  const editor = (
+    target: EditTarget,
+    placeholder: string
+  ): DOMTemplateLiterals => {
     if (target.kind === 'memo') {
-      return <MemoEditor target={target} />;
+      return <MemoEditor target={target} handsFocusBack={handsFocusBack} />;
+    }
+
+    if (target.kind === 'tableGroup') {
+      return (
+        <TableGroupNameEditor
+          target={target}
+          placeholder={placeholder}
+          handsFocusBack={handsFocusBack}
+        />
+      );
+    }
+
+    const { focusType, tableId, columnId } = target;
+
+    if (
+      focusType === FocusType.tableLogicalName ||
+      focusType === FocusType.columnLogicalName
+    ) {
+      return (
+        <ColumnLogicalName
+          tableId={tableId}
+          columnId={columnId}
+          width={target.width}
+          value={target.value}
+          placeholder={placeholder}
+          onBlur={handleEditEnd}
+          onEditEnd={handleEditEnd}
+          onInput={handleInput}
+          handsFocusBack={handsFocusBack}
+        />
+      );
+    }
+
+    if (focusType === FocusType.columnDomain && columnId) {
+      return (
+        <ColumnDomain
+          tableId={tableId}
+          columnId={columnId}
+          width={target.width}
+          placeholder={placeholder}
+          onBlur={handleEditEnd}
+          onEditEnd={handleEditEnd}
+          handsFocusBack={handsFocusBack}
+        />
+      );
     }
 
     if (target.focusType === FocusType.columnDataType && target.columnId) {
@@ -383,13 +713,14 @@ const EditOverlay: FC = (_, ctx) => {
           onBlur={handleEditEnd}
           onEditEnd={handleEditEnd}
           onInput={handleInput}
+          handsFocusBack={handsFocusBack}
         />
       );
     }
 
     return (
       <EditInput
-        placeholder={target.placeholder}
+        placeholder={placeholder}
         width={target.width}
         value={target.value}
         focus={true}
@@ -397,6 +728,7 @@ const EditOverlay: FC = (_, ctx) => {
         autofocus={true}
         onBlur={handleEditEnd}
         onInput={handleInput}
+        handsFocusBack={handsFocusBack}
       />
     );
   };
@@ -409,7 +741,15 @@ const EditOverlay: FC = (_, ctx) => {
     const { store } = app.value;
     const { settings } = store.state;
     const target = resolveEditTarget(store.state);
+    if (target) shownOver = store.state.doc;
     const { zoomLevel } = settings;
+    // Read here rather than in the editor, which repeat draws outside this pass.
+    const placeholder =
+      target?.kind === 'cell'
+        ? target.standIn || i18n.value.t(target.placeholderKey)
+        : target?.kind === 'tableGroup'
+          ? i18n.value.t('common.unnamed')
+          : '';
 
     return (
       <div
@@ -431,6 +771,7 @@ const EditOverlay: FC = (_, ctx) => {
               class={[
                 'edit-overlay-cell',
                 item.kind === 'cell' ? styles.cell : null,
+                item.kind === 'cell' && item.textColor ? styles.tinted : null,
               ]}
               style={{
                 position: 'absolute',
@@ -447,9 +788,14 @@ const EditOverlay: FC = (_, ctx) => {
                       '--cell-text-height': `${getCellTextHeight()}px`,
                     }
                   : {}),
+                // A tinted header or a colored group keeps its text color in
+                // its input alone, not in a list the input opens.
+                ...(item.kind !== 'memo' && item.textColor
+                  ? { '--cell-text-color': item.textColor }
+                  : {}),
               }}
             >
-              {editor(item)}
+              {editor(item, placeholder)}
             </div>
           );
         })}

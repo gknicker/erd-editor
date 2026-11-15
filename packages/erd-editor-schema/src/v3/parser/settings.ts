@@ -6,11 +6,16 @@ import {
   isNumber,
   isPlainObject,
   isString,
+  pick,
+  uniq,
 } from 'es-toolkit';
 
-import { assign, validNumber } from '@/helper';
+import { assign, validNumber, validString } from '@/helper';
 import { DeepPartial } from '@/internal-types';
-import { migrateScrollToOrigin } from '@/v3/parser/migrateScroll';
+import {
+  type LegacyScrollBox,
+  migrateScrollToOrigin,
+} from '@/v3/parser/migrateScroll';
 import {
   BracketType,
   BracketTypeList,
@@ -23,10 +28,18 @@ import {
   ColumnTypeList,
   Database,
   DatabaseList,
+  InvertedLockSettings,
+  isSettingLocked,
   Language,
   LanguageList,
+  LockedValues,
+  LockSettingFields,
+  LockSettingType,
+  LockSettingTypeList,
   NameCase,
   NameCaseList,
+  NameViewMode,
+  NameViewModeList,
   Settings,
   Show,
 } from '@/v3/schema/settings';
@@ -40,42 +53,169 @@ const defaultShow =
   Show.columnNotNull |
   Show.relationship;
 
-const createSettings = (): Settings => ({
-  width: 2000,
-  height: 2000,
-  scrollTop: 0,
-  scrollLeft: 0,
-  originX: 0,
-  originY: 0,
-  zoomLevel: 1,
-  show: defaultShow,
-  database: Database.MySQL,
-  databaseName: '',
-  canvasType: CanvasType.ERD,
-  language: Language.GraphQL,
-  tableNameCase: NameCase.pascalCase,
-  columnNameCase: NameCase.camelCase,
-  bracketType: BracketType.none,
-  relationshipDataTypeSync: true,
-  relationshipOptimization: false,
-  columnOrder: [
-    ColumnType.columnName,
-    ColumnType.columnDataType,
-    ColumnType.columnNotNull,
-    ColumnType.columnUnique,
-    ColumnType.columnAutoIncrement,
-    ColumnType.columnDefault,
-    ColumnType.columnComment,
-  ],
-  maxWidthComment: -1,
-  ignoreSaveSettings: 0,
-});
+/** Every lock on: each bit set but the inverted ones, which lock while clear. */
+const LOCK_ALL =
+  LockSettingTypeList.reduce((acc, bit) => acc | bit, 0) &
+  ~InvertedLockSettings;
+
+const LOCKED_FIELDS = LockSettingTypeList.flatMap(
+  bit => LockSettingFields[bit]
+);
+
+/**
+ * What the lockable settings hold now, which is what a document saved them as
+ * when it was just parsed.
+ */
+export const toLockedValues = (settings: LockedValues): LockedValues =>
+  pick(settings, LOCKED_FIELDS);
+
+/**
+ * A new document's column order, which a parse also reads the place of each
+ * column type an order lacks from.
+ */
+const DEFAULT_COLUMN_ORDER: ReadonlyArray<number> = [
+  ColumnType.columnLogicalName,
+  ColumnType.columnName,
+  ColumnType.columnDataType,
+  ColumnType.columnDomain,
+  ColumnType.columnNotNull,
+  ColumnType.columnUnique,
+  ColumnType.columnAutoIncrement,
+  ColumnType.columnDefault,
+  ColumnType.columnComment,
+];
+
+const createSettings = (): Settings => {
+  const settings: Omit<Settings, 'lockedValues'> = {
+    originX: 0,
+    originY: 0,
+    zoomLevel: 1,
+    show: defaultShow,
+    database: Database.MySQL,
+    databaseName: '',
+    canvasType: CanvasType.ERD,
+    language: Language.GraphQL,
+    tableNameCase: NameCase.pascalCase,
+    columnNameCase: NameCase.camelCase,
+    bracketType: BracketType.none,
+    relationshipDataTypeSync: true,
+    columnOrder: [...DEFAULT_COLUMN_ORDER],
+    maxWidthComment: -1,
+    lockSettings: LOCK_ALL,
+    ddlScripts: { before: '', after: '' },
+    nameViewMode: NameViewMode.physical,
+  };
+  return { ...settings, lockedValues: toLockedValues(settings) };
+};
+
+const isOrderOf = (
+  columnTypes: ReadonlyArray<number>,
+  order: ReadonlyArray<unknown>
+) =>
+  order.length === columnTypes.length &&
+  difference(columnTypes, order as number[]).length === 0;
+
+const isKnownColumnType = (value: unknown): value is number =>
+  (ColumnTypeList as ReadonlyArray<unknown>).includes(value);
+
+/** Where in the order the first of the column types given that it holds stands, or -1. */
+function indexOfHeld(
+  order: ReadonlyArray<number>,
+  columnTypes: ReadonlyArray<number>
+): number {
+  for (const columnType of columnTypes) {
+    const index = order.indexOf(columnType);
+    if (index !== -1) return index;
+  }
+  return -1;
+}
+
+/**
+ * A saved column order as the full one: each column type this release knows,
+ * once and as ordered, and each it lacks next to its neighbour in the default
+ * order. An order naming no column type this release knows is null.
+ */
+export function toFullColumnOrder(order: unknown): number[] | null {
+  if (!Array.isArray(order)) return null;
+  if (isOrderOf(ColumnTypeList, order)) return order;
+
+  const full = uniq(order.filter(isKnownColumnType));
+  if (!full.length) return null;
+
+  DEFAULT_COLUMN_ORDER.forEach((columnType, index) => {
+    if (full.includes(columnType)) return;
+
+    // Just after the nearest type before it in the default order that the
+    // order holds, or with none just before the nearest one after it.
+    const before = indexOfHeld(
+      full,
+      DEFAULT_COLUMN_ORDER.slice(0, index).reverse()
+    );
+    full.splice(
+      before === -1
+        ? indexOfHeld(full, DEFAULT_COLUMN_ORDER.slice(index + 1))
+        : before + 1,
+      0,
+      columnType
+    );
+  });
+
+  return full;
+}
+
+/**
+ * The column order a document saves: seven entries while the logical name and
+ * the domain stand where toFullColumnOrder would put them, so a file that never
+ * moved them keeps its bytes and an older release keeps its order.
+ */
+export function toSavedColumnOrder(order: number[]): number[] {
+  if (!Array.isArray(order)) return order;
+
+  const seven = order.filter(
+    columnType =>
+      columnType !== ColumnType.columnLogicalName &&
+      columnType !== ColumnType.columnDomain
+  );
+  const full = toFullColumnOrder(seven);
+
+  return full?.length === order.length &&
+    full.every((columnType, index) => columnType === order[index])
+    ? seven
+    : order;
+}
+
+const LEGACY_CANVAS_SIZE = 2000;
+
+const isFiniteNumber = (value: unknown): value is number =>
+  Number.isFinite(value);
 
 const sizeInRange = (value: number) =>
   clamp(value, CANVAS_SIZE_MIN, CANVAS_SIZE_MAX);
 const zoomInRange = (value: number) =>
   clamp(value, CANVAS_ZOOM_MIN, CANVAS_ZOOM_MAX);
 const maxWidthCommentInRange = (value: number) => clamp(value, 60, 200);
+
+/**
+ * The canvas box and scroll pair of a document saved before the origin, read
+ * off its raw settings since no parsed field holds them: each size clamped as
+ * it was then, a missing field at the default it had.
+ */
+function toLegacyScrollBox(
+  json: Record<string, unknown>,
+  zoomLevel: number
+): LegacyScrollBox {
+  const size = (value: unknown) =>
+    isNumber(value) ? sizeInRange(value) : LEGACY_CANVAS_SIZE;
+  const scroll = (value: unknown) => (isNumber(value) ? value : 0);
+
+  return {
+    width: size(json.width),
+    height: size(json.height),
+    zoomLevel,
+    scrollLeft: scroll(json.scrollLeft),
+    scrollTop: scroll(json.scrollTop),
+  };
+}
 
 export function createAndMergeSettings(json?: DeepPartial<Settings>): Settings {
   const settings = createSettings();
@@ -85,12 +225,6 @@ export function createAndMergeSettings(json?: DeepPartial<Settings>): Settings {
   const assignString = assign(isString, settings, json);
   const assignBoolean = assign(isBoolean, settings, json);
 
-  if (isNumber(json.width)) {
-    settings.width = sizeInRange(json.width);
-  }
-  if (isNumber(json.height)) {
-    settings.height = sizeInRange(json.height);
-  }
   if (isNumber(json.zoomLevel)) {
     settings.zoomLevel = zoomInRange(json.zoomLevel);
   }
@@ -98,37 +232,62 @@ export function createAndMergeSettings(json?: DeepPartial<Settings>): Settings {
     settings.maxWidthComment = maxWidthCommentInRange(json.maxWidthComment);
   }
 
-  assignNumber('scrollTop');
-  assignNumber('scrollLeft');
   assignNumber('show');
-  assignNumber('ignoreSaveSettings');
   assignString('databaseName');
   assignString('canvasType');
   assignBoolean('relationshipDataTypeSync');
-  assignBoolean('relationshipOptimization');
 
   assign(validNumber(DatabaseList), settings, json)('database');
   assign(validNumber(LanguageList), settings, json)('language');
   assign(validNumber(NameCaseList), settings, json)('tableNameCase');
   assign(validNumber(NameCaseList), settings, json)('columnNameCase');
   assign(validNumber(BracketTypeList), settings, json)('bracketType');
+  assign(validString(NameViewModeList), settings, json)('nameViewMode');
 
-  if (
-    Array.isArray(json.columnOrder) &&
-    ColumnTypeList.length === json.columnOrder.length &&
-    difference(ColumnTypeList, json.columnOrder).length === 0
-  ) {
-    settings.columnOrder = json.columnOrder as number[];
-  }
+  settings.columnOrder =
+    toFullColumnOrder(json.columnOrder) ?? settings.columnOrder;
 
-  if (isNumber(json.originX) && isNumber(json.originY)) {
+  if (isFiniteNumber(json.originX) && isFiniteNumber(json.originY)) {
     settings.originX = json.originX;
     settings.originY = json.originY;
   } else {
-    const { originX, originY } = migrateScrollToOrigin(settings);
+    const { originX, originY } = migrateScrollToOrigin(
+      toLegacyScrollBox(json, settings.zoomLevel)
+    );
     settings.originX = originX;
     settings.originY = originY;
   }
 
+  if (isNumber(json.lockSettings)) {
+    // Every bit, unknown ones too as with show, so a lock a later release adds
+    // outlives a save by this one; made only the int32 a bit test reads.
+    settings.lockSettings = json.lockSettings | 0;
+    // A tab no editor locks, which only a hand edit can have written.
+    if (
+      isSettingLocked(settings.lockSettings, LockSettingType.canvasType) &&
+      settings.canvasType === CanvasType.settings
+    ) {
+      settings.canvasType = CanvasType.ERD;
+    }
+    settings.lockedValues = toLockedValues(settings);
+  } else {
+    resetPreLockView(settings);
+  }
+
+  const assignScript = assign(isString, settings.ddlScripts, json.ddlScripts);
+  assignScript('before');
+  assignScript('after');
+
   return settings;
+}
+
+/**
+ * A document saved before the locks, every one of which it opens with on:
+ * its view and tab start where a new document's do, since what it saved of
+ * them was only where its last reader stood.
+ */
+export function resetPreLockView(settings: Settings): void {
+  const { originX, originY, zoomLevel, canvasType } = createSettings();
+  Object.assign(settings, { originX, originY, zoomLevel, canvasType });
+  settings.lockedValues = toLockedValues(settings);
 }

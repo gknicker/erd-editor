@@ -1,3 +1,4 @@
+import { LockSettingType } from '@dineug/erd-editor/peer.js';
 import {
   afterEach,
   beforeEach,
@@ -12,6 +13,14 @@ import { createFakeHub } from '@/__test-utils__/fakeHub';
 import { connectMcp, type McpHarness } from '@/__test-utils__/mcp';
 import { createMemoryHost, type MemoryHost } from '@/__test-utils__/memoryHost';
 import { createEmptyDocument } from '@/session/disk';
+
+/**
+ * A new document locks every setting, so no reader's view is saved. The name
+ * view's bit stays clear, since it unlocks while set.
+ */
+const NEW_LOCKS = Object.values(LockSettingType)
+  .filter(bit => bit !== LockSettingType.unlockNameViewMode)
+  .reduce((a, b) => a | b, 0);
 
 let io: MemoryHost;
 let mcp: McpHarness;
@@ -53,6 +62,8 @@ describe('erd_open_document with create (AC-M7)', () => {
     });
     expect(bytes).toBe(createEmptyDocument());
     expect(JSON.parse(bytes).$schema).toMatch(/json-schema\/schema\.json$/);
+    expect(JSON.parse(bytes).settings.lockSettings).toBe(NEW_LOCKS);
+    expect(JSON.parse(bytes).settings).not.toHaveProperty('ignoreSaveSettings');
   });
 
   it('opens an existing document as it is, creating nothing', async () => {
@@ -101,7 +112,7 @@ describe('erd_open_document with create (AC-M7)', () => {
       toolName: 'erd_add_table',
     });
     expect(
-      JSON.parse(io.read('/work/kept.erd.json')).doc.tableIds
+      JSON.parse(io.read('/work/kept.erd.json')).doc.tableIds ?? []
     ).not.toContain(tableId);
   });
 
@@ -133,6 +144,9 @@ describe('erd_open_document with create (AC-M7)', () => {
     });
     expect(io.read('/work/live.erd.json')).toBe(createEmptyDocument());
     expect(hub.webview('/work/live.erd.json').value).toContain('"$schema"');
+    expect(JSON.parse(io.read('/work/live.erd.json')).settings).toMatchObject({
+      lockSettings: NEW_LOCKS,
+    });
     hub.destroy();
   });
 

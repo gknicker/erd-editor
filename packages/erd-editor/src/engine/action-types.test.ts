@@ -1,9 +1,23 @@
+import { readdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+
 import { describe, expect, it } from 'vite-plus/test';
 
+import { Open } from '@/constants/open';
+import { LockSettingType, LockSettingTypeList } from '@/constants/schema';
 import {
+  type ActionType,
   ChangeActionTypes,
+  ClockActionTypes,
+  EDIT_OPEN_KEYS,
+  EditStateOpenActionTypes,
   HistoryActionTypes,
+  LockSettingActionTypes,
+  movesClock,
   ReadonlyIgnoreActionTypes,
+  ReplicaActionTypes,
+  ReplicaChangeActionTypes,
+  ScreenSettingActionTypes,
   SharedActionTypes,
   SharedFollowingActionTypes,
   SharedStreamActionTypes,
@@ -17,22 +31,58 @@ import {
   pushStreamHistoryMap,
   pushUndoHistoryMap,
 } from '@/engine/history.actions';
+import { ActionType as DictionaryActionType } from '@/engine/modules/dictionary/actions';
+import {
+  actions as dictionaryActions,
+  dictionaryReducers,
+} from '@/engine/modules/dictionary/atom.actions';
 import { ActionType as EditorActionType } from '@/engine/modules/editor/actions';
-import { actions as editorActions } from '@/engine/modules/editor/atom.actions';
+import {
+  actions as editorActions,
+  editorReducers,
+  getLWWAction,
+  mergeLWWAction,
+} from '@/engine/modules/editor/atom.actions';
 import { ActionType as IndexActionType } from '@/engine/modules/index/actions';
-import { actions as indexActions } from '@/engine/modules/index/atom.actions';
+import {
+  actions as indexActions,
+  indexReducers,
+} from '@/engine/modules/index/atom.actions';
 import { ActionType as IndexColumnActionType } from '@/engine/modules/index-column/actions';
-import { actions as indexColumnActions } from '@/engine/modules/index-column/atom.actions';
+import {
+  actions as indexColumnActions,
+  indexColumnReducers,
+} from '@/engine/modules/index-column/atom.actions';
 import { ActionType as MemoActionType } from '@/engine/modules/memo/actions';
-import { actions as memoActions } from '@/engine/modules/memo/atom.actions';
+import {
+  actions as memoActions,
+  memoReducers,
+} from '@/engine/modules/memo/atom.actions';
 import { ActionType as RelationshipActionType } from '@/engine/modules/relationship/actions';
-import { actions as relationshipActions } from '@/engine/modules/relationship/atom.actions';
+import {
+  actions as relationshipActions,
+  relationshipReducers,
+} from '@/engine/modules/relationship/atom.actions';
 import { ActionType as SettingsActionType } from '@/engine/modules/settings/actions';
-import { actions as settingsActions } from '@/engine/modules/settings/atom.actions';
+import {
+  actions as settingsActions,
+  settingsReducers,
+} from '@/engine/modules/settings/atom.actions';
 import { ActionType as TableActionType } from '@/engine/modules/table/actions';
-import { actions as tableActions } from '@/engine/modules/table/atom.actions';
+import {
+  actions as tableActions,
+  tableReducers,
+} from '@/engine/modules/table/atom.actions';
 import { ActionType as TableColumnActionType } from '@/engine/modules/table-column/actions';
-import { actions as tableColumnActions } from '@/engine/modules/table-column/atom.actions';
+import {
+  actions as tableColumnActions,
+  tableColumnReducers,
+} from '@/engine/modules/table-column/atom.actions';
+import { ActionType as TableGroupActionType } from '@/engine/modules/table-group/actions';
+import {
+  actions as tableGroupActions,
+  tableGroupReducers,
+} from '@/engine/modules/table-group/atom.actions';
 
 const allActionTypes = new Set<string>([
   ...Object.values(EditorActionType),
@@ -43,10 +93,13 @@ const allActionTypes = new Set<string>([
   ...Object.values(SettingsActionType),
   ...Object.values(IndexActionType),
   ...Object.values(IndexColumnActionType),
+  ...Object.values(TableGroupActionType),
+  ...Object.values(DictionaryActionType),
 ]);
 
 const atomActionTypes = new Set<string>(
   [
+    dictionaryActions,
     editorActions,
     indexActions,
     indexColumnActions,
@@ -55,6 +108,7 @@ const atomActionTypes = new Set<string>(
     settingsActions,
     tableActions,
     tableColumnActions,
+    tableGroupActions,
   ].flatMap(barrel => Object.values(barrel).map(creator => creator.type))
 );
 
@@ -69,6 +123,7 @@ const READONLY_IGNORED = [
   'settings.changeTableNameCase',
   'settings.changeColumnNameCase',
   'settings.changeBracketType',
+  'settings.changeNameViewMode',
 ];
 
 describe('ChangeActionTypes', () => {
@@ -99,6 +154,7 @@ describe('ChangeActionTypes', () => {
 
     expect([...namespaces].sort()).toEqual([
       'column',
+      'dictionary',
       'editor',
       'index',
       'indexColumn',
@@ -106,7 +162,43 @@ describe('ChangeActionTypes', () => {
       'relationship',
       'settings',
       'table',
+      'tableGroup',
     ]);
+  });
+
+  it('counts seventy-six change types, the Schema SQL scripts and the name view among them', () => {
+    expect(ChangeActionTypes).toHaveLength(76);
+    expect(ChangeActionTypes).toContain('settings.changeDDLScript');
+    expect(ChangeActionTypes).toContain('settings.changeNameViewMode');
+  });
+
+  it('carries a name view switch to the replica and the peers, follows it, takes it from a readonly reader and undoes none', () => {
+    const type = 'settings.changeNameViewMode';
+
+    expect(ReplicaActionTypes).toContain(type);
+    expect(SharedActionTypes).toContain(type);
+    expect(SharedFollowingActionTypes).toContain(type);
+    expect(ReadonlyIgnoreActionTypes).not.toContain(type);
+    expect(ViewIgnoreActionTypes).not.toContain(type);
+    expect(HistoryActionTypes).not.toContain(type);
+    expect(LockSettingActionTypes[type]).toBe(
+      LockSettingType.unlockNameViewMode
+    );
+  });
+
+  it('carries a script edit to the replica, the peers and the history, and lets no readonly host or view make one', () => {
+    expect(ReplicaChangeActionTypes).toContain('settings.changeDDLScript');
+    expect(ReplicaActionTypes).toContain('settings.changeDDLScript');
+    expect(SharedActionTypes).toContain('settings.changeDDLScript');
+    expect(HistoryActionTypes).toContain('settings.changeDDLScript');
+    expect(ReadonlyIgnoreActionTypes).toContain('settings.changeDDLScript');
+    expect(ViewIgnoreActionTypes).toContain('settings.changeDDLScript');
+    expect(LockSettingActionTypes).not.toHaveProperty(
+      'settings.changeDDLScript'
+    );
+    expect(SharedFollowingActionTypes).not.toContain(
+      'settings.changeDDLScript'
+    );
   });
 
   it('excludes purely local editor UI actions', () => {
@@ -114,6 +206,112 @@ describe('ChangeActionTypes', () => {
     expect(ChangeActionTypes).not.toContain('editor.changeViewport');
     expect(ChangeActionTypes).not.toContain('editor.sharedMouseTracker');
     expect(ChangeActionTypes).not.toContain('memo.changeZIndex');
+    expect(ChangeActionTypes).not.toContain('tableGroup.changeZIndex');
+  });
+});
+
+describe('the table group changes', () => {
+  const GROUP_CHANGES = [
+    'tableGroup.add',
+    'tableGroup.move',
+    'tableGroup.moveTo',
+    'tableGroup.remove',
+    'tableGroup.resize',
+    'tableGroup.changeName',
+    'tableGroup.changeColor',
+    'table.changeGroup',
+  ];
+
+  it('reach the file, the peers and the replica, and no readonly host or view makes one', () => {
+    for (const type of GROUP_CHANGES) {
+      expect(ChangeActionTypes).toContain(type);
+      expect(ReplicaActionTypes).toContain(type);
+      expect(SharedActionTypes).toContain(type);
+      expect(ReadonlyIgnoreActionTypes).toContain(type);
+      expect(ViewIgnoreActionTypes).toContain(type);
+      expect(HistoryActionTypes).toContain(type);
+      expect(LockSettingActionTypes).not.toHaveProperty(type);
+    }
+  });
+
+  it('stream a drag and a color with the tables and memos, and leave a resize one undo entry each', () => {
+    expect(StreamActionTypes).toEqual(
+      expect.arrayContaining(['tableGroup.move', 'tableGroup.changeColor'])
+    );
+    expect(StreamActionTypes).not.toContain('tableGroup.resize');
+    expect(StreamRegroupMoveActionTypes).toContain('tableGroup.move');
+    expect(StreamRegroupColorActionTypes).toContain('tableGroup.changeColor');
+  });
+
+  it('leave raising a group to the reader, in no list', () => {
+    expect(allActionTypes.has('tableGroup.changeZIndex')).toBe(true);
+    expect(HistoryActionTypes).not.toContain('tableGroup.changeZIndex');
+    expect(SharedActionTypes).not.toContain('tableGroup.changeZIndex');
+  });
+});
+
+describe('the dictionary and logical name changes', () => {
+  const DICTIONARY_CHANGES = [
+    'dictionary.add',
+    'dictionary.update',
+    'dictionary.remove',
+    'table.changeLogicalName',
+    'table.changeNameDerived',
+    'column.changeLogicalName',
+    'column.changeDomain',
+    'column.changeNameDerived',
+  ];
+
+  it('reach the file, the peers, the replica and the history, and no readonly host or view makes one', () => {
+    for (const type of DICTIONARY_CHANGES) {
+      expect(ChangeActionTypes).toContain(type);
+      expect(ReplicaChangeActionTypes).toContain(type);
+      expect(ReplicaActionTypes).toContain(type);
+      expect(SharedActionTypes).toContain(type);
+      expect(ReadonlyIgnoreActionTypes).toContain(type);
+      expect(ViewIgnoreActionTypes).toContain(type);
+      expect(HistoryActionTypes).toContain(type);
+      expect(atomActionTypes.has(type)).toBe(true);
+    }
+  });
+
+  it('are no stream, no lock and no following', () => {
+    for (const type of DICTIONARY_CHANGES) {
+      expect(StreamActionTypes).not.toContain(type);
+      expect(LockSettingActionTypes).not.toHaveProperty(type);
+      expect(SharedFollowingActionTypes).not.toContain(type);
+    }
+  });
+
+  it('are every type the dictionary module declares', () => {
+    expect(
+      DICTIONARY_CHANGES.filter(type => type.startsWith('dictionary.'))
+    ).toEqual(Object.values(DictionaryActionType));
+  });
+});
+
+describe('ReplicaChangeActionTypes', () => {
+  it('is ChangeActionTypes plus the save switch the locks replaced, a change of no other list', () => {
+    expect(ReplicaChangeActionTypes).toEqual([
+      ...ChangeActionTypes,
+      'settings.changeIgnoreSaveSettings',
+    ]);
+    expect(SharedActionTypes).not.toContain(
+      'settings.changeIgnoreSaveSettings'
+    );
+    expect(HistoryActionTypes).not.toContain(
+      'settings.changeIgnoreSaveSettings'
+    );
+  });
+});
+
+describe('ReplicaActionTypes', () => {
+  it('is what a replica reports plus the registers a window answers a join with, never reported', () => {
+    expect(ReplicaActionTypes).toEqual([
+      ...ReplicaChangeActionTypes,
+      'editor.mergeLWW',
+    ]);
+    expect(ReplicaChangeActionTypes).not.toContain('editor.mergeLWW');
   });
 });
 
@@ -139,17 +337,237 @@ describe('ReadonlyIgnoreActionTypes', () => {
     expect(ReadonlyIgnoreActionTypes).toContain('column.remove');
     expect(ReadonlyIgnoreActionTypes).toContain('editor.loadJson');
   });
+
+  it('counts sixty-five, every view edit and the two document replacements', () => {
+    expect(ReadonlyIgnoreActionTypes).toHaveLength(65);
+    expect(ReadonlyIgnoreActionTypes).toEqual([
+      ...ViewIgnoreActionTypes,
+      'editor.loadJson',
+      'editor.clear',
+    ]);
+  });
+});
+
+describe('EditStateOpenActionTypes', () => {
+  const CLOSING_TYPES = [
+    'editor.editTableEnd',
+    'editor.editMemoEnd',
+    'editor.editTableGroupEnd',
+    'editor.drawEndRelationship',
+  ];
+
+  it('names the cell, memo text and group name editors and the two steps that start a draw', () => {
+    expect(EditStateOpenActionTypes).toEqual([
+      'editor.editTable',
+      'editor.editMemo',
+      'editor.editTableGroup',
+      'editor.drawStartRelationship',
+      'editor.drawStartAddRelationship',
+    ]);
+  });
+
+  it('extends the readonly list to seventy for the editor, and leaves it sixty-five', () => {
+    const extended = new Set([
+      ...ReadonlyIgnoreActionTypes,
+      ...EditStateOpenActionTypes,
+    ]);
+
+    expect(extended.size).toBe(70);
+    for (const type of EditStateOpenActionTypes) {
+      expect(ReadonlyIgnoreActionTypes).not.toContain(type);
+    }
+  });
+
+  it('are declared by the editor module, with a creator each, in no list that reaches the file, the history, a peer or a view', () => {
+    for (const type of EditStateOpenActionTypes) {
+      expect(allActionTypes.has(type)).toBe(true);
+      expect(atomActionTypes.has(type)).toBe(true);
+      expect(ChangeActionTypes).not.toContain(type);
+      expect(HistoryActionTypes).not.toContain(type);
+      expect(SharedActionTypes).not.toContain(type);
+      expect(ViewIgnoreActionTypes).not.toContain(type);
+    }
+  });
+
+  it('leave out what closes an edit, and the raises of a table, a memo or a group', () => {
+    for (const type of [
+      ...CLOSING_TYPES,
+      'editor.changeOpenMap',
+      'table.changeZIndex',
+      'memo.changeZIndex',
+      'tableGroup.changeZIndex',
+    ]) {
+      expect(allActionTypes.has(type)).toBe(true);
+      expect(EditStateOpenActionTypes).not.toContain(type);
+    }
+  });
+
+  it('pairs with the three dialogs of the open map that write the document', () => {
+    expect(EDIT_OPEN_KEYS).toEqual([
+      Open.mapColumns,
+      Open.automaticTablePlacement,
+      Open.timeTravel,
+    ]);
+    for (const key of [
+      Open.tableProperties,
+      Open.diffViewer,
+      Open.exportImage,
+      Open.search,
+      Open.themeBuilder,
+      Open.localePicker,
+    ]) {
+      expect(EDIT_OPEN_KEYS).not.toContain(key);
+    }
+  });
+});
+
+describe('ScreenSettingActionTypes', () => {
+  it('names the eleven settings readonly lets through and the show bits', () => {
+    expect([...ScreenSettingActionTypes].sort()).toEqual(
+      [...READONLY_IGNORED, 'settings.changeShow'].sort()
+    );
+  });
+
+  it('holds change types alone, which a writable store sends, saves and undoes', () => {
+    ScreenSettingActionTypes.forEach(type => {
+      expect(ChangeActionTypes).toContain(type);
+      expect(atomActionTypes.has(type)).toBe(true);
+    });
+  });
+});
+
+describe('the end of a screen baseline', () => {
+  it('is declared by the editor module with a creator, in no list that reaches the file, the history, a peer or a view', () => {
+    const type = 'editor.endScreenSettings';
+
+    expect(allActionTypes.has(type)).toBe(true);
+    expect(atomActionTypes.has(type)).toBe(true);
+    [
+      ChangeActionTypes,
+      ReplicaActionTypes,
+      HistoryActionTypes,
+      SharedActionTypes,
+      ReadonlyIgnoreActionTypes,
+      EditStateOpenActionTypes,
+      ViewIgnoreActionTypes,
+      ScreenSettingActionTypes,
+    ].forEach(list => expect(list).not.toContain(type));
+  });
+});
+
+describe('LockSettingActionTypes', () => {
+  it('names the change of each lockable setting, under the lock that holds it', () => {
+    expect(LockSettingActionTypes).toEqual({
+      'settings.changeZoomLevel': LockSettingType.viewport,
+      'settings.streamZoomLevel': LockSettingType.viewport,
+      'settings.scrollTo': LockSettingType.viewport,
+      'settings.streamScrollTo': LockSettingType.viewport,
+      'settings.changeCanvasType': LockSettingType.canvasType,
+      'settings.changeLanguage': LockSettingType.language,
+      'settings.changeTableNameCase': LockSettingType.tableNameCase,
+      'settings.changeColumnNameCase': LockSettingType.columnNameCase,
+      'settings.changeBracketType': LockSettingType.bracketType,
+      'settings.changeNameViewMode': LockSettingType.unlockNameViewMode,
+    });
+  });
+
+  it('holds out only change actions, every lock among them', () => {
+    const types = Object.keys(LockSettingActionTypes) as ActionType[];
+
+    for (const type of types) expect(ChangeActionTypes).toContain(type);
+    expect(new Set(Object.values(LockSettingActionTypes))).toEqual(
+      new Set(LockSettingTypeList)
+    );
+  });
+
+  it('leaves the lock itself a change, which the file holds', () => {
+    expect(ChangeActionTypes).toContain('settings.changeLockSettings');
+    expect(LockSettingActionTypes).not.toHaveProperty(
+      'settings.changeLockSettings'
+    );
+  });
 });
 
 describe('ViewIgnoreActionTypes', () => {
-  it('is ReadonlyIgnoreActionTypes minus the two document replacements', () => {
+  const VIEW_IGNORED = [
+    'table.add',
+    'table.move',
+    'table.moveTo',
+    'table.remove',
+    'table.changeName',
+    'table.changeComment',
+    'table.changeColor',
+    'table.changeGroup',
+    'table.sort',
+    'table.changeLogicalName',
+    'table.changeNameDerived',
+    'column.add',
+    'column.remove',
+    'column.changeName',
+    'column.changeComment',
+    'column.changeDataType',
+    'column.changeDefault',
+    'column.changeAutoIncrement',
+    'column.changePrimaryKey',
+    'column.changeUnique',
+    'column.changeNotNull',
+    'column.move',
+    'column.changeLogicalName',
+    'column.changeDomain',
+    'column.changeNameDerived',
+    'relationship.add',
+    'relationship.remove',
+    'relationship.changeType',
+    'relationship.changeOnDelete',
+    'relationship.changeOnUpdate',
+    'relationship.changeColumns',
+    'index.add',
+    'index.remove',
+    'index.changeName',
+    'index.changeUnique',
+    'indexColumn.add',
+    'indexColumn.remove',
+    'indexColumn.move',
+    'indexColumn.changeOrderType',
+    'memo.add',
+    'memo.move',
+    'memo.moveTo',
+    'memo.remove',
+    'memo.changeValue',
+    'memo.changeColor',
+    'memo.resize',
+    'tableGroup.add',
+    'tableGroup.move',
+    'tableGroup.moveTo',
+    'tableGroup.remove',
+    'tableGroup.resize',
+    'tableGroup.changeName',
+    'tableGroup.changeColor',
+    'dictionary.add',
+    'dictionary.update',
+    'dictionary.remove',
+    'settings.changeDatabaseName',
+    'settings.changeShow',
+    'settings.changeRelationshipDataTypeSync',
+    'settings.changeColumnOrder',
+    'settings.changeMaxWidthComment',
+    'settings.changeLockSettings',
+    'settings.changeDDLScript',
+  ];
+
+  it('names sixty-three edits of the document, in the order of the change types', () => {
+    expect(ViewIgnoreActionTypes).toEqual(VIEW_IGNORED);
+    expect(ViewIgnoreActionTypes).toHaveLength(63);
+  });
+
+  it('holds every change but the readonly passes and the two document replacements', () => {
     expect(ViewIgnoreActionTypes).toEqual(
-      ReadonlyIgnoreActionTypes.filter(
-        type => type !== 'editor.loadJson' && type !== 'editor.clear'
+      ChangeActionTypes.filter(
+        type =>
+          !READONLY_IGNORED.includes(type) &&
+          type !== 'editor.loadJson' &&
+          type !== 'editor.clear'
       )
-    );
-    expect(ViewIgnoreActionTypes.length).toBe(
-      ReadonlyIgnoreActionTypes.length - 2
     );
   });
 
@@ -174,6 +592,7 @@ describe('view action types', () => {
     'editor.viewSetLayout',
     'editor.viewChangeShowMode',
     'editor.viewSetCenters',
+    'editor.viewStepCenters',
     'editor.changeVisualizationMode',
   ];
 
@@ -195,7 +614,59 @@ describe('view action types', () => {
   });
 });
 
+describe('the mapping edit', () => {
+  const MAPPING_EDIT = 'relationship.changeColumns';
+
+  it('is a change every list derived from the change types carries', () => {
+    expect(ChangeActionTypes).toContain(MAPPING_EDIT);
+    expect(ReadonlyIgnoreActionTypes).toContain(MAPPING_EDIT);
+    expect(ViewIgnoreActionTypes).toContain(MAPPING_EDIT);
+    expect(SharedActionTypes).toContain(MAPPING_EDIT);
+    expect(HistoryActionTypes).toContain(MAPPING_EDIT);
+    expect(LockSettingActionTypes).not.toHaveProperty(MAPPING_EDIT);
+  });
+
+  it('stands with the other relationship changes', () => {
+    expect(
+      ChangeActionTypes.filter(type => type.startsWith('relationship.'))
+    ).toEqual([
+      'relationship.add',
+      'relationship.remove',
+      'relationship.changeType',
+      'relationship.changeOnDelete',
+      'relationship.changeOnUpdate',
+      MAPPING_EDIT,
+    ]);
+  });
+
+  it('leaves the draw and the open dialogs to the reader, in no list', () => {
+    for (const type of [
+      'editor.drawStartRelationship',
+      'editor.drawStartAddRelationship',
+      'editor.drawEndRelationship',
+      'editor.drawRelationship',
+      'editor.changeOpenMap',
+    ]) {
+      expect(allActionTypes.has(type)).toBe(true);
+      expect(ChangeActionTypes).not.toContain(type);
+      expect(HistoryActionTypes).not.toContain(type);
+      expect(SharedActionTypes).not.toContain(type);
+      expect(ReadonlyIgnoreActionTypes).not.toContain(type);
+    }
+  });
+});
+
 describe('shared action types', () => {
+  // A transport outside the package keeps copies of the presence types and the
+  // handshake's two to tell them from the batches it logs, so the next two
+  // specs pin the names exactly and a rename here is one it has to follow.
+  it('names the register handshake by the two types a transport mirrors', () => {
+    expect([getLWWAction.type, mergeLWWAction.type]).toEqual([
+      'editor.getLWW',
+      'editor.mergeLWW',
+    ]);
+  });
+
   it('SharedStreamActionTypes tracks the ephemeral presence streams', () => {
     expect(SharedStreamActionTypes).toEqual([
       'editor.sharedMouseTracker',
@@ -226,16 +697,156 @@ describe('shared action types', () => {
       'settings.scrollTo',
       'settings.streamScrollTo',
       'settings.changeCanvasType',
+      'settings.changeNameViewMode',
     ]);
+  });
+});
+
+/** Every reducer the store runs, by the type it takes. */
+const reducers = Object.entries({
+  ...editorReducers,
+  ...tableReducers,
+  ...tableColumnReducers,
+  ...memoReducers,
+  ...relationshipReducers,
+  ...settingsReducers,
+  ...indexReducers,
+  ...indexColumnReducers,
+  ...tableGroupReducers,
+  ...dictionaryReducers,
+}) as Array<[string, (...args: never[]) => void]>;
+
+const MODULES_ROOT = join(process.cwd(), 'src/engine/modules');
+
+function moduleSources(directory = MODULES_ROOT, found: string[] = []) {
+  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    const path = join(directory, entry.name);
+    if (entry.isDirectory()) {
+      moduleSources(path, found);
+    } else if (entry.name.endsWith('.ts') && !entry.name.endsWith('.test.ts')) {
+      found.push(readFileSync(path, 'utf8'));
+    }
+  }
+  return found;
+}
+
+/** Each top-level declaration of the modules by name: its text up to the next one. */
+function moduleDeclarations(): Map<string, string> {
+  const found = new Map<string, string>();
+  for (const source of moduleSources()) {
+    const starts = [
+      ...source.matchAll(/^(?:export )?(?:const|function) (\w+)/gm),
+    ];
+    starts.forEach((start, index) => {
+      const end = starts[index + 1]?.index ?? source.length;
+      const text = source.slice(start.index, end);
+      found.set(start[1], (found.get(start[1]) ?? '') + text);
+    });
+  }
+  return found;
+}
+
+/**
+ * The declarations that write a register: each one calling an LWW operator,
+ * then each one calling such a declaration, until no more join, so a reducer
+ * that writes through a helper of another module counts.
+ */
+function registerWriters(declarations: Map<string, string>): Set<string> {
+  const writers = new Set<string>();
+  const writes = (text: string) =>
+    /\b(?:add|remove|replace)Operator\(/.test(text) ||
+    [...writers].some(writer => new RegExp(`\\b${writer}\\(`).test(text));
+
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (const [name, text] of declarations) {
+      if (!writers.has(name) && writes(text)) {
+        writers.add(name);
+        grew = true;
+      }
+    }
+  }
+  return writers;
+}
+
+describe('ClockActionTypes', () => {
+  it('is every change and the register handshake', () => {
+    expect(ClockActionTypes).toEqual([
+      ...ChangeActionTypes,
+      'editor.getLWW',
+      'editor.mergeLWW',
+    ]);
+  });
+
+  it('holds every type whose reducer writes a register, read off the modules', () => {
+    const declarations = moduleDeclarations();
+    const writers = registerWriters(declarations);
+    // A reducer the scan cannot name would pass unread, so each must be one.
+    const unread = reducers
+      .map(([, reducer]) => reducer.name)
+      .filter(name => name !== 'noop' && !declarations.has(name));
+    const writing = reducers
+      .filter(([, reducer]) => writers.has(reducer.name))
+      .map(([type]) => type);
+
+    expect(unread).toEqual([]);
+    expect(writing).toContain('editor.mergeLWW');
+    expect(writing).toContain('editor.loadJson');
+    expect(writing).toContain('settings.changeLanguage');
+    expect(writing).not.toContain('editor.initialLoadJson');
+    expect(
+      writing.filter(type => !ClockActionTypes.includes(type as ActionType))
+    ).toEqual([]);
+  });
+
+  it('decides each shared type outside the changes: the handshake moves the clock, presence does not', () => {
+    const outsideChanges = SharedActionTypes.filter(
+      type => !ChangeActionTypes.includes(type)
+    );
+
+    expect(
+      outsideChanges.filter(type => ClockActionTypes.includes(type))
+    ).toEqual(['editor.getLWW', 'editor.mergeLWW']);
+    expect(
+      outsideChanges.filter(type => !ClockActionTypes.includes(type))
+    ).toEqual(SharedStreamActionTypes);
+  });
+});
+
+describe('movesClock', () => {
+  it('is true for each clock type and false for every other type a reducer takes', () => {
+    for (const [type] of reducers) {
+      expect(movesClock(type)).toBe(
+        ClockActionTypes.includes(type as ActionType)
+      );
+    }
+    for (const type of allActionTypes) {
+      expect(movesClock(type)).toBe(
+        ClockActionTypes.includes(type as ActionType)
+      );
+    }
+    expect(movesClock('editor.sharedMouseTracker')).toBe(false);
+    expect(movesClock('memo.changeZIndex')).toBe(false);
+    expect(movesClock('settings.changeIgnoreSaveSettings')).toBe(false);
+  });
+
+  it('is true for a type no module declares, as a newer editor’s change may be', () => {
+    expect(movesClock('table.changeShape')).toBe(true);
   });
 });
 
 describe('stream regroup action types', () => {
   it('groups move, color and scroll streams', () => {
-    expect(StreamRegroupMoveActionTypes).toEqual(['table.move', 'memo.move']);
+    expect(StreamRegroupMoveActionTypes).toEqual([
+      'table.move',
+      'memo.move',
+      'tableGroup.move',
+    ]);
     expect(StreamRegroupColorActionTypes).toEqual([
       'table.changeColor',
       'memo.changeColor',
+      'tableGroup.changeColor',
     ]);
     expect(StreamRegroupScrollActionTypes).toEqual([
       'settings.streamZoomLevel',

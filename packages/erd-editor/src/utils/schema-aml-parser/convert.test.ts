@@ -7,6 +7,7 @@ import {
   ColumnUIKey,
   Database,
   OrderType,
+  ReferentialAction,
   RelationshipType,
 } from '@/constants/schema';
 import { createEngineContext } from '@/engine/context';
@@ -65,6 +66,7 @@ const entity = (name: string, source: Partial<AMLEntity> = {}): AMLEntity => ({
   name,
   alias: '',
   comment: '',
+  color: '',
   attributes: [],
   ...source,
 });
@@ -91,7 +93,15 @@ function rel(
 ): AMLRelation {
   const [srcCardinality, refCardinality] = ARROWS[arrow];
 
-  return { src, ref, srcCardinality, refCardinality, polymorphic };
+  return {
+    src,
+    ref,
+    srcCardinality,
+    refCardinality,
+    polymorphic,
+    onDelete: '',
+    onUpdate: '',
+  };
 }
 
 const tablesOf = (schema: ERDEditorSchemaV3): Table[] =>
@@ -184,6 +194,15 @@ describe('schema-aml-parser/convert', () => {
       });
 
       expect(tableOf(schema, 'users').comment).toBe('people');
+    });
+
+    it('carries the entity color as the table color', () => {
+      const schema = convert({
+        entities: [entity('users', { color: '#ef4444' }), entity('posts')],
+      });
+
+      expect(tableOf(schema, 'users').ui.color).toBe('#ef4444');
+      expect(tableOf(schema, 'posts').ui.color).toBe('');
     });
 
     it('measures the name and the comment', () => {
@@ -654,6 +673,37 @@ describe('schema-aml-parser/convert', () => {
       expect(edgesOf(schema)).toEqual(['users(id) -> posts(user_id)']);
     });
 
+    it('reads the referential actions of a relation, unset when absent', () => {
+      const schema = convert(
+        twoTables(
+          [
+            {
+              ...rel(at('posts', ['user_id']), '->', at('users', ['id'])),
+              onDelete: 'cascade',
+              onUpdate: 'set_null',
+            },
+            rel(at('posts', ['editor_id']), '->', at('users', ['id'])),
+          ],
+          entity('posts', {
+            attributes: [
+              attr('user_id', { typeName: 'int' }),
+              attr('editor_id', { typeName: 'int' }),
+            ],
+          })
+        )
+      );
+
+      expect(
+        relationshipsOf(schema).map(({ onDelete, onUpdate }) => [
+          onDelete,
+          onUpdate,
+        ])
+      ).toEqual([
+        [ReferentialAction.cascade, ReferentialAction.setNull],
+        [ReferentialAction.none, ReferentialAction.none],
+      ]);
+    });
+
     it('marks the child attribute as a foreign key', () => {
       const schema = convert(
         twoTables([rel(at('posts', ['user_id']), '->', at('users', ['id']))])
@@ -1114,6 +1164,15 @@ describe('schema-aml-parser/convert', () => {
       expect(tableOf(convert(MANY), 'organizations_users').comment).toBe(
         'Junction table inferred from organizations <-> users'
       );
+    });
+
+    it('leaves the invented junction uncolored', () => {
+      const schema = convert({
+        ...MANY,
+        entities: MANY.entities.map(source => ({ ...source, color: '#ccc' })),
+      });
+
+      expect(tableOf(schema, 'organizations_users').ui.color).toBe('');
     });
 
     it('gives the junction a key column per parent key', () => {

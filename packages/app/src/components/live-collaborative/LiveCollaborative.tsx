@@ -1,4 +1,4 @@
-import '@dineug/erd-editor';
+import '@dineug/erd-editor/erd-editor.js';
 
 import type { ErdEditorElement } from '@dineug/erd-editor';
 import { Flex, Text } from '@radix-ui/themes';
@@ -7,7 +7,12 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useLocation } from 'react-router';
 
 import { nicknameStorageAtom } from '@/atoms/modules/collaborative';
-import { useApplyPresetTheme, useResolvedTheme } from '@/atoms/modules/theme';
+import {
+  useApplyPickedLocale,
+  useI18n,
+  useLocalePreference,
+} from '@/atoms/modules/locale';
+import { useApplyPresetTheme, useThemeState } from '@/atoms/modules/theme';
 import LiveParticipants from '@/components/live-collaborative/live-participants/LiveParticipants';
 import {
   CollaborativeGuest,
@@ -45,8 +50,11 @@ const LiveCollaborative: React.FC<LiveCollaborativeProps> = () => {
   const viewerRef = useRef<HTMLDivElement>(null);
   const editorRef = useRef<ErdEditorElement | null>(null);
   const guestRef = useRef<CollaborativeGuest | null>(null);
-  const theme = useResolvedTheme();
+  const theme = useThemeState();
   const applyPresetTheme = useApplyPresetTheme();
+  const locale = useLocalePreference();
+  const applyPickedLocale = useApplyPickedLocale();
+  const { t } = useI18n();
   const nickname = useAtomValue(nicknameStorageAtom);
   const nicknameRef = useRef(nickname);
   nicknameRef.current = nickname;
@@ -71,6 +79,8 @@ const LiveCollaborative: React.FC<LiveCollaborativeProps> = () => {
       });
       editorRef.current = editor;
       editor.enableThemeBuilder = true;
+      editor.enableLocalePicker = true;
+      editor.enableWelcomeScreen = true;
       // Nothing leaves this guest until a host has actually answered.
       sharedStore.disconnect();
 
@@ -156,7 +166,12 @@ const LiveCollaborative: React.FC<LiveCollaborativeProps> = () => {
         applyPresetTheme((event as CustomEvent).detail);
       };
 
+      const handleChangeLocale = (event: Event) => {
+        applyPickedLocale((event as CustomEvent).detail);
+      };
+
       editor.addEventListener('changePresetTheme', handleChangePresetTheme);
+      editor.addEventListener('changeLocale', handleChangeLocale);
 
       return () => {
         guest.close();
@@ -170,6 +185,7 @@ const LiveCollaborative: React.FC<LiveCollaborativeProps> = () => {
           'changePresetTheme',
           handleChangePresetTheme
         );
+        editor.removeEventListener('changeLocale', handleChangeLocale);
         Array.from(unsubscribeSet).forEach(unsubscribe => unsubscribe());
         unsubscribeSet.clear();
         editor.destroy();
@@ -178,7 +194,7 @@ const LiveCollaborative: React.FC<LiveCollaborativeProps> = () => {
     } catch (error) {
       setError(error);
     }
-  }, [roomId, secretKey, applyPresetTheme]);
+  }, [roomId, secretKey, applyPresetTheme, applyPickedLocale]);
 
   useEffect(() => {
     guestRef.current?.setNickname(nickname);
@@ -194,6 +210,10 @@ const LiveCollaborative: React.FC<LiveCollaborativeProps> = () => {
       grayColor: theme.grayColor as any,
     });
   }, [theme]);
+
+  useLayoutEffect(() => {
+    editorRef.current?.setLocale(locale);
+  }, [locale]);
 
   return (
     <Flex css={styles.root} direction="column" align="center" justify="center">
@@ -211,7 +231,7 @@ const LiveCollaborative: React.FC<LiveCollaborativeProps> = () => {
           align="center"
           justify="center"
         >
-          <Text size="6">Looking for a host...</Text>
+          <Text size="6">{t('live.lookingForHost')}</Text>
         </Flex>
       ) : null}
       {hostLeaveLoading ? (
@@ -221,7 +241,7 @@ const LiveCollaborative: React.FC<LiveCollaborativeProps> = () => {
           align="center"
           justify="center"
         >
-          <Text size="6">Waiting for a host...</Text>
+          <Text size="6">{t('live.waitingForHost')}</Text>
         </Flex>
       ) : null}
     </Flex>

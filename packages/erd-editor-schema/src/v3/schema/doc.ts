@@ -3,4 +3,8 @@ export type Doc = {
   relationshipIds: string[];
   indexIds: string[];
   memoIds: string[];
+  tableGroupIds: string[];
+  wordIds: string[];
+  termIds: string[];
+  domainIds: string[];
 };

@@ -5,12 +5,14 @@ import {
   hostExportFileCommand,
   hostImportFileCommand,
   hostInitialCommand,
+  hostSaveLocaleCommand,
   hostSaveReplicationCommand,
   hostSaveThemeCommand,
   hostSaveValueCommand,
   webviewImportFileCommand,
   webviewInitialValueCommand,
   webviewReplicationCommand,
+  webviewUpdateLocaleCommand,
   webviewUpdateReadonlyCommand,
   webviewUpdateThemeCommand,
 } from '@dineug/erd-editor-webview-bridge';
@@ -18,7 +20,13 @@ import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
 
-import { getTheme, saveTheme } from '@/configuration';
+import {
+  getLocale,
+  getTheme,
+  LOCALE_SETTING,
+  saveLocale,
+  saveTheme,
+} from '@/configuration';
 import { Editor } from '@/editor';
 import { textDecoder, textEncoder } from '@/utils';
 
@@ -47,6 +55,13 @@ const THEME_KEYS = [
   'workbench.colorTheme',
 ];
 
+/** The saved display language, and VS Code's own for auto to follow. */
+const localeUpdate = () =>
+  Bridge.executeCommand(webviewUpdateLocaleCommand, {
+    locale: getLocale(),
+    systemLocale: vscode.env.language,
+  });
+
 export class ErdEditor extends Editor {
   assetsDir = 'public';
 
@@ -72,22 +87,34 @@ export class ErdEditor extends Editor {
     const dispose = Bridge.mergeRegister(
       this.bridge.registerCommand(hostInitialCommand, () => {
         dispatch(Bridge.executeCommand(webviewUpdateThemeCommand, getTheme()));
+        dispatch(localeUpdate());
         dispatch(
           Bridge.executeCommand(webviewUpdateReadonlyCommand, this.readonly)
         );
         dispatch(
           Bridge.executeCommand(webviewInitialValueCommand, {
-            value: textDecoder.decode(this.document.content),
+            value: this.document.seedValue(),
           })
         );
         // Last: postMessage keeps order, so an agent batch sent from now on
         // lands after the initial value instead of being wiped by it.
         this.registry.onWebviewReady(this.document, this.webview);
       }),
-      this.bridge.registerCommand(hostSaveValueCommand, async ({ value }) => {
-        await this.document.update(textEncoder.encode(value));
-        this.registry.onValueSaved(this.document, this.webview);
-      }),
+      this.bridge.registerCommand(
+        hostSaveValueCommand,
+        async ({ value, changed, runtimeValue }) => {
+          // Every save, a read-only view's too, refreshes what seeds the next
+          // view and join; only the value below is ever written.
+          this.document.runtimeValue = runtimeValue;
+          // A save that changed nothing, such as a scroll the file does
+          // not keep, leaves content and the tab as they are, even where
+          // the bytes differ; so does any save in a view nothing writes back.
+          if (changed && !this.readonly) {
+            await this.document.update(textEncoder.encode(value));
+          }
+          this.registry.onValueSaved(this.document, this.webview);
+        }
+      ),
       this.bridge.registerCommand(hostSaveReplicationCommand, ({ actions }) => {
         dispatchBroadcast(
           Bridge.executeCommand(webviewReplicationCommand, { actions })
@@ -96,7 +123,7 @@ export class ErdEditor extends Editor {
       }),
       this.bridge.registerCommand(
         hostImportFileCommand,
-        async ({ type, op }) => {
+        async ({ type, op, mode }) => {
           const { label, extensions } = IMPORT_FILE_TYPES[type];
 
           const uris = await vscode.window.showOpenDialog({
@@ -118,11 +145,13 @@ export class ErdEditor extends Editor {
           }
 
           const value = await vscode.workspace.fs.readFile(uris[0]);
+          // The mode goes back as it came, and only when the page named one.
           dispatch(
             Bridge.executeCommand(webviewImportFileCommand, {
               type,
               op,
               value: textDecoder.decode(value),
+              ...(mode && { mode }),
             })
           );
         }
@@ -152,6 +181,9 @@ export class ErdEditor extends Editor {
       ),
       this.bridge.registerCommand(hostSaveThemeCommand, payload => {
         saveTheme(payload);
+      }),
+      this.bridge.registerCommand(hostSaveLocaleCommand, ({ locale }) => {
+        saveLocale(locale);
       })
     );
 
@@ -163,14 +195,17 @@ export class ErdEditor extends Editor {
       // single event that can report several keys at once, and a listener per
       // key pushed the same theme up to four times.
       vscode.workspace.onDidChangeConfiguration(event => {
-        const affected = THEME_KEYS.some(key =>
+        const affectsTheme = THEME_KEYS.some(key =>
           event.affectsConfiguration(key, this.document.uri)
         );
-        if (!affected) {
-          return;
+        if (affectsTheme) {
+          dispatch(
+            Bridge.executeCommand(webviewUpdateThemeCommand, getTheme())
+          );
         }
-
-        dispatch(Bridge.executeCommand(webviewUpdateThemeCommand, getTheme()));
+        if (event.affectsConfiguration(LOCALE_SETTING, this.document.uri)) {
+          dispatch(localeUpdate());
+        }
       }),
     ];
 

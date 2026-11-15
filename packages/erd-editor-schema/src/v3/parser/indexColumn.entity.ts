@@ -1,11 +1,6 @@
 import { isNil, isPlainObject, isString } from 'es-toolkit';
 
-import {
-  assign,
-  assignMeta,
-  getDefaultEntityMeta,
-  validNumber,
-} from '@/helper';
+import { assign, entryId, validNumber } from '@/helper';
 import { DeepPartial } from '@/internal-types';
 import {
   IndexColumn,
@@ -18,7 +13,6 @@ export const createIndexColumn = (): IndexColumn => ({
   indexId: '',
   columnId: '',
   orderType: OrderType.ASC,
-  meta: getDefaultEntityMeta(),
 });
 
 export function createAndMergeIndexColumnEntities(
@@ -27,17 +21,15 @@ export function createAndMergeIndexColumnEntities(
   const entities: Record<string, IndexColumn> = {};
   if (!isPlainObject(json) || isNil(json)) return entities;
 
-  for (const value of Object.values(json)) {
-    if (!value) continue;
+  for (const [key, value] of Object.entries(json)) {
+    if (!isPlainObject(value)) continue;
     const target = createIndexColumn();
     const assignString = assign(isString, target, value);
 
-    assignString('id');
+    target.id = entryId(key, value);
     assignString('indexId');
     assignString('columnId');
     assign(validNumber(OrderTypeList), target, value)('orderType');
-
-    assignMeta(target.meta, value.meta);
 
     if (target.id) {
       entities[target.id] = target;

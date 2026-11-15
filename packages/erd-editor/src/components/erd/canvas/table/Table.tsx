@@ -7,11 +7,13 @@ import type { Stage } from 'konva/lib/Stage';
 import type { Subscription } from 'rxjs';
 
 import { useAppContext } from '@/components/appContext';
+import { useDiffMap } from '@/components/diffContext';
 import {
   beginColumnDragPointer,
   endColumnDragPointer,
   moveColumnDragPointer,
-} from '@/components/erd/canvas/column-drag-ghost/columnDragPointer';
+} from '@/components/erd/canvas/columnDragPointer';
+import { diffOutlineRect } from '@/components/erd/canvas/DiffOutline.template';
 import {
   progressOf,
   transitionKey,
@@ -26,6 +28,8 @@ import {
   CURSOR_POINTER,
   documentCardShadow,
   FOCUS_BORDER_HEIGHT,
+  holdSceneCursor,
+  mainButtonClick,
   RING_WIDTH,
   SCENE_FONT_FAMILY,
   SCENE_FONT_SIZE,
@@ -41,6 +45,7 @@ import {
   VIEW_HEADER_FONT_WEIGHT,
   viewCardShadow,
 } from '@/components/erd/canvas/sceneTokens';
+import { blankLogicalName } from '@/components/erd/canvas/table/blankLogicalName';
 import {
   CELL_UNDERLINE_Y,
   focusBorderFill,
@@ -51,13 +56,17 @@ import {
 } from '@/components/erd/canvas/table/cellLayout';
 import { getColorEdgePath } from '@/components/erd/canvas/table/colorEdge';
 import Column from '@/components/erd/canvas/table/column/Column';
+import {
+  readableMarkFill,
+  tableMarkFill,
+} from '@/components/erd/canvas/table/dictionaryMarks';
 import { createDoubleClickGuard } from '@/components/erd/canvas/table/doubleClick';
 import { goToErdTable } from '@/components/erd/canvas/table/goToErd';
 import { useSharedSelectEntity } from '@/components/erd/canvas/useSharedSelectEntity';
-import { diffFill } from '@/components/erd/diff-viewer/diff';
-import { useDiffMap } from '@/components/erd/diff-viewer/diffContext';
 import { focusFlowView } from '@/components/flowCenters';
+import { useI18n } from '@/components/localeContext';
 import type { LucideIconName } from '@/components/primitives/icon/icons';
+import { useSceneInteraction } from '@/components/sceneInteractionContext';
 import { useSceneSource } from '@/components/sceneSourceContext';
 import { useThemeContext } from '@/components/themeContext';
 import {
@@ -82,6 +91,11 @@ import {
   dragstartColumnAction$,
 } from '@/engine/modules/editor/generator.actions';
 import { FocusType } from '@/engine/modules/editor/state';
+import { getFocusedColumnIds } from '@/engine/modules/editor/utils/focus';
+import {
+  sceneNameSettings,
+  toNameViewFocusType,
+} from '@/engine/modules/editor/utils/nameView';
 import { removeTableAction$ } from '@/engine/modules/table/generator.actions';
 import { addColumnAction$ } from '@/engine/modules/table-column/generator.actions';
 import { useUnmounted } from '@/hooks/useUnmounted';
@@ -103,9 +117,16 @@ import {
 } from '@/konva/scene/viewLayout';
 import type { Theme } from '@/themes/tokens';
 import { tableHeaderHeight } from '@/utils/calcTable';
+import { diffOutline, diffTextColor } from '@/utils/diff/diff';
 import { dragendColumnAllAction, openColorPickerAction } from '@/utils/emitter';
 import { drag$ } from '@/utils/globalEventObservable';
-import { isMod } from '@/utils/keyboard-shortcut';
+import { CURSOR_GRABBING } from '@/utils/stageCursor';
+import {
+  getTableGroupTint,
+  getTableHeaderTint,
+  type TableGroupColors,
+} from '@/utils/tableGroup';
+import { getAlternateKeyMarks } from '@/utils/tableKeys';
 
 import { useFocusTable } from './useFocusTable';
 import { useMoveTable } from './useMoveTable';
@@ -114,7 +135,10 @@ import { useViewPin } from './useViewPin';
 
 export type TableProps = {
   table: Table;
-  /** A drawn copy rather than the table itself, so nothing in it takes an id. */
+  /**
+   * A drawn copy rather than the table itself, so nothing in it takes an id,
+   * and no group color either: a copy, a duplicate's, lands in no group.
+   */
   preview?: boolean;
   hovered?: boolean;
   hoveredColumnId?: string | null;
@@ -129,6 +153,17 @@ export type TableProps = {
    * by the scene, which walks the document's links once for every card it draws.
    */
   relatedColumnIds?: Set<string> | null;
+  /**
+   * The group whose color the header wears, '' for none, named by a scene that
+   * reads the group list once for every table; a table drawn alone reads its own.
+   */
+  tableGroupId?: string;
+  /**
+   * Whether the cells write what the dictionaries' checks find in their colours,
+   * on unless the scene says otherwise. Only the document scene outside a diff
+   * pane draws them, and an export turns them off.
+   */
+  checkMarks?: boolean;
 };
 
 type HeaderCellOptions = {
@@ -158,12 +193,26 @@ const nameFill = (theme: Theme, name: string, view: boolean) => {
   return view ? theme.foreground : theme.active;
 };
 
+/**
+ * The fill a view's header name takes after the logical name in the view of
+ * both, muted beside it; elsewhere the fill a lone name takes.
+ */
+const viewNameFill = (
+  theme: Theme,
+  name: string,
+  view: boolean,
+  after: boolean
+) => (view && after ? theme.placeholder : nameFill(theme, name, view));
+
 const Table: FC<TableProps> = (props, ctx) => {
   const app = useAppContext(ctx);
   const themeRef = useThemeContext(ctx);
+  // Read only where a field is empty, so a switch redraws an unnamed table alone.
+  const i18n = useI18n(ctx);
   const sourceRef = useSceneSource(ctx);
+  const interaction = useSceneInteraction(ctx);
   const diffMapRef = useDiffMap(ctx);
-  const { hasEdit, hasFocus, hasSelectColumn } = useFocusTable(
+  const { hasEdit, hasFocus, hasSelectColumn, hasFocusColumn } = useFocusTable(
     ctx,
     props.table.id
   );
@@ -229,8 +278,15 @@ const Table: FC<TableProps> = (props, ctx) => {
     setSceneCursor(event, CURSOR_INHERIT);
   };
 
-  const iconColor = (theme: Theme, icon: LucideIconName, hovered: boolean) => {
+  /** A header button's color: none at rest, and on a group's color the text drawn over it. */
+  const iconColor = (
+    theme: Theme,
+    icon: LucideIconName,
+    hovered: boolean,
+    tint: TableGroupColors | null
+  ) => {
     if (!hovered) return TRANSPARENT;
+    if (tint) return tint.foreground;
 
     return state.iconHover === icon ? theme.active : theme.foreground;
   };
@@ -305,9 +361,10 @@ const Table: FC<TableProps> = (props, ctx) => {
   };
 
   const handleFocus = (focusType: FocusType) => {
-    // A view holds no focus, header cell included: the underline it would
-    // light is the ERD tab's mark on the document, not a mark a reader made here.
-    if (sourceRef.value !== 'document') return;
+    // A view holds no focus, header cell included: the underline would be the
+    // ERD tab's mark on the document, not one a reader made here. A read
+    // scene's root takes the press for itself.
+    if (sourceRef.value !== 'document' || interaction() === 'read') return;
 
     const { store } = app.value;
     store.dispatch(focusTableAction({ tableId: props.table.id, focusType }));
@@ -317,7 +374,7 @@ const Table: FC<TableProps> = (props, ctx) => {
     if (!doubleClick.isDouble(focusType, event)) return;
     // A view edits nothing: the editor this would open is the document
     // overlay's, which draws on the document placement and not on this cell.
-    if (sourceRef.value !== 'document') return;
+    if (sourceRef.value !== 'document' || interaction() === 'read') return;
 
     const { store } = app.value;
     store.dispatch(editTableAction());
@@ -375,10 +432,13 @@ const Table: FC<TableProps> = (props, ctx) => {
 
   /**
    * The drop half of a column drag. Which row a drop lands on is a question
-   * about the whole sibling order, so the table answers it while the row that
-   * was pressed only says that a drag of it began.
+   * about the whole sibling order, so the table answers it while the row whose
+   * handle was pressed only says that a drag of it began.
    */
-  const handleDragstartColumn = (columnId: string, event: SceneMouseEvent) => {
+  const handleDragstartColumn = (
+    columnId: string,
+    event: ScenePointerEvent
+  ) => {
     const { store } = app.value;
     // A view reorders nothing: the gate drops what a drag would dispatch, so
     // arming one here would only run the flip and the drop search for nothing.
@@ -397,16 +457,17 @@ const Table: FC<TableProps> = (props, ctx) => {
     state.dragstartId = columnId;
     flip ??= createKonvaFlip(() => stage.find<KonvaNode>('.column-row'));
 
-    const $mod = isMod(event.evt);
+    // The handle of a row among two or more selected carries the selection,
+    // as a table's press carries the selected tables; any other, its row.
     const press = toCanvasPoint(event.evt);
     if (press) {
       beginColumnDragPointer(store.state, props.table, press, {
         columnId,
-        columnIds: $mod ? focusTable.selectColumnIds : [columnId],
+        columnIds: getFocusedColumnIds(store.state),
       });
     }
 
-    store.dispatch(dragstartColumnAction$($mod));
+    store.dispatch(dragstartColumnAction$());
 
     dragoverSubscription = drag$.subscribe({
       next: ({ event: move }) => {
@@ -414,6 +475,7 @@ const Table: FC<TableProps> = (props, ctx) => {
       },
       complete: handleDragendColumn,
     });
+    dragoverSubscription.add(holdSceneCursor(event, CURSOR_GRABBING));
   };
 
   onMounted(() => {
@@ -421,9 +483,13 @@ const Table: FC<TableProps> = (props, ctx) => {
 
     addUnsubscribe(
       emitter.on({
+        // The table a drag began in lets go of it too, since the end may come
+        // from the editor turning readonly rather than from its own drop.
         dragendColumnAll: () => {
           dragoverSubscription?.unsubscribe();
           dragoverSubscription = null;
+          dragLayerStage = null;
+          state.dragstartId = null;
           endColumnDragPointer(app.value.store.state);
         },
       }),
@@ -453,9 +519,9 @@ const Table: FC<TableProps> = (props, ctx) => {
   }: HeaderCellOptions) => {
     const source = sourceRef.value;
     const view = source !== 'document';
-    const diffBackground = diffFill(
+    const diffFill = diffTextColor(
       themeRef.value,
-      diffMapRef.value?.get(props.table.id)?.[1],
+      diffMapRef.value?.get(props.table.id),
       focusType
     );
 
@@ -474,22 +540,13 @@ const Table: FC<TableProps> = (props, ctx) => {
           handleEdit(focusType, event);
         }}
       >
-        {diffBackground ? (
-          <k-rect
-            name="cell-diff-background"
-            width={width + INPUT_MARGIN_RIGHT}
-            height={TABLE_HEADER_INPUT_HEIGHT}
-            fill={diffBackground}
-            listening={false}
-          />
-        ) : null}
         <k-text
           name="cell-text"
           y={getHeaderTextY(source)}
           width={width}
           height={getHeaderTextHeight(source)}
           text={text}
-          fill={fill}
+          fill={diffFill ?? fill}
           fontFamily={SCENE_FONT_FAMILY}
           fontSize={view ? VIEW_TABLE_HEADER_FONT_SIZE : SCENE_FONT_SIZE}
           fontStyle={view ? VIEW_HEADER_FONT_WEIGHT : SCENE_FONT_WEIGHT}
@@ -523,9 +580,26 @@ const Table: FC<TableProps> = (props, ctx) => {
     );
   };
 
+  /**
+   * The logical name a header cell draws, or while it is blank what stands in
+   * for it, dimmed: the name in the logical view, else the placeholder.
+   */
+  const logicalNameText = () => {
+    const { table } = props;
+    if (table.logicalName.trim()) return table.logicalName;
+
+    const { settings } = app.value.store.state;
+    const { standIn, key } = blankLogicalName(
+      settings,
+      table.name,
+      'common.placeholder.table'
+    );
+    return standIn || i18n.value.t(key);
+  };
+
   return () => {
     const { store } = app.value;
-    const { editor, collections } = store.state;
+    const { editor, collections, settings } = store.state;
     const { table } = props;
     const theme = themeRef.value;
     const selected = Boolean(editor.selectedMap[table.id]);
@@ -544,13 +618,17 @@ const Table: FC<TableProps> = (props, ctx) => {
     const sharedTableColor = sharedFocusTableColor();
     const sharedSelected = sharedSelectColor();
     const sharedNameColor = sharedFocusColor(FocusType.tableName);
+    const sharedLogicalNameColor = sharedFocusColor(FocusType.tableLogicalName);
     const sharedCommentColor = sharedFocusColor(FocusType.tableComment);
     const ringColor = sharedTableColor ?? sharedSelected;
+    const diffPaths = diffMapRef.value?.get(table.id);
 
     // A view draws no affordance its measured width has no room for, and its
     // colour edge takes no click, since the gate drops what the picker changes.
     // The edge is the card's last child, so no band or row tint covers it.
     const view = source !== 'document';
+    // A read scene draws no button that edits, and its colour edge opens nothing.
+    const read = interaction() === 'read';
 
     // The header line, inside the header group the card's inset places. Both
     // sources keep the two buttons centred on it, in the room past the name
@@ -577,22 +655,61 @@ const Table: FC<TableProps> = (props, ctx) => {
       !view && hasEdit(focusType, columnId);
 
     const headerCells = getHeaderCellSlots(store.state, table, source);
-    const nameCell = headerCells.find(
-      slot => slot.focusType === FocusType.tableName
-    );
-    const commentCell = headerCells.find(
-      slot => slot.focusType === FocusType.tableComment
-    );
+    const headerCellOf = (focusType: FocusType) =>
+      headerCells.find(slot => slot.focusType === focusType);
+    const nameCell = headerCellOf(FocusType.tableName);
+    const logicalNameCell = headerCellOf(FocusType.tableLogicalName);
+    const commentCell = headerCellOf(FocusType.tableComment);
+
+    // A comment change the header draws no slot for takes the name's colour,
+    // so a change the tree lists is marked in the pane. The logical view draws
+    // no name cell, so its logical name cell takes both, a rename's first.
+    const hiddenCommentColor = commentCell
+      ? null
+      : diffTextColor(theme, diffPaths, FocusType.tableComment);
+    const hiddenNameColor = nameCell
+      ? null
+      : (diffTextColor(theme, diffPaths, FocusType.tableName) ??
+        hiddenCommentColor);
+
+    // A diff pane writes its changes in colours a check would share, so the
+    // marks are the document scene's alone, and a blank cell keeps its dimmed
+    // placeholder whatever a check finds.
+    const checkMarks = (props.checkMarks ?? true) && !view && !diffMapRef.value;
+    // On a coloured group's header a mark keeps only a readable contrast.
+    const markFill = (field: 'name' | 'logicalName') => {
+      if (!checkMarks || !table[field].trim()) return null;
+
+      const fill = tableMarkFill(store, theme, table, field);
+      return tint ? readableMarkFill(fill, tint.background) : fill;
+    };
 
     const columnIds = getVisibleColumnIds(store.state, table, source);
+
+    // A row's name and type cells take the focus the name view gives them,
+    // which a view reads under no show bit.
+    const nameSettings = sceneNameSettings(settings, source);
+    const nameFocus = toNameViewFocusType(nameSettings, FocusType.columnName);
+    const typeFocus = toNameViewFocusType(
+      nameSettings,
+      FocusType.columnDataType
+    );
+
+    // A member of a colored group wears the color across its header, the text
+    // and icons on it in the black or white that reads best there, and keeps
+    // its own color on the edge, so both show.
+    const tint = props.preview
+      ? null
+      : props.tableGroupId === undefined
+        ? getTableHeaderTint(store.state, table, source)
+        : getTableGroupTint(store.state, props.tableGroupId, source);
 
     // A card showing no rows is its header and nothing else, so the band takes
     // the whole box and rounds all four corners rather than the top two.
     const headerFillsCard = columnIds.length === 0;
 
     // A view lights what a hover or a pin reaches, and nothing at rest. The
-    // card wears that as an accent border and a glow, and a table left unlit
-    // keeps its type column's width and draws nothing in it.
+    // card wears that as an accent border and a glow; its types show either way.
     const lit = view && Boolean(props.lit);
     const shadow = view
       ? viewCardShadow(theme.minimapShadow)
@@ -610,6 +727,13 @@ const Table: FC<TableProps> = (props, ctx) => {
     const columns = query(collections)
       .collection('tableColumnEntities')
       .selectByIds(ghostColumnId ? [...columnIds, ghostColumnId] : columnIds);
+    // The focused row carries the column drag handle where a reader can reorder.
+    const reorders = !view && !props.preview && !store.getReadonly();
+    // Read only where the width sum kept room for a mark, which only the
+    // document does and only while the setting shows them.
+    const alternateKeyMarks = tableWidths.alternateKey
+      ? getAlternateKeyMarks(store.state, table)
+      : {};
 
     return (
       <k-group
@@ -669,7 +793,7 @@ const Table: FC<TableProps> = (props, ctx) => {
               ? TABLE_CORNER_RADIUS
               : [TABLE_CORNER_RADIUS, TABLE_CORNER_RADIUS, 0, 0]
           }
-          fill={theme.tableHeaderBackground}
+          fill={tint?.background ?? theme.tableHeaderBackground}
           listening={false}
         />
         {litAlpha > 0 ? (
@@ -703,6 +827,13 @@ const Table: FC<TableProps> = (props, ctx) => {
             listening={false}
           />
         ) : null}
+        {diffOutlineRect({
+          name: 'table-diff-outline',
+          stroke: diffOutline(theme, diffPaths),
+          width: rect.width,
+          height: rect.height,
+          cornerRadius: TABLE_CORNER_RADIUS,
+        })}
         <k-group name="table-header" x={TABLE_INSET} y={TABLE_INSET}>
           <k-group name="table-header-inputs" y={headerLineY}>
             {sceneIcon({
@@ -710,15 +841,40 @@ const Table: FC<TableProps> = (props, ctx) => {
               name: 'table-header-icon',
               kind: 'table-header-icon',
               size: headerIconSize,
-              color: theme.foreground,
+              color: tint?.foreground ?? theme.foreground,
               x: 0,
               y: view ? 0 : (TABLE_HEADER_INPUT_HEIGHT - headerIconSize) / 2,
             })}
+            {logicalNameCell
+              ? headerCell({
+                  ...logicalNameCell,
+                  text: logicalNameText(),
+                  fill:
+                    hiddenNameColor ??
+                    markFill('logicalName') ??
+                    tint?.foreground ??
+                    nameFill(theme, table.logicalName, view),
+                  focus: hasFocus(FocusType.tableLogicalName),
+                  edit: cellEdit(FocusType.tableLogicalName),
+                  sharedFocus: sharedLogicalNameColor,
+                })
+              : null}
             {nameCell
               ? headerCell({
                   ...nameCell,
-                  text: table.name.trim() ? table.name : 'table',
-                  fill: nameFill(theme, table.name, view),
+                  text: table.name.trim()
+                    ? table.name
+                    : i18n.value.t('common.placeholder.table'),
+                  fill:
+                    hiddenCommentColor ??
+                    markFill('name') ??
+                    tint?.foreground ??
+                    viewNameFill(
+                      theme,
+                      table.name,
+                      view,
+                      logicalNameCell !== undefined
+                    ),
                   focus: hasFocus(FocusType.tableName),
                   edit: cellEdit(FocusType.tableName),
                   sharedFocus: sharedNameColor,
@@ -727,22 +883,26 @@ const Table: FC<TableProps> = (props, ctx) => {
             {commentCell
               ? headerCell({
                   ...commentCell,
-                  text: table.comment.trim() ? table.comment : 'comment',
-                  fill: table.comment.trim() ? theme.active : theme.placeholder,
+                  text: table.comment.trim()
+                    ? table.comment
+                    : i18n.value.t('common.placeholder.comment'),
+                  fill:
+                    tint?.foreground ??
+                    (table.comment.trim() ? theme.active : theme.placeholder),
                   focus: hasFocus(FocusType.tableComment),
                   edit: cellEdit(FocusType.tableComment),
                   sharedFocus: sharedCommentColor,
                 })
               : null}
           </k-group>
-          {view
+          {view || read
             ? null
             : sceneIcon({
                 icon: 'plus',
                 name: 'table-add-column',
                 kind: 'icon',
                 size: HEADER_ICON_HEIGHT,
-                color: iconColor(theme, 'plus', hovered),
+                color: iconColor(theme, 'plus', hovered, tint),
                 mouseenter: handleIconMouseenter('plus'),
                 mouseleave: handleIconMouseleave,
                 x:
@@ -752,14 +912,14 @@ const Table: FC<TableProps> = (props, ctx) => {
                 y: headerButtonY,
                 click: handleAddColumn,
               })}
-          {view
+          {view || read
             ? null
             : sceneIcon({
                 icon: 'x',
                 name: 'table-remove',
                 kind: 'icon',
                 size: HEADER_ICON_HEIGHT,
-                color: iconColor(theme, 'x', hovered),
+                color: iconColor(theme, 'x', hovered, tint),
                 mouseenter: handleIconMouseenter('x'),
                 mouseleave: handleIconMouseleave,
                 x: contentWidth - HEADER_ICON_HEIGHT,
@@ -772,7 +932,7 @@ const Table: FC<TableProps> = (props, ctx) => {
                 name: 'table-related',
                 kind: 'icon',
                 size: VIEW_TABLE_HEADER_BUTTON_SIZE,
-                color: iconColor(theme, 'waypoints', hovered),
+                color: iconColor(theme, 'waypoints', hovered, tint),
                 mouseenter: handleIconMouseenter('waypoints'),
                 mouseleave: handleIconMouseleave,
                 x: contentWidth - VIEW_TABLE_HEADER_BUTTONS_WIDTH,
@@ -786,7 +946,7 @@ const Table: FC<TableProps> = (props, ctx) => {
                 name: 'table-go-to-erd',
                 kind: 'icon',
                 size: VIEW_TABLE_HEADER_BUTTON_SIZE,
-                color: iconColor(theme, 'external-link', hovered),
+                color: iconColor(theme, 'external-link', hovered, tint),
                 mouseenter: handleIconMouseenter('external-link'),
                 mouseleave: handleIconMouseleave,
                 x: contentWidth - VIEW_TABLE_HEADER_BUTTON_SIZE,
@@ -804,20 +964,30 @@ const Table: FC<TableProps> = (props, ctx) => {
                 column={column}
                 source={source}
                 related={props.relatedColumnIds?.has(column.id) ?? false}
-                diffPaths={diffMapRef.value?.get(column.id)?.[1] ?? null}
+                diffPaths={diffMapRef.value?.get(column.id) ?? null}
                 litAlpha={litAlpha}
                 divider={view && index < columnIds.length - 1}
                 last={index === columnIds.length - 1}
                 y={getColumnRect(store.state, table, index, source).y - rect.y}
                 width={rect.width}
                 selected={hasSelectColumn(column.id)}
+                dragHandle={reorders && hasFocusColumn(column.id)}
                 hovered={column.id === props.hoveredColumnId}
                 widthName={tableWidths.name}
+                widthLogicalName={tableWidths.logicalName}
                 widthDataType={tableWidths.dataType}
+                widthDomain={tableWidths.domain}
                 widthDefault={tableWidths.default}
                 widthComment={tableWidths.comment}
-                focusName={hasFocus(FocusType.columnName, column.id)}
-                focusDataType={hasFocus(FocusType.columnDataType, column.id)}
+                widthAlternateKey={tableWidths.alternateKey}
+                alternateKey={alternateKeyMarks[column.id]}
+                focusName={hasFocus(nameFocus, column.id)}
+                focusLogicalName={hasFocus(
+                  FocusType.columnLogicalName,
+                  column.id
+                )}
+                focusDataType={hasFocus(typeFocus, column.id)}
+                focusDomain={hasFocus(FocusType.columnDomain, column.id)}
                 focusNotNull={hasFocus(FocusType.columnNotNull, column.id)}
                 focusDefault={hasFocus(FocusType.columnDefault, column.id)}
                 focusComment={hasFocus(FocusType.columnComment, column.id)}
@@ -826,16 +996,23 @@ const Table: FC<TableProps> = (props, ctx) => {
                   FocusType.columnAutoIncrement,
                   column.id
                 )}
-                editName={cellEdit(FocusType.columnName, column.id)}
-                editDataType={cellEdit(FocusType.columnDataType, column.id)}
-                editDefault={cellEdit(FocusType.columnDefault, column.id)}
-                editComment={cellEdit(FocusType.columnComment, column.id)}
-                sharedFocusName={sharedFocusColor(
-                  FocusType.columnName,
+                editName={cellEdit(nameFocus, column.id)}
+                editLogicalName={cellEdit(
+                  FocusType.columnLogicalName,
                   column.id
                 )}
-                sharedFocusDataType={sharedFocusColor(
-                  FocusType.columnDataType,
+                editDataType={cellEdit(typeFocus, column.id)}
+                editDomain={cellEdit(FocusType.columnDomain, column.id)}
+                editDefault={cellEdit(FocusType.columnDefault, column.id)}
+                editComment={cellEdit(FocusType.columnComment, column.id)}
+                sharedFocusName={sharedFocusColor(nameFocus, column.id)}
+                sharedFocusLogicalName={sharedFocusColor(
+                  FocusType.columnLogicalName,
+                  column.id
+                )}
+                sharedFocusDataType={sharedFocusColor(typeFocus, column.id)}
+                sharedFocusDomain={sharedFocusColor(
+                  FocusType.columnDomain,
                   column.id
                 )}
                 sharedFocusNotNull={sharedFocusColor(
@@ -859,8 +1036,10 @@ const Table: FC<TableProps> = (props, ctx) => {
                   column.id
                 )}
                 ghost={column.id === ghostColumnId}
+                checkMarks={checkMarks}
                 preview={props.preview}
                 editorFocused={props.editorFocused}
+                read={read}
                 onDragstart={handleDragstartColumn}
                 onDragend={handleDragendColumn}
               />
@@ -872,8 +1051,8 @@ const Table: FC<TableProps> = (props, ctx) => {
           kind="table-header-color"
           data={getColorEdgePath(rect.height)}
           fill={table.ui.color}
-          listening={!view}
-          on:click={handleOpenColorPicker}
+          listening={!view && !read}
+          on:click={mainButtonClick(handleOpenColorPicker)}
           on:mouseenter={(event: SceneMouseEvent) => {
             setSceneCursor(event, CURSOR_POINTER);
           }}

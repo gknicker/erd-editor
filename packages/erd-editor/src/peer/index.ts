@@ -1,7 +1,8 @@
 export {
-  COLUMN_MIN_WIDTH,
   MEMO_MIN_HEIGHT,
   MEMO_MIN_WIDTH,
+  TABLE_GROUP_MIN_HEIGHT,
+  TABLE_GROUP_MIN_WIDTH,
 } from '@/constants/layout';
 export {
   BracketType,
@@ -9,11 +10,13 @@ export {
   ColumnOption,
   ColumnType,
   Database,
+  DDLScriptPosition,
   Language,
+  LockSettingType,
   NameCase,
   OrderType,
+  ReferentialAction,
   RelationshipType,
-  SaveSettingType,
   Show,
 } from '@/constants/schema';
 export {
@@ -29,6 +32,16 @@ export {
 } from '@/engine/action-types';
 export { createEngineContext, type EngineContext } from '@/engine/context';
 export type { GeneratorAction } from '@/engine/generator.actions';
+export { actions as dictionaryActions } from '@/engine/modules/dictionary/atom.actions';
+export {
+  type DictionaryCheck,
+  type DictionaryCheckCode,
+  DictionaryCheckLevel,
+  DictionaryCheckLevelOf,
+  listDictionaryChecks,
+} from '@/engine/modules/dictionary/checks';
+export { validateDictionaryValues } from '@/engine/modules/dictionary/entryWrites';
+export { actions$ as dictionaryActions$ } from '@/engine/modules/dictionary/generator.actions';
 export { actions$ as editorActions$ } from '@/engine/modules/editor/generator.actions';
 export { FocusType, SelectType } from '@/engine/modules/editor/state';
 export { actions as indexActions } from '@/engine/modules/index/atom.actions';
@@ -45,6 +58,8 @@ export { actions as tableActions } from '@/engine/modules/table/atom.actions';
 export { actions$ as tableActions$ } from '@/engine/modules/table/generator.actions';
 export { actions as tableColumnActions } from '@/engine/modules/table-column/atom.actions';
 export { actions$ as tableColumnActions$ } from '@/engine/modules/table-column/generator.actions';
+export { actions as tableGroupActions } from '@/engine/modules/table-group/atom.actions';
+export { actions$ as tableGroupActions$ } from '@/engine/modules/table-group/generator.actions';
 export {
   createPeerStore,
   type DispatchFocus,
@@ -60,4 +75,10 @@ export type { RootState } from '@/engine/state';
 export { defaultToWidth } from '@/engine/to-width';
 export { bHas } from '@/utils/bit';
 export { measureTableSize } from '@/utils/calcTable';
-export { createSchemaSQL } from '@/utils/schema-sql';
+export {
+  createSchemaSQL,
+  SchemaSQLHeaderList,
+  type SchemaSQLOptions,
+  SchemaSQLStatementsList,
+} from '@/utils/schema-sql';
+export { getTablesGroupRect } from '@/utils/tableGroup';

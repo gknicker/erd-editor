@@ -1,14 +1,17 @@
 /** @jsxHost konva */
 
-import { FC, observable } from '@dineug/r-html';
+import { FC, observable, onUnmounted } from '@dineug/r-html';
+import type { KonvaEventObject } from 'konva/lib/Node';
 
 import { useAppContext } from '@/components/appContext';
+import { useDiffMap } from '@/components/diffContext';
 import {
   progressOf,
   transitionKey,
   transitionTo,
 } from '@/components/erd/canvas/highlightTransition';
 import { mixColor } from '@/components/erd/canvas/mixColor';
+import { isRelationshipHighlighted } from '@/components/erd/relationshipHighlight';
 import { useSceneSource } from '@/components/sceneSourceContext';
 import { useThemeContext } from '@/components/themeContext';
 import { RELATIONSHIP_HIT_STROKE_WIDTH } from '@/constants/layout';
@@ -16,6 +19,7 @@ import { Direction, StartRelationshipType } from '@/constants/schema';
 import { hoverColumnMapAction } from '@/engine/modules/editor/atom.actions';
 import { Point, Relationship as RelationshipType } from '@/internal-types';
 import { getSceneTransform } from '@/konva/scene/viewport';
+import { diffOutline } from '@/utils/diff/diff';
 import {
   type Anchor,
   type Anchors,
@@ -30,6 +34,7 @@ import {
   getRelationshipPath,
   toPathD,
 } from '@/utils/draw-relationship/pathFinding';
+import { referentialActionTitle } from '@/utils/referentialAction';
 
 import {
   decorationLine,
@@ -140,18 +145,50 @@ export type RelationshipProps = {
   strokeWidth: number;
   /** Whether the view lights this connector, decided by the scene it is drawn in. */
   lit?: boolean;
+  /** Told as the pointer comes onto the connector and leaves it, for its label to light along. */
+  onHover?: (id: string, hover: boolean) => void;
 };
 
 const Relationship: FC<RelationshipProps> = (props, ctx) => {
   const app = useAppContext(ctx);
   const themeRef = useThemeContext(ctx);
   const sourceRef = useSceneSource(ctx);
+  const diffMapRef = useDiffMap(ctx);
   const state = observable({ hover: false });
+  // The canvas container a pointer resting on this connector titles.
+  let titled: HTMLElement | null = null;
 
-  const handleMouseenter = () => {
+  /**
+   * Spells the clauses out in the canvas's native tooltip, as the toolbar's
+   * buttons name themselves, whether the label shows or not. Run on each
+   * render too, as a peer or an agent may change them under a resting pointer.
+   */
+  const writeTitle = () => {
+    const title = referentialActionTitle(props.relationship);
+    title
+      ? titled?.setAttribute('title', title)
+      : titled?.removeAttribute('title');
+  };
+
+  const clearTitle = () => {
+    titled?.removeAttribute('title');
+    titled = null;
+  };
+
+  const showTitle = (event: KonvaEventObject<MouseEvent>) => {
+    if (sourceRef.value !== 'document') return;
+    titled = event.target.getStage()?.container() ?? null;
+    writeTitle();
+  };
+
+  onUnmounted(clearTitle);
+
+  const handleMouseenter = (event: KonvaEventObject<MouseEvent>) => {
     const { relationship } = props;
     const { store } = app.value;
     state.hover = true;
+    props.onHover?.(relationship.id, true);
+    showTitle(event);
     store.dispatch(
       hoverColumnMapAction({
         columnIds: [
@@ -165,6 +202,8 @@ const Relationship: FC<RelationshipProps> = (props, ctx) => {
   const handleMouseleave = () => {
     const { store } = app.value;
     state.hover = false;
+    props.onHover?.(props.relationship.id, false);
+    clearTitle();
     store.dispatch(hoverColumnMapAction({ columnIds: [] }));
   };
 
@@ -181,11 +220,14 @@ const Relationship: FC<RelationshipProps> = (props, ctx) => {
     const relationshipPath = getRelationshipPath(relationship, source);
     const { path, line } = relationshipPath;
     const lines = path.path.d();
-    // Both are read, never short-circuited: an unread one is an untracked one,
-    // and the connector would then miss the change that flipped it.
-    const mapHover = Boolean(editor.hoverRelationshipMap[relationship.id]);
-    const hover = state.hover || mapHover;
     const view = source !== 'document';
+    // Each is read, never short-circuited: an unread one is an untracked one,
+    // and the connector would then miss the change that flipped it. A view
+    // lights its own connectors, so it never reads a jump's light.
+    const mapHover = Boolean(editor.hoverRelationshipMap[relationship.id]);
+    const jumped =
+      !view && isRelationshipHighlighted(editor.id, relationship.id);
+    const hover = state.hover || mapHover || jumped;
     // A view has one neutral for every connector, since the reference draws no
     // distinction by kind. The document keeps the two colours and the dash the
     // identifying bit has always picked between.
@@ -194,7 +236,11 @@ const Relationship: FC<RelationshipProps> = (props, ctx) => {
       : relationship.identification
         ? theme.keyPFK
         : theme.keyFK;
-    const unlit = hover ? theme.relationshipHover : base;
+    // A diff pane draws an added, removed or changed foreign key in its colour,
+    // and a hover or a jump's light wins over it.
+    const unlit = hover
+      ? theme.relationshipHover
+      : (diffOutline(theme, diffMapRef.value?.get(relationship.id)) ?? base);
 
     // A view lights the connectors that reach what it lights, and the colour
     // walks between the two rather than jumping. The document has no light of
@@ -212,6 +258,7 @@ const Relationship: FC<RelationshipProps> = (props, ctx) => {
       stroke,
       strokeWidth
     );
+    if (titled) writeTitle();
 
     return (
       <k-group

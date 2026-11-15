@@ -1,0 +1,308 @@
+import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
+
+import { createTestAppContext } from '@/__test-utils__/index';
+import {
+  ARROW_DOWN_BOX,
+  ARROW_UP_BOX,
+  HINT_LABEL_MAX_WIDTH,
+  hintPlacement,
+  isEmptyDocument,
+  measureAnchors,
+  WELCOME_FULL_MIN_HEIGHT,
+  WELCOME_HINTS_MIN_HEIGHT,
+  WELCOME_HINTS_MIN_WIDTH,
+  WELCOME_KBD_MIN_WIDTH,
+  WELCOME_MENU_MIN_HEIGHT,
+  WELCOME_MIN_WIDTH,
+  welcomeTiers,
+} from '@/components/erd/welcome-screen/welcomeLayout';
+import { Show } from '@/constants/schema';
+import { addMemoAction } from '@/engine/modules/memo/atom.actions';
+import { changeShowAction } from '@/engine/modules/settings/atom.actions';
+import { addTableAction } from '@/engine/modules/table/atom.actions';
+import { addTableGroupAction } from '@/engine/modules/table-group/atom.actions';
+
+const ROOMY = { width: 1440, height: 900 };
+
+describe('welcomeTiers', () => {
+  it('shows everything on a roomy canvas', () => {
+    expect(welcomeTiers(ROOMY)).toEqual({
+      center: 'full',
+      hints: true,
+      kbd: true,
+    });
+  });
+
+  it('hides the whole screen one pixel under the narrowest width', () => {
+    const height = ROOMY.height;
+
+    expect(welcomeTiers({ width: WELCOME_MIN_WIDTH, height }).center).toBe(
+      'full'
+    );
+    expect(welcomeTiers({ width: WELCOME_MIN_WIDTH - 1, height })).toEqual({
+      center: 'none',
+      hints: false,
+      kbd: false,
+    });
+  });
+
+  it('drops the heading one pixel under the full height, and the menu under its own', () => {
+    const width = ROOMY.width;
+
+    expect(
+      welcomeTiers({ width, height: WELCOME_FULL_MIN_HEIGHT }).center
+    ).toBe('full');
+    expect(
+      welcomeTiers({ width, height: WELCOME_FULL_MIN_HEIGHT - 1 }).center
+    ).toBe('menu');
+    expect(
+      welcomeTiers({ width, height: WELCOME_MENU_MIN_HEIGHT }).center
+    ).toBe('menu');
+    expect(
+      welcomeTiers({ width, height: WELCOME_MENU_MIN_HEIGHT - 1 }).center
+    ).toBe('none');
+  });
+
+  it('shows the hints only from their width and height on', () => {
+    const at = {
+      width: WELCOME_HINTS_MIN_WIDTH,
+      height: WELCOME_HINTS_MIN_HEIGHT,
+    };
+
+    expect(welcomeTiers(at).hints).toBe(true);
+    expect(welcomeTiers({ ...at, width: at.width - 1 }).hints).toBe(false);
+    expect(welcomeTiers({ ...at, height: at.height - 1 }).hints).toBe(false);
+    expect(welcomeTiers({ width: 700, height: 500 }).hints).toBe(false);
+  });
+
+  it('shows the chords only from their width on, and never without a menu', () => {
+    const height = ROOMY.height;
+
+    expect(welcomeTiers({ width: WELCOME_KBD_MIN_WIDTH, height }).kbd).toBe(
+      true
+    );
+    expect(welcomeTiers({ width: WELCOME_KBD_MIN_WIDTH - 1, height }).kbd).toBe(
+      false
+    );
+    expect(
+      welcomeTiers({ width: ROOMY.width, height: WELCOME_MENU_MIN_HEIGHT - 1 })
+        .kbd
+    ).toBe(false);
+  });
+});
+
+describe('isEmptyDocument', () => {
+  it('holds for a new document and fails once a table or a memo exists', () => {
+    const withTable = createTestAppContext();
+    const withMemo = createTestAppContext();
+
+    expect(isEmptyDocument(withTable.store.state)).toBe(true);
+
+    withTable.store.dispatchSync(
+      addTableAction({ id: 't', ui: { x: 0, y: 0, zIndex: 2 } })
+    );
+    withMemo.store.dispatchSync(
+      addMemoAction({ id: 'm', ui: { x: 0, y: 0, zIndex: 2 } })
+    );
+
+    expect(isEmptyDocument(withTable.store.state)).toBe(false);
+    expect(isEmptyDocument(withMemo.store.state)).toBe(false);
+  });
+
+  it('fails once a shown group exists, as the content bounds count it, and holds while groups are hidden', () => {
+    const { store } = createTestAppContext();
+
+    store.dispatchSync(
+      addTableGroupAction({
+        id: 'g',
+        ui: { x: 0, y: 0, width: 480, height: 320, zIndex: 1 },
+      })
+    );
+    expect(isEmptyDocument(store.state)).toBe(false);
+
+    store.dispatchSync(
+      changeShowAction({ show: Show.hideTableGroup, value: true })
+    );
+    expect(isEmptyDocument(store.state)).toBe(true);
+  });
+
+  it('holds over memos alone while memos are hidden, as the content bounds count none', () => {
+    const { store } = createTestAppContext();
+
+    store.dispatchSync(
+      addMemoAction({ id: 'm', ui: { x: 0, y: 0, zIndex: 2 } })
+    );
+    expect(isEmptyDocument(store.state)).toBe(false);
+
+    store.dispatchSync(changeShowAction({ show: Show.hideMemo, value: true }));
+    expect(isEmptyDocument(store.state)).toBe(true);
+  });
+});
+
+describe('hintPlacement', () => {
+  const reach = ARROW_UP_BOX.width - ARROW_UP_BOX.tipX;
+
+  it('puts a before label left of its arrow in a left-to-right language, the tip on the anchor', () => {
+    expect(hintPlacement(300, 1000, 'before', 'ltr')).toEqual({
+      labelFirst: true,
+      stacked: false,
+      right: 1000 - 300 - reach,
+    });
+  });
+
+  it('puts an after label right of its mirrored arrow in a left-to-right language', () => {
+    expect(hintPlacement(300, 1000, 'after', 'ltr')).toEqual({
+      labelFirst: false,
+      stacked: false,
+      left: 300 - reach,
+    });
+  });
+
+  it('flips both sides in a right-to-left language', () => {
+    expect(hintPlacement(700, 1000, 'before', 'rtl')).toEqual({
+      labelFirst: false,
+      stacked: false,
+      left: 700 - reach,
+    });
+    expect(hintPlacement(700, 1000, 'after', 'rtl')).toEqual({
+      labelFirst: true,
+      stacked: false,
+      right: 1000 - 700 - reach,
+    });
+  });
+
+  it('hangs a label under its arrow where its side holds less than a whole label, the arrow left where it was', () => {
+    const { tipX } = ARROW_UP_BOX;
+    // Beside a docked Explorer the Search button stands near the canvas edge.
+    const edge = tipX + 4 + HINT_LABEL_MAX_WIDTH;
+
+    expect(hintPlacement(edge, 1000, 'before', 'ltr').stacked).toBe(false);
+    expect(hintPlacement(edge - 1, 1000, 'before', 'ltr')).toEqual({
+      labelFirst: true,
+      stacked: true,
+      left: edge - 1 - tipX,
+    });
+    expect(hintPlacement(1000 - edge + 1, 1000, 'after', 'ltr')).toEqual({
+      labelFirst: false,
+      stacked: true,
+      right: edge - 1 - tipX,
+    });
+  });
+
+  it('draws both arrows with their tips inside their own boxes', () => {
+    for (const box of [ARROW_UP_BOX, ARROW_DOWN_BOX]) {
+      expect(box.tipX).toBeGreaterThan(0);
+      expect(box.tipX).toBeLessThan(box.width);
+      expect(box.tipY).toBeGreaterThan(0);
+      expect(box.tipY).toBeLessThan(box.height);
+    }
+  });
+});
+
+describe('measureAnchors', () => {
+  const rects = new Map<Element, Partial<DOMRect>>();
+
+  const rect = (left: number, width: number) =>
+    ({
+      left,
+      width,
+      top: 0,
+      height: 30,
+      right: left + width,
+      bottom: 30,
+    }) as DOMRect;
+
+  /** An editor root holding a toolbar with the buttons named, and the welcome screen under it. */
+  function setup(buttons: Record<string, [left: number, width: number]>) {
+    const root = document.createElement('div');
+    root.className = 'root';
+    const toolbar = document.createElement('div');
+    const container = document.createElement('div');
+
+    for (const [name, [left, width]] of Object.entries(buttons)) {
+      const button = document.createElement('div');
+      button.className = name;
+      toolbar.append(button);
+      rects.set(button, rect(left, width));
+    }
+
+    rects.set(container, rect(100, 1000));
+    root.append(toolbar, container);
+    document.body.append(root);
+
+    vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(
+      function (this: Element) {
+        return (rects.get(this) ?? rect(0, 0)) as DOMRect;
+      }
+    );
+
+    return container;
+  }
+
+  afterEach(() => {
+    rects.clear();
+    vi.restoreAllMocks();
+    document.body.replaceChildren();
+  });
+
+  it('reads each button from the left edge of the welcome screen', () => {
+    const container = setup({
+      'toolbar-search': [420, 26],
+      'toolbar-theme': [472, 26],
+      'toolbar-locale': [498, 26],
+    });
+
+    expect(measureAnchors(container)).toEqual({
+      search: 333,
+      // Halfway between the two buttons, which share the one hint.
+      preferences: 398,
+    });
+  });
+
+  it('points the preferences hint at whichever of the two buttons is there', () => {
+    expect(measureAnchors(setup({ 'toolbar-theme': [472, 26] }))).toEqual({
+      search: null,
+      preferences: 385,
+    });
+
+    rects.clear();
+    vi.restoreAllMocks();
+    document.body.replaceChildren();
+
+    expect(measureAnchors(setup({ 'toolbar-locale': [498, 26] }))).toEqual({
+      search: null,
+      preferences: 411,
+    });
+  });
+
+  it('measures nothing for a button the toolbar left out, laid out at no size or clipped past an edge', () => {
+    const container = setup({
+      'toolbar-search': [420, 0],
+      'toolbar-theme': [1200, 26],
+      'toolbar-locale': [40, 26],
+    });
+
+    expect(measureAnchors(container)).toEqual({
+      search: null,
+      preferences: null,
+    });
+  });
+
+  it('reads the buttons of the editor root it sits in, or of itself where it sits in none', () => {
+    const lone = document.createElement('div');
+    const search = document.createElement('div');
+    search.className = 'toolbar-search';
+    lone.append(search);
+    document.body.append(lone);
+    rects.set(lone, rect(0, 500));
+    rects.set(search, rect(40, 20));
+
+    vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(
+      function (this: Element) {
+        return (rects.get(this) ?? rect(0, 0)) as DOMRect;
+      }
+    );
+
+    expect(measureAnchors(lone).search).toBe(50);
+  });
+});

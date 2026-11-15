@@ -2,9 +2,13 @@ import { AnyAction, compositionActionsFlat } from '@dineug/r-html';
 import { beforeEach, describe, expect, it } from 'vite-plus/test';
 
 import {
+  BracketType,
   CANVAS_ZOOM_MAX,
   CANVAS_ZOOM_MIN,
   CanvasType,
+  Language,
+  LockSettingType,
+  NameViewMode,
 } from '@/constants/schema';
 import { Clock } from '@/engine/clock';
 import { changeViewportAction } from '@/engine/modules/editor/atom.actions';
@@ -17,14 +21,19 @@ import {
 } from '@/engine/modules/editor/view.actions';
 import { ActionType } from '@/engine/modules/settings/actions';
 import {
+  changeBracketTypeAction,
   changeCanvasTypeAction,
+  changeLanguageAction,
+  changeLockSettingsAction,
   changeZoomLevelAction,
   scrollToAction,
   streamScrollToAction,
   streamZoomLevelAction,
+  toNameViewModeAction,
 } from '@/engine/modules/settings/atom.actions';
 import {
   actions$,
+  changeLockSettingsAction$,
   changeZoomLevelAction$,
   pinchZoomAction$,
   streamZoomLevelAction$,
@@ -87,13 +96,132 @@ describe('settings/generator.actions', () => {
     store = createTestStore();
   });
 
-  it('exposes both generator actions through actions$', () => {
+  it('exposes its generator actions through actions$', () => {
     expect(Object.keys(actions$).sort()).toEqual([
+      'changeLockSettingsAction$',
       'changeZoomLevelAction$',
       'streamZoomLevelAction$',
     ]);
     expect(actions$.changeZoomLevelAction$).toBe(changeZoomLevelAction$);
     expect(actions$.streamZoomLevelAction$).toBe(streamZoomLevelAction$);
+    expect(actions$.changeLockSettingsAction$).toBe(changeLockSettingsAction$);
+  });
+
+  describe('changeLockSettingsAction$', () => {
+    const { viewport, canvasType, language, bracketType } = LockSettingType;
+
+    it('locks at what the settings named hold now, and only those', () => {
+      store.dispatchSync(scrollToAction({ originX: -40, originY: 90 }));
+      store.dispatchSync(changeLanguageAction({ value: Language.Kotlin }));
+
+      expect(
+        flatten(store, changeLockSettingsAction$(viewport | language, true))
+      ).toEqual([
+        changeLockSettingsAction({
+          lockSettingType: viewport | language,
+          value: true,
+          values: {
+            originX: -40,
+            originY: 90,
+            zoomLevel: 1,
+            language: Language.Kotlin,
+          },
+        }),
+      ]);
+    });
+
+    it('carries the code settings named, as they show, to unlock them', () => {
+      store.dispatchSync(
+        changeLanguageAction({ value: Language.Kotlin }),
+        changeBracketTypeAction({ value: BracketType.backtick })
+      );
+      const lockSettingType = viewport | canvasType | language | bracketType;
+
+      expect(
+        flatten(store, changeLockSettingsAction$(lockSettingType, false))
+      ).toEqual([
+        changeLockSettingsAction({
+          lockSettingType,
+          value: false,
+          values: {
+            language: Language.Kotlin,
+            bracketType: BracketType.backtick,
+          },
+        }),
+      ]);
+    });
+
+    it('carries nothing to unlock the viewport or the tab, each reader’s own', () => {
+      store.dispatchSync(scrollToAction({ originX: -40, originY: 90 }));
+
+      expect(
+        flatten(store, changeLockSettingsAction$(viewport | canvasType, false))
+      ).toEqual([
+        changeLockSettingsAction({
+          lockSettingType: viewport | canvasType,
+          value: false,
+          values: {},
+        }),
+      ]);
+    });
+
+    it('locks the tab the reader came from when taken on the Settings tab', () => {
+      store.dispatchSync(
+        changeCanvasTypeAction({ value: CanvasType.schemaSQL })
+      );
+      store.dispatchSync(
+        changeCanvasTypeAction({ value: CanvasType.settings })
+      );
+      store.dispatchSync(changeLockSettingsAction$(canvasType, false));
+
+      store.dispatchSync(changeLockSettingsAction$(canvasType, true));
+
+      expect(store.state.settings.lockedValues.canvasType).toBe(
+        CanvasType.schemaSQL
+      );
+      expect(store.state.settings.canvasType).toBe(CanvasType.settings);
+    });
+
+    it('carries the name view this reader shows to unlock it, and locks at what it shows', () => {
+      const { unlockNameViewMode } = LockSettingType;
+      store.dispatchSync(
+        toNameViewModeAction(store.state, NameViewMode.both, false)
+      );
+
+      expect(
+        flatten(store, changeLockSettingsAction$(unlockNameViewMode, false))
+      ).toEqual([
+        changeLockSettingsAction({
+          lockSettingType: unlockNameViewMode,
+          value: false,
+          values: { nameViewMode: NameViewMode.both },
+        }),
+      ]);
+
+      store.dispatchSync(changeLockSettingsAction$(unlockNameViewMode, false));
+      store.dispatchSync(
+        toNameViewModeAction(store.state, NameViewMode.logical, false)
+      );
+      store.dispatchSync(changeLockSettingsAction$(unlockNameViewMode, true));
+
+      expect(store.state.settings.lockSettings).toBe(63);
+      expect(store.state.settings.lockedValues.nameViewMode).toBe(
+        NameViewMode.logical
+      );
+    });
+
+    it('locks the tab shown when taken on any other tab', () => {
+      store.dispatchSync(
+        changeCanvasTypeAction({ value: CanvasType.generatorCode })
+      );
+      store.dispatchSync(changeLockSettingsAction$(canvasType, false));
+
+      store.dispatchSync(changeLockSettingsAction$(canvasType, true));
+
+      expect(store.state.settings.lockedValues.canvasType).toBe(
+        CanvasType.generatorCode
+      );
+    });
   });
 
   describe('changeZoomLevelAction$', () => {

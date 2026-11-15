@@ -5,6 +5,8 @@ import {
   type Page,
 } from '@playwright/test';
 
+import type { ErdEditorElement, LocaleOption } from '@/index';
+
 import {
   CANVAS_ZOOM_MAX,
   CANVAS_ZOOM_MIN,
@@ -43,6 +45,12 @@ export type Box = { x: number; y: number; width: number; height: number };
  * than one css-style descendant selector.
  */
 export type SceneSelector = string | readonly string[];
+
+/** The element's on and off props a spec may turn on, all of them off in the fixture. */
+export type ElementToggles = Pick<
+  ErdEditorElement,
+  'enableThemeBuilder' | 'enableLocalePicker' | 'enableWelcomeScreen'
+>;
 
 const toScenePath = (selector: SceneSelector): string[] =>
   typeof selector === 'string' ? [selector] : [...selector];
@@ -126,6 +134,27 @@ export class ErdEditorPage {
   }
 
   /**
+   * Turns on what the fixture leaves off, the locale picker or the welcome
+   * screen say, as a host sets the element's props.
+   */
+  async enable(props: Partial<ElementToggles>) {
+    await this.page.evaluate(next => {
+      const editor = window.document.querySelector('erd-editor');
+      if (!editor) throw new Error('erd-editor is not mounted');
+      Object.assign(editor, next);
+    }, props);
+  }
+
+  /** The display language a host names, 'system' to follow the System language. */
+  async setLocale(option: LocaleOption) {
+    await this.page.evaluate(value => {
+      const editor = window.document.querySelector('erd-editor');
+      if (!editor) throw new Error('erd-editor is not mounted');
+      editor.setLocale(value);
+    }, option);
+  }
+
+  /**
    * Loads a document through the element's public setInitialValue, which
    * clears undo history and records nothing — a seeded editor starts with
    * nothing to undo, whatever the page did before.
@@ -159,14 +188,15 @@ export class ErdEditorPage {
   // ── authoritative state ──────────────────────────────────────────────────
 
   /**
-   * The element's value getter serialises the live store synchronously, so
-   * this is the authoritative view of editor state — not a rendering of it.
+   * The element's runtime value serialises the live store synchronously, the
+   * fields a file leaves out included, so this is the authoritative view of
+   * editor state, not a rendering of it.
    */
   async value(): Promise<ErdDocument> {
     const json = await this.page.evaluate(() => {
       const editor = window.document.querySelector('erd-editor');
       if (!editor) throw new Error('erd-editor is not mounted');
-      return editor.value;
+      return editor.runtimeValue;
     });
     return JSON.parse(json) as ErdDocument;
   }
@@ -382,8 +412,9 @@ export class ErdEditorPage {
     return this.toolbar.locator(`[title^="${title}"]`);
   }
 
+  /** A menu row by its whole name, since one row's name can start another's: New Table Group. */
   contextMenuItem(label: string | RegExp) {
-    return this.contextMenu.getByText(label, { exact: false });
+    return this.contextMenu.getByText(label, { exact: true });
   }
 
   // ── coordinates ──────────────────────────────────────────────────────────
@@ -609,9 +640,18 @@ export class ErdEditorPage {
     return { x: box.x + box.width / 2, y: box.y + 8 };
   }
 
-  /** The centre of one column row, which is where a column drag starts. */
+  /** The centre of one column row, where a press carries its table. */
   async columnPoint(id: string): Promise<Point> {
     const box = await this.sceneBox(`#column-${id}`);
+    return { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+  }
+
+  /**
+   * The centre of the drag handle left of a focused column row, which is where
+   * a column drag starts. It waits for the handle, which comes with the focus.
+   */
+  async columnHandlePoint(id: string): Promise<Point> {
+    const box = await this.sceneBox([`#column-${id}`, '.column-drag-handle']);
     return { x: box.x + box.width / 2, y: box.y + box.height / 2 };
   }
 
@@ -657,7 +697,7 @@ export class ErdEditorPage {
   // ── input ────────────────────────────────────────────────────────────────
 
   /**
-   * Puts keyboard focus on the editor root, which is where tinykeys is bound.
+   * Puts keyboard focus on the editor root, which is where the key bindings listen.
    * Clicking empty canvas also clears the current selection.
    */
   async focusCanvas(at?: Point) {
@@ -670,13 +710,13 @@ export class ErdEditorPage {
   }
 
   /**
-   * The modifier the editor's pointer handlers read as $mod. isMod parses the
-   * user agent, so this asks the page rather than the runner — the two agree
-   * only because the config no longer pins a user agent of its own.
+   * The modifier the editor's pointer handlers read as $mod. isMod reads the
+   * page's platform, so this asks the page rather than the runner, with the
+   * test hasAppleDevice makes.
    */
   async pointerModKey(): Promise<'Meta' | 'Control'> {
     const isApple = await this.page.evaluate(() =>
-      /Mac|iPod|iPhone|iPad/.test(navigator.userAgent)
+      /Mac|iPod|iPhone|iPad/.test(navigator.platform)
     );
     return isApple ? 'Meta' : 'Control';
   }
@@ -892,23 +932,27 @@ export class ErdEditorPage {
   async drag(
     from: Point,
     to: Point,
-    options: { steps?: number; modifiers?: string[] } = {}
+    options: {
+      steps?: number;
+      modifiers?: string[];
+      button?: 'left' | 'middle' | 'right';
+    } = {}
   ) {
-    const { steps = 12, modifiers = [] } = options;
+    const { steps = 12, modifiers = [], button = 'left' } = options;
 
     for (const modifier of modifiers) {
       await this.page.keyboard.down(modifier);
     }
 
     await this.page.mouse.move(from.x, from.y);
-    await this.page.mouse.down();
+    await this.page.mouse.down({ button });
     for (let step = 1; step <= steps; step++) {
       await this.page.mouse.move(
         from.x + ((to.x - from.x) * step) / steps,
         from.y + ((to.y - from.y) * step) / steps
       );
     }
-    await this.page.mouse.up();
+    await this.page.mouse.up({ button });
 
     for (const modifier of [...modifiers].reverse()) {
       await this.page.keyboard.up(modifier);
@@ -1020,15 +1064,13 @@ export class ErdEditorPage {
     await this.page.keyboard.up(modifier);
   }
 
-  /**
-   * Types a colour into the open picker. The widget reads its hex field on the
-   * keystroke rather than on a value assignment, so the colour is typed a
-   * character at a time into a cleared field.
-   */
+  /** Types a colour into the open picker's Hex field and commits it with Enter. */
   async pickColor(color: string) {
-    const hex = this.colorPicker.locator('input[ref="$hexCode"]');
-    await hex.fill('');
-    await hex.pressSequentially(color);
+    const hex = this.colorPicker.getByRole('textbox', {
+      name: 'Hex',
+      exact: true,
+    });
+    await hex.fill(color);
     await hex.press('Enter');
   }
 

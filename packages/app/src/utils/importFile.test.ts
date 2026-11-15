@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vite-plus/test';
 
+import { koKR } from '@/i18n/messages/ko-KR';
+import { createI18n } from '@/i18n/translate';
 import { BACKUP_FORMAT } from '@/utils/backup';
 import {
   classifyImportFile,
@@ -142,10 +144,12 @@ describe('classifyImportFile', () => {
 });
 
 describe('isEditorDocument', () => {
-  it('takes the version 3 shape with its doc', () => {
+  it('takes the version 3 shape with its doc or its settings', () => {
     expect(isEditorDocument({ version: '3.0.0', doc: {} })).toBe(true);
+    expect(isEditorDocument({ version: '3.0.0', settings: {} })).toBe(true);
     expect(isEditorDocument({ version: '3.0.0', collections: {} })).toBe(false);
     expect(isEditorDocument({ version: '3.0.0', doc: [] })).toBe(false);
+    expect(isEditorDocument({ version: '3.0.0', settings: 'x' })).toBe(false);
   });
 
   it('takes the version 2 shape with its canvas and table', () => {
@@ -293,5 +297,22 @@ describe('describeImportResult', () => {
         oversizedFiles: 0,
       })
     ).toBe('Nothing to import');
+  });
+
+  it('reads in the language handed', () => {
+    const korean = createI18n('ko-KR', koKR);
+
+    expect(
+      describeImportResult(
+        { imported: 2, skippedFiles: 0, skippedSchemas: 0, oversizedFiles: 1 },
+        korean
+      )
+    ).toBe('스키마 2개 가져옴 · 64 MB를 넘는 파일 1개 건너뜀');
+    expect(
+      describeImportResult(
+        { imported: 0, skippedFiles: 0, skippedSchemas: 0, oversizedFiles: 0 },
+        korean
+      )
+    ).toBe('가져올 항목 없음');
   });
 });

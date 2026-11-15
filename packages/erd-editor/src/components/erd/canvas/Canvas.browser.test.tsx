@@ -1,10 +1,13 @@
 // P3-27: the dom shell only. What the scene draws inside the Stage is
 // CanvasScene.browser.test.tsx, and the shell's own contract is the two boxes,
-// the Stage that hangs in the inner one and the size both take.
+// the Stage that hangs in the inner one, the size both take and the middle pan.
 
 import { createRef, useProvider } from '@dineug/r-html';
-import type { Stage } from 'konva/lib/Stage';
-import { afterEach, describe, expect, it } from 'vite-plus/test';
+import { whenDrawn } from '@dineug/r-html-konva';
+import type { Group } from 'konva/lib/Group';
+import { Layer } from 'konva/lib/Layer';
+import { Stage } from 'konva/lib/Stage';
+import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
 
 import {
   createTestAppContext,
@@ -12,16 +15,26 @@ import {
   flush,
   mount,
   type Mounted,
+  movePointer,
+  releasePointer,
+  whenPainted,
 } from '@/__test-utils__';
-import Canvas from '@/components/erd/canvas/Canvas';
+import Canvas, { type CanvasProps } from '@/components/erd/canvas/Canvas';
 import * as styles from '@/components/erd/canvas/Canvas.styles';
+import { editingLayers } from '@/components/erd/canvas/editingLayers';
+import EditOverlay from '@/components/erd/canvas/EditOverlay';
 import { themeContext } from '@/components/themeContext';
-import { changeViewportAction } from '@/engine/modules/editor/atom.actions';
-import { whenDrawn } from '@/konva/batchDraw';
+import {
+  changeViewportAction,
+  selectAction,
+} from '@/engine/modules/editor/atom.actions';
+import { SelectType } from '@/engine/modules/editor/state';
+import { addTableAction } from '@/engine/modules/table/atom.actions';
 
 const teardowns: Array<() => void> = [];
 
 afterEach(async () => {
+  releasePointer();
   teardowns.splice(0).forEach(teardown => teardown());
   await whenDrawn();
 });
@@ -29,15 +42,30 @@ afterEach(async () => {
 const stageRegistry = (): Record<string, Stage> =>
   Reflect.get(globalThis, '__erdStages') ?? {};
 
-async function mountCanvas(grabMove?: boolean): Promise<Mounted> {
+/**
+ * The shell alone, or with what a host hands it: a grab move, an overlay,
+ * layers, and the node it mounts in, the page's body by default.
+ */
+async function mountCanvas(
+  options: Pick<CanvasProps, 'grabMove' | 'overlay' | 'layers'> & {
+    parent?: ParentNode;
+  } = {}
+): Promise<Mounted> {
   const $root = document.createElement('div');
   document.body.append($root);
   const root = createRef<HTMLDivElement>($root);
   const canvas = createRef<HTMLDivElement>();
   const app = createTestAppContext();
   const mounted = mount(
-    <Canvas root={root} canvas={canvas} grabMove={grabMove} />,
-    app
+    <Canvas
+      root={root}
+      canvas={canvas}
+      grabMove={options.grabMove}
+      overlay={options.overlay}
+      layers={options.layers}
+    />,
+    app,
+    options.parent
   );
   // useProvider takes a bare element at runtime and types only a component
   // context, hence the cast; it is r-html's own, not a React hook.
@@ -103,7 +131,7 @@ describe('the canvas shell', () => {
   });
 
   it('disables pointer events on the controller while grab moving', async () => {
-    const mounted = await mountCanvas(true);
+    const mounted = await mountCanvas({ grabMove: true });
 
     expect(controllerOf(mounted).style.pointerEvents).toBe('none');
   });
@@ -117,8 +145,8 @@ describe('the canvas shell', () => {
     expect(stageRegistry().canvas.container()).toBe(el);
   });
 
-  it('mounts one Stage of four layers in the inner box, background first', async () => {
-    await mountCanvas();
+  it('mounts one Stage in the inner box, the layers it is handed among its own', async () => {
+    await mountCanvas({ layers: editingLayers });
     const stage = stageRegistry().canvas;
 
     expect(stage.getLayers().map(layer => layer.name())).toEqual([
@@ -127,6 +155,31 @@ describe('the canvas shell', () => {
       'overlay-marquee',
       'presence',
     ]);
+  });
+
+  it('mounts the bottom layer and the scene alone for a host that hands in none', async () => {
+    await mountCanvas();
+    const stage = stageRegistry().canvas;
+
+    expect(stage.getLayers().map(layer => layer.name())).toEqual([
+      'canvas-background',
+      'scene',
+    ]);
+  });
+
+  it('draws the overlay a host hands in after the Stage container, in the controller', async () => {
+    const mounted = await mountCanvas({ overlay: EditOverlay });
+    const controller = controllerOf(mounted);
+
+    expect(controller.children).toHaveLength(2);
+    expect(controller.firstElementChild).toBe(containerOf(mounted));
+    expect(controller.lastElementChild?.classList).toContain('edit-overlay');
+  });
+
+  it('draws nothing over the Stage without an overlay', async () => {
+    const mounted = await mountCanvas();
+
+    expect([...controllerOf(mounted).children]).toEqual([containerOf(mounted)]);
   });
 
   it('resizes the Stage with the viewport', async () => {
@@ -142,6 +195,18 @@ describe('the canvas shell', () => {
     expect(stage.height()).toBe(480);
   });
 
+  it('keeps the scene left to right inside a right-to-left editor', async () => {
+    const mounted = await mountCanvas();
+    // The shell the canvas hangs in reads right to left, as the editor's root
+    // does under Arabic, Hebrew or Persian.
+    mounted.container.dir = 'rtl';
+    const stage = stageRegistry().canvas;
+
+    expect(controllerOf(mounted).getAttribute('dir')).toBe('ltr');
+    expect(getComputedStyle(mounted.container).direction).toBe('rtl');
+    expect(getComputedStyle(stage.content).direction).toBe('ltr');
+  });
+
   it('drops the Stage and its registry entry on unmount', async () => {
     const mounted = await mountCanvas();
     const stage = stageRegistry().canvas;
@@ -152,5 +217,281 @@ describe('the canvas shell', () => {
     expect(stageRegistry().canvas).toBeUndefined();
     expect(stage.getLayers()).toHaveLength(0);
     expect(mounted.container.isConnected).toBe(false);
+  });
+});
+
+/** Two tables on an 800 by 600 screen, the second of them selected. */
+async function mountScene(parent?: ParentNode) {
+  const mounted = await mountCanvas({ parent });
+  mounted.app.store.dispatchSync(
+    changeViewportAction({ width: 800, height: 600 }),
+    addTableAction({ id: 't1', ui: { x: 100, y: 100, zIndex: 2 } }),
+    addTableAction({ id: 't2', ui: { x: 500, y: 300, zIndex: 3 } }),
+    selectAction({ t2: SelectType.table })
+  );
+  await flush();
+  await whenDrawn();
+  // The hit graph a pointer is tested against lands a frame after the draw.
+  await whenPainted();
+
+  return { mounted, stage: stageRegistry().canvas };
+}
+
+/** The viewport point at the middle of a scene node, which konva resolves the node from. */
+function pointOf(stage: Stage, node: string, child?: string) {
+  const found = stage.findOne<Group>(node)!;
+  const target = child ? found.findOne(child)! : found;
+  const rect = target.getClientRect({ relativeTo: stage, skipShadow: true });
+  const content = stage.content.getBoundingClientRect();
+
+  return {
+    clientX: content.left + rect.x + rect.width / 2,
+    clientY: content.top + rect.y + rect.height / 2,
+  };
+}
+
+/** A real mouse event on the canvas konva draws in, at a viewport point. */
+function fire(
+  stage: Stage,
+  type: string,
+  at: { clientX: number; clientY: number },
+  button: number
+) {
+  const event = new MouseEvent(type, {
+    bubbles: true,
+    cancelable: true,
+    composed: true,
+    button,
+    buttons: type === 'mousedown' ? 1 << button : 0,
+    ...at,
+  });
+  stage.content.querySelector('canvas')!.dispatchEvent(event);
+  return event;
+}
+
+/** A closed shadow root to mount in, as the element's own root is. */
+function closedShadowRoot(): ShadowRoot {
+  const $host = document.createElement('div');
+  document.body.append($host);
+  teardowns.push(() => $host.remove());
+  return $host.attachShadow({ mode: 'closed' });
+}
+
+/** Anchors the move stream far from the scene, as a press the window heard last would. */
+function pressElsewhere() {
+  window.dispatchEvent(new MouseEvent('mousedown', { clientX: 0, clientY: 0 }));
+  releasePointer();
+}
+
+const MIDDLE = 1;
+
+const MAIN = 0;
+
+describe('a middle button press on the scene', () => {
+  it('pans the document from over a table, and leaves the table and the selection be', async () => {
+    const { mounted, stage } = await mountScene();
+    const { store } = mounted.app;
+    const at = pointOf(stage, '#table-t1');
+    pressElsewhere();
+
+    const press = fire(stage, 'mousedown', at, MIDDLE);
+    movePointer(at.clientX + 15, at.clientY + 10);
+    movePointer(at.clientX + 40, at.clientY + 30);
+    releasePointer(at.clientX + 40, at.clientY + 30);
+    await flush();
+
+    expect(press.defaultPrevented).toBe(true);
+    // The first step is measured from the press, not from the corner the
+    // stream heard last, so the origin moves by the pointer travel alone.
+    expect(store.state.settings.originX).toBe(40);
+    expect(store.state.settings.originY).toBe(30);
+    expect(store.state.collections.tableEntities.t1.ui).toMatchObject({
+      x: 100,
+      y: 100,
+    });
+    expect({ ...store.state.editor.selectedMap }).toEqual({
+      t2: SelectType.table,
+    });
+  });
+
+  it('sends nothing for a step that did not move', async () => {
+    const { mounted, stage } = await mountScene();
+    const { store } = mounted.app;
+    const at = pointOf(stage, '#table-t1');
+    const types: string[] = [];
+    store.subscribe(actions => types.push(...actions.map(({ type }) => type)));
+
+    fire(stage, 'mousedown', at, MIDDLE);
+    const move = movePointer(at.clientX, at.clientY);
+    await flush();
+
+    expect(move.defaultPrevented).toBe(true);
+    expect(types).toEqual([]);
+  });
+
+  it('removes nothing from a click on a table remove button, which the main button removes', async () => {
+    const { mounted, stage } = await mountScene();
+    const { store } = mounted.app;
+    const at = pointOf(stage, '#table-t1', '.table-remove');
+
+    fire(stage, 'mousedown', at, MIDDLE);
+    fire(stage, 'mouseup', at, MIDDLE);
+    await flush();
+    await whenDrawn();
+
+    expect(store.state.doc.tableIds).toEqual(['t1', 't2']);
+    expect({ ...store.state.editor.selectedMap }).toEqual({
+      t2: SelectType.table,
+    });
+
+    // The same point under the main button is the button, which shows the
+    // point the middle click went to is the one the button answers.
+    await whenPainted();
+    fire(stage, 'mousedown', at, MAIN);
+    fire(stage, 'mouseup', at, MAIN);
+    await flush();
+
+    expect(store.state.doc.tableIds).toEqual(['t2']);
+  });
+
+  it('lets konva hear no lift of it, so a main click after it on the same table is no double click', async () => {
+    const { stage } = await mountScene();
+    const at = pointOf(stage, '#table-t1');
+    const heard: string[] = [];
+    stage.on('mouseup dblclick', event => heard.push(event.type));
+
+    fire(stage, 'mousedown', at, MIDDLE);
+    const lift = fire(stage, 'mouseup', at, MIDDLE);
+
+    expect(lift.defaultPrevented).toBe(true);
+    expect(heard).toEqual([]);
+
+    fire(stage, 'mousedown', at, MAIN);
+    fire(stage, 'mouseup', at, MAIN);
+
+    expect(heard).toEqual(['mouseup']);
+  });
+
+  it('asks the colour picker of the document scene to close', async () => {
+    const { mounted, stage } = await mountScene();
+    const closeColorPicker = vi.fn();
+    mounted.app.emitter.on({ closeColorPicker });
+
+    fire(stage, 'mousedown', pointOf(stage, '#table-t2'), MIDDLE);
+
+    expect(closeColorPicker).toHaveBeenCalledOnce();
+  });
+});
+
+describe('a main click on the scene', () => {
+  it('needs its press on this stage, not on another stage of the same konva', async () => {
+    const { mounted, stage } = await mountScene();
+    const { store } = mounted.app;
+    const columns = () =>
+      store.state.collections.tableEntities.t1.columnIds.length;
+    const addColumn = () => pointOf(stage, '#table-t1', '.table-add-column');
+
+    fire(stage, 'mousedown', addColumn(), MAIN);
+    fire(stage, 'mouseup', addColumn(), MAIN);
+    await flush();
+    await whenDrawn();
+    await whenPainted();
+    expect(columns()).toBe(1);
+
+    // Another scene of the same konva, as a viewer beside the editor is: a
+    // press there and a lift over the button the editor was last pressed on.
+    const $other = document.createElement('div');
+    document.body.append($other);
+    const other = new Stage({ container: $other, width: 100, height: 100 });
+    other.add(new Layer());
+    teardowns.push(() => {
+      other.destroy();
+      $other.remove();
+    });
+    const { left, top } = other.content.getBoundingClientRect();
+
+    fire(other, 'mousedown', { clientX: left + 10, clientY: top + 10 }, MAIN);
+    fire(stage, 'mouseup', addColumn(), MAIN);
+    await flush();
+
+    expect(columns()).toBe(1);
+  });
+
+  it('reads as no double click after a click on another stage of the same konva', async () => {
+    const { stage } = await mountScene();
+    const at = pointOf(stage, '#table-t1');
+    const heard: string[] = [];
+    stage.findOne('#table-t1')!.on('click dblclick', event => {
+      heard.push(event.type);
+    });
+    const $other = document.createElement('div');
+    document.body.append($other);
+    const other = new Stage({ container: $other, width: 100, height: 100 });
+    other.add(new Layer());
+    teardowns.push(() => {
+      other.destroy();
+      $other.remove();
+    });
+    const { left, top } = other.content.getBoundingClientRect();
+    const corner = { clientX: left + 10, clientY: top + 10 };
+
+    fire(stage, 'mousedown', at, MAIN);
+    fire(stage, 'mouseup', at, MAIN);
+    fire(other, 'mousedown', corner, MAIN);
+    fire(other, 'mouseup', corner, MAIN);
+    fire(stage, 'mousedown', at, MAIN);
+    fire(stage, 'mouseup', at, MAIN);
+
+    expect(heard).toEqual(['click', 'click']);
+
+    // The same pair of clicks with nothing between them is a double click.
+    fire(stage, 'mousedown', at, MAIN);
+    fire(stage, 'mouseup', at, MAIN);
+
+    expect(heard).toEqual(['click', 'click', 'click', 'dblclick']);
+  });
+
+  it('reads as a double click inside a closed shadow root, whose stage no window listener sees', async () => {
+    const { stage } = await mountScene(closedShadowRoot());
+    const at = pointOf(stage, '#table-t1');
+    const heard: string[] = [];
+    stage.findOne('#table-t1')!.on('click dblclick', event => {
+      heard.push(event.type);
+    });
+
+    fire(stage, 'mousedown', at, MAIN);
+    fire(stage, 'mouseup', at, MAIN);
+    fire(stage, 'mousedown', at, MAIN);
+    fire(stage, 'mouseup', at, MAIN);
+
+    expect(heard).toEqual(['click', 'click', 'dblclick']);
+  });
+
+  it('reads as no double click inside a closed shadow root after a click on another stage', async () => {
+    const { stage } = await mountScene(closedShadowRoot());
+    const at = pointOf(stage, '#table-t1');
+    const heard: string[] = [];
+    stage.findOne('#table-t1')!.on('click dblclick', event => {
+      heard.push(event.type);
+    });
+    const $other = document.createElement('div');
+    document.body.append($other);
+    const other = new Stage({ container: $other, width: 100, height: 100 });
+    other.add(new Layer());
+    teardowns.push(() => {
+      other.destroy();
+      $other.remove();
+    });
+    const { left, top } = other.content.getBoundingClientRect();
+    const corner = { clientX: left + 10, clientY: top + 10 };
+
+    fire(stage, 'mousedown', at, MAIN);
+    fire(stage, 'mouseup', at, MAIN);
+    fire(other, 'mousedown', corner, MAIN);
+    fire(other, 'mouseup', corner, MAIN);
+    fire(stage, 'mousedown', at, MAIN);
+    fire(stage, 'mouseup', at, MAIN);
+
+    expect(heard).toEqual(['click', 'click']);
   });
 });

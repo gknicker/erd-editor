@@ -3,9 +3,12 @@ import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
 
 import {
   createTestAppContext,
+  createTestI18n,
   flush,
   mountAndFlush,
   Mounted,
+  provideI18n,
+  pseudoMessages,
 } from '@/__test-utils__/index';
 import { AppContext } from '@/components/appContext';
 import {
@@ -18,7 +21,7 @@ import { getIcon, type IconName } from '@/components/primitives/icon/icons';
 import VisualizationToolbar from '@/components/visualization/visualization-toolbar/VisualizationToolbar';
 import * as styles from '@/components/visualization/visualization-toolbar/VisualizationToolbar.styles';
 import { Open } from '@/constants/open';
-import { CANVAS_ZOOM_MAX } from '@/constants/schema';
+import { CANVAS_ZOOM_MAX, NameViewMode } from '@/constants/schema';
 import { ZOOM_STEP } from '@/constants/zoom';
 import {
   changeOpenMapAction,
@@ -35,14 +38,17 @@ import {
   viewMoveTableAction,
   viewOpenAction,
   viewScrollToAction,
+  viewSetCentersAction,
   viewSetLayoutAction,
 } from '@/engine/modules/editor/view.actions';
 import {
   addTableAction,
   changeTableNameAction,
+  removeTableAction,
 } from '@/engine/modules/table/atom.actions';
+import { createI18n } from '@/i18n/translate';
 import { PREVIEW_ZOOM_MAX } from '@/konva/scene/fitZoom';
-import { KeyBindingName } from '@/utils/keyboard-shortcut';
+import { KeyBindingName, toShortcutTitle } from '@/utils/keyboard-shortcut';
 
 const hoisted = vi.hoisted(() => ({ requests: 0 }));
 
@@ -270,7 +276,7 @@ describe('VisualizationToolbar', () => {
     expect(byTitle(root, 'Show all')).toBeNull();
   });
 
-  it('draws the Flow order: modes, zoom, placement, show mode (AC-4, AC-56)', async () => {
+  it('draws the Flow order: modes, steps, zoom, placement, show mode (AC-4, AC-56)', async () => {
     const { app, root } = await setup();
 
     click(byTitle(root, 'Flow'));
@@ -283,17 +289,78 @@ describe('VisualizationToolbar', () => {
     expect(titles(root)).toEqual([
       'Graph',
       'Flow',
+      expect.stringMatching(/^Previous table/),
+      expect.stringMatching(/^Next table/),
       expect.stringMatching(/^Zoom out/),
       expect.stringMatching(/^Zoom in/),
       'Fit',
       'Tidy Up',
       'Row display: Name only',
+      'Name View',
     ]);
 
     click(byTitle(root, 'Graph'));
     await flush();
 
     expect(byTitle(root, 'Tidy Up')).toBeNull();
+  });
+
+  it('names its tools and the row display in the language the element shows, left to right under any', async () => {
+    const i18n = createTestI18n('en');
+    const provider = provideI18n(document.body, i18n);
+
+    try {
+      const app = seedFlow(createTestAppContext(), ['t1']);
+      const { container, root } = await setup(app);
+      expect(root.getAttribute('dir')).toBe('ltr');
+
+      Object.assign(i18n, createI18n('ko-KR', pseudoMessages('ko')));
+      await flush();
+
+      expect(titles(root).slice(0, 9)).toEqual([
+        'ko:Graph',
+        'ko:Flow',
+        expect.stringMatching(/^ko:Previous table \(/),
+        expect.stringMatching(/^ko:Next table \(/),
+        expect.stringMatching(/^ko:Zoom out \(/),
+        expect.stringMatching(/^ko:Zoom in \(/),
+        'ko:Fit',
+        'ko:Tidy Up',
+        'ko:Row display: ko:Keys only',
+      ]);
+      expect(byTitle(root, 'ko:Reset zoom')).not.toBeNull();
+      expect(byTitle(root, 'ko:Show all')).not.toBeNull();
+      expect(labelTextOf(root)).toBe('ko:Keys only');
+
+      app.store.dispatchSync(
+        viewScrollToAction({
+          originX: -90_000,
+          originY: -90_000,
+          kind: ViewKind.flow,
+        })
+      );
+      await flush();
+      expect(titles(root).at(-1)).toBe('ko:Go to content');
+
+      click(triggerOf(root));
+      await flush();
+      expect(optionLabels(container)).toEqual([
+        'ko:Name only',
+        'ko:Keys only',
+        'ko:All fields',
+      ]);
+
+      // A right-to-left sentence keeps the mode it names in a direction of
+      // its own, while the bar itself stays left to right.
+      Object.assign(i18n, createI18n('he-IL', pseudoMessages('he')));
+      await flush();
+      expect(triggerOf(root)?.getAttribute('title')).toBe(
+        'he:Row display: \u2068he:Keys only\u2069'
+      );
+      expect(root.getAttribute('dir')).toBe('ltr');
+    } finally {
+      provider.destroy();
+    }
   });
 
   // A guard rather than a measurement: the bar has never carried the centre's
@@ -304,8 +371,137 @@ describe('VisualizationToolbar', () => {
     expect(root.textContent).not.toMatch(
       /t1|customers|neighbour|neighbor|table/i
     );
-    expect(titles(root)).not.toContain('Back');
-    expect(titles(root)).not.toContain('Forward');
+  });
+
+  it('names the steps after the undo and redo chords, and draws them as arrows', async () => {
+    const app = seedFlow(createTestAppContext(), ['t1']);
+    const { root } = await setup(app);
+    const previous = byTitle(root, 'Previous table');
+    const next = byTitle(root, 'Next table');
+
+    expect(previous?.getAttribute('title')).toBe(
+      toShortcutTitle(app.keyBindingMap, 'Previous table', KeyBindingName.undo)
+    );
+    expect(next?.getAttribute('title')).toBe(
+      toShortcutTitle(app.keyBindingMap, 'Next table', KeyBindingName.redo)
+    );
+    expect(pathsOf(previous)).toEqual(iconPaths('arrow-left'));
+    expect(pathsOf(next)).toEqual(iconPaths('arrow-right'));
+  });
+
+  it('keeps the arrows where they stand for a right-to-left reader and swaps what they do, so back points right', async () => {
+    const i18n = createTestI18n('en');
+    const provider = provideI18n(document.body, i18n);
+
+    try {
+      const app = seedFlow(createTestAppContext(), ['t1']);
+      const { root } = await setup(app);
+      app.store.dispatchSync(
+        viewSetCentersAction({ tableIds: ['t2'], kind: ViewKind.flow })
+      );
+      await flush();
+      const [left] = menus(root).slice(2, 4);
+
+      expect(pathsOf(left)).toEqual(iconPaths('arrow-left'));
+      expect(left.getAttribute('title')).toMatch(/^Previous table/);
+
+      Object.assign(i18n, createI18n('he-IL', pseudoMessages('he')));
+      await flush();
+      const [rtlLeft, rtlRight] = menus(root).slice(2, 4);
+
+      expect(root.getAttribute('dir')).toBe('ltr');
+      expect(pathsOf(rtlLeft)).toEqual(iconPaths('arrow-left'));
+      expect(pathsOf(rtlRight)).toEqual(iconPaths('arrow-right'));
+      expect(rtlLeft.getAttribute('title')).toBe(
+        toShortcutTitle(app.keyBindingMap, 'he:Next table', KeyBindingName.redo)
+      );
+      expect(rtlRight.getAttribute('title')).toBe(
+        toShortcutTitle(
+          app.keyBindingMap,
+          'he:Previous table',
+          KeyBindingName.undo
+        )
+      );
+      expect(rtlLeft.classList.contains('disabled')).toBe(true);
+
+      click(rtlRight);
+      await flush();
+
+      expect(app.store.state.editor.views.flow!.centerIds).toEqual(['t1']);
+    } finally {
+      provider.destroy();
+    }
+  });
+
+  it('dims a step with nothing that way, and steps the view through the centers it stood on', async () => {
+    const app = seedFlow(createTestAppContext(), ['t1']);
+    const { root } = await setup(app);
+    const isDisabled = (name: string) =>
+      Boolean(byTitle(root, name)?.classList.contains('disabled'));
+    const centers = () => app.store.state.editor.views.flow!.centerIds;
+
+    expect(isDisabled('Previous table')).toBe(true);
+    expect(isDisabled('Next table')).toBe(true);
+
+    app.store.dispatchSync(
+      viewSetCentersAction({ tableIds: ['t2'], kind: ViewKind.flow })
+    );
+    await flush();
+
+    expect(isDisabled('Previous table')).toBe(false);
+    expect(isDisabled('Next table')).toBe(true);
+
+    click(byTitle(root, 'Previous table'));
+    await flush();
+
+    expect(centers()).toEqual(['t1']);
+    expect(isDisabled('Previous table')).toBe(true);
+    expect(isDisabled('Next table')).toBe(false);
+
+    click(byTitle(root, 'Next table'));
+    await flush();
+
+    expect(centers()).toEqual(['t2']);
+
+    // A dimmed step dispatches nothing, so no sort wakes for a press that goes nowhere.
+    const batches: unknown[] = [];
+    const unsubscribe = app.store.subscribe(actions => batches.push(actions));
+    click(byTitle(root, 'Next table'));
+    await flush();
+    unsubscribe();
+
+    expect(centers()).toEqual(['t2']);
+    expect(batches).toEqual([]);
+  });
+
+  it('dims the step back once the tables it would return to are gone', async () => {
+    const app = seedFlow(createTestAppContext(), ['t1']);
+    const { root } = await setup(app);
+    app.store.dispatchSync(
+      viewSetCentersAction({ tableIds: ['t2'], kind: ViewKind.flow })
+    );
+    await flush();
+
+    expect(byTitle(root, 'Previous table')?.className).not.toContain(
+      'disabled'
+    );
+
+    app.store.dispatchSync(removeTableAction({ id: 't1' }));
+    await flush();
+
+    expect(byTitle(root, 'Previous table')?.className).toContain('disabled');
+  });
+
+  it('dims both steps while no Flow view is open', async () => {
+    const app = createTestAppContext();
+    app.store.dispatchSync(
+      changeVisualizationModeAction({ value: VisualizationMode.flow })
+    );
+    const { root } = await setup(app);
+
+    expect(app.store.state.editor.views.flow).toBeNull();
+    expect(byTitle(root, 'Previous table')?.className).toContain('disabled');
+    expect(byTitle(root, 'Next table')?.className).toContain('disabled');
   });
 
   it('steps the Flow zoom on the two buttons and prints it as a percentage (AC-6)', async () => {
@@ -376,13 +572,19 @@ describe('VisualizationToolbar', () => {
     expect(titles(root)).toEqual([
       'Graph',
       'Flow',
+      expect.stringMatching(/^Previous table/),
+      expect.stringMatching(/^Next table/),
       expect.stringMatching(/^Zoom out/),
       expect.stringMatching(/^Zoom in/),
       'Fit',
       'Tidy Up',
       'Row display: Keys only',
+      'Name View',
       'Show all',
     ]);
+
+    // A funnel struck through, so it never reads as the fit's brackets beside it.
+    expect(pathsOf(byTitle(root, 'Show all'))).toEqual(iconPaths('funnel-x'));
 
     click(byTitle(root, 'Show all'));
     await flush();
@@ -500,6 +702,33 @@ describe('VisualizationToolbar', () => {
     expect(app.store.state.editor.views.flow!.showMode).toBe(ShowMode.nameOnly);
   });
 
+  it('offers the name view beside the row display in the Flow alone, and shuts its list on a mode switch', async () => {
+    const { app, root } = await setup();
+    const trigger = () => root.querySelector<HTMLElement>('.name-view-trigger');
+    const list = () =>
+      document.querySelector('.name-view-menu .context-menu-content');
+
+    expect(trigger()).toBeNull();
+    click(byTitle(root, 'Flow')!);
+    await flush();
+
+    click(trigger()!);
+    await flush();
+    expect(list()?.textContent).toContain('Logical Names');
+    click(
+      Array.from(list()!.querySelectorAll<HTMLElement>(':scope > [data-id]'))[1]
+    );
+    await flush();
+    expect(app.store.state.settings.nameViewMode).toBe(NameViewMode.logical);
+
+    click(trigger()!);
+    await flush();
+    click(byTitle(root, 'Graph')!);
+    await flush();
+    expect(list()).toBeNull();
+    expect(trigger()).toBeNull();
+  });
+
   it('closes the show mode menu on the trigger again, on Escape and on a press outside it', async () => {
     const app = seedFlow(createTestAppContext());
     const { container, root } = await setup(app);
@@ -613,11 +842,14 @@ describe('VisualizationToolbar', () => {
     expect(titles(root)).toEqual([
       'Graph',
       'Flow',
+      expect.stringMatching(/^Previous table/),
+      expect.stringMatching(/^Next table/),
       expect.stringMatching(/^Zoom out/),
       expect.stringMatching(/^Zoom in/),
       'Fit',
       'Tidy Up',
       'Row display: Name only',
+      'Name View',
       'Go to content',
     ]);
 

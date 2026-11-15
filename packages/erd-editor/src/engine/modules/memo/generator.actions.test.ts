@@ -5,7 +5,10 @@ import { Clock } from '@/engine/clock';
 import { selectAction } from '@/engine/modules/editor/atom.actions';
 import { SelectType } from '@/engine/modules/editor/state';
 import { ActionType } from '@/engine/modules/memo/actions';
-import { addMemoAction } from '@/engine/modules/memo/atom.actions';
+import {
+  addMemoAction,
+  removeMemoAction,
+} from '@/engine/modules/memo/atom.actions';
 import {
   actions$,
   addMemoAction$,
@@ -49,12 +52,12 @@ describe('actions$', () => {
 });
 
 describe('addMemoAction$', () => {
-  it('emits unselectAll, select and add in that order', () => {
+  it('emits unselectAll, add and select in that order', () => {
     expect(typesOf(store, addMemoAction$())).toEqual([
       'editor.unselectAll',
       'editor.focusTableEnd',
-      'editor.select',
       ActionType.addMemo,
+      'editor.select',
     ]);
   });
 
@@ -172,6 +175,24 @@ describe('removeMemoAction$', () => {
   it('emits nothing when nothing is selected', () => {
     expect(flatten(store, removeMemoAction$())).toEqual([]);
   });
+
+  it('leaves out a selected memo already gone from the document', () => {
+    store.dispatchSync(
+      addMemoAction({ id: 'm1', ui: { x: 0, y: 0, zIndex: 2 } }),
+      addMemoAction({ id: 'm2', ui: { x: 0, y: 0, zIndex: 2 } })
+    );
+    store.dispatchSync(
+      selectAction({ m1: SelectType.memo, m2: SelectType.memo })
+    );
+    // The bare atom a peer, an agent or the undo of an add sends, which
+    // leaves the memo selected and its entity in the collection.
+    store.dispatchSync(removeMemoAction({ id: 'm2' }));
+
+    const flat = flatten(store, removeMemoAction$());
+
+    expect(flat).toHaveLength(1);
+    expect(flat[0].payload).toEqual({ id: 'm1' });
+  });
 });
 
 describe('selectMemoAction$', () => {
@@ -225,10 +246,10 @@ describe('selectMemoAction$', () => {
     expect(memoOf(store, 'm1').ui.zIndex).toBe(21);
   });
 
-  it('creates and selects an unknown memo id', () => {
+  it('selects no unknown memo id, though its raise leaves a stub the document does not list', () => {
     store.dispatchSync(selectMemoAction$('ghost', false));
 
-    expect(store.state.editor.selectedMap).toEqual({ ghost: SelectType.memo });
+    expect(store.state.editor.selectedMap).toEqual({});
     expect(memoOf(store, 'ghost')).toBeDefined();
     expect(store.state.doc.memoIds).toEqual(['m1', 'm2']);
   });

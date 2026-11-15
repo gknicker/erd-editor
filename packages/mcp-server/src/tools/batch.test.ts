@@ -80,8 +80,10 @@ describe('a batch of edit tools', () => {
       name: 'id',
       primaryKey: true,
     });
-    // The relationship brings users' key into reviews as a column of its own.
+    // The relationship brings users' key into reviews as a column of its own,
+    // named after users, so it no longer repeats the id reviews already has.
     expect(reviews.columns).toHaveLength(2);
+    expect(reviews.columns[1].name).toBe('users_id');
     expect(run.steps.map(({ tool, as }) => [tool, as])).toEqual(
       REVIEWS.map(({ tool, as }) => [tool, as])
     );
@@ -190,6 +192,27 @@ describe('a batch of edit tools', () => {
     expect(toAgentSnapshot(peer.state).tables.at(-1)!.comment).toBe('$t');
   });
 
+  it('rehearses on the runtime value, which holds what an undo brings back, never the file form', () => {
+    const peer = seeded();
+    runBatch(peer, [
+      { tool: 'erd_remove_table', args: { tableId: SEED.empty } },
+    ]);
+    const read: PropertyKey[] = [];
+    const watched = new Proxy(peer, {
+      get: (target, key) => {
+        if (key === 'value' || key === 'runtimeValue') read.push(key);
+        return Reflect.get(target, key);
+      },
+    });
+
+    runBatch(watched, REVIEWS);
+
+    expect(read).toEqual(['runtimeValue']);
+    expect(
+      JSON.parse(peer.runtimeValue).collections.tableEntities
+    ).toHaveProperty(SEED.empty);
+  });
+
   it('lists the operations the editor keeps no undo entry for', () => {
     const peer = seeded();
 
@@ -200,6 +223,30 @@ describe('a batch of edit tools', () => {
 
     expect(run.withoutUndo).toEqual([0]);
     expect(peer.undo()).toMatchObject({ label: BATCH_TOOL, entries: 1 });
+  });
+
+  it('lists an operation of an undoable tool that changed the document with no undo entry', () => {
+    const peer = seeded();
+    const groupAt = () => {
+      const { x, y } = peer.state.collections.tableGroupEntities[SEED.group].ui;
+      return { x, y };
+    };
+
+    const run = runBatch(peer, [
+      { tool: 'erd_add_table' },
+      {
+        tool: 'erd_move_table_group',
+        args: { groupId: SEED.group, x: 45, y: 25 },
+      },
+      {
+        tool: 'erd_move_table_group',
+        args: { groupId: SEED.group, x: 45, y: 25 },
+      },
+    ]);
+
+    expect(run.withoutUndo).toEqual([1]);
+    expect(peer.undo()).toMatchObject({ label: BATCH_TOOL, entries: 1 });
+    expect(groupAt()).toEqual({ x: 45, y: 25 });
   });
 });
 

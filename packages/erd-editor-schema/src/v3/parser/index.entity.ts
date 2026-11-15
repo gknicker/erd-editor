@@ -1,6 +1,6 @@
 import { isBoolean, isNil, isPlainObject, isString } from 'es-toolkit';
 
-import { assign, assignMeta, getDefaultEntityMeta } from '@/helper';
+import { assign, entryId, restoreSequence } from '@/helper';
 import { DeepPartial } from '@/internal-types';
 import { Index } from '@/v3/schema/index.entity';
 
@@ -11,7 +11,6 @@ export const createIndex = (): Index => ({
   indexColumnIds: [],
   seqIndexColumnIds: [],
   unique: false,
-  meta: getDefaultEntityMeta(),
 });
 
 export function createAndMergeIndexEntities(
@@ -20,21 +19,24 @@ export function createAndMergeIndexEntities(
   const entities: Record<string, Index> = {};
   if (!isPlainObject(json) || isNil(json)) return entities;
 
-  for (const value of Object.values(json)) {
-    if (!value) continue;
+  for (const [key, value] of Object.entries(json)) {
+    if (!isPlainObject(value)) continue;
     const target = createIndex();
     const assignString = assign(isString, target, value);
     const assignBoolean = assign(isBoolean, target, value);
     const assignArray = assign(Array.isArray, target, value);
 
-    assignString('id');
+    target.id = entryId(key, value);
     assignString('name');
     assignString('tableId');
     assignBoolean('unique');
     assignArray('indexColumnIds');
     assignArray('seqIndexColumnIds');
 
-    assignMeta(target.meta, value.meta);
+    target.seqIndexColumnIds = restoreSequence(
+      target.indexColumnIds,
+      target.seqIndexColumnIds
+    );
 
     if (target.id) {
       entities[target.id] = target;

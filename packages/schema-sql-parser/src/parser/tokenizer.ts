@@ -1,11 +1,18 @@
 import { ValuesType } from '@/internal-types';
+import { DatabaseVendor } from '@/parser/statement';
+
+export type Quote = '"' | "'" | '`' | '[';
 
 export type Token = {
   type: TokenType;
   value: string;
-  // Set on tokens that came out of ", ', backtick or [] quoting, so a
-  // quoted identifier such as key is never read back as the KEY keyword.
-  quoted?: boolean;
+  // The opening delimiter of a token that came out of quoting, so a quoted
+  // identifier such as key is never read back as the KEY keyword, and a
+  // quoted ENUM value can be written back inside the quotes it had.
+  quoted?: Quote;
+  // What a single-quoted literal is written behind, kept so it goes back on:
+  // N'x', E'x', B'0', X'ff', U&'x', MySQL's _utf8mb4'x'.
+  prefix?: string;
 };
 
 export const TokenType = {
@@ -32,6 +39,7 @@ const pattern = {
   whiteSpace: /\s/,
   string: /\S/,
   breakString: /;|,|\(|\)|\[|\]|\.|=/,
+  literalEnd: /[\s,;)\]:|+]/,
   equal: '=',
   period: '.',
   comma: ',',
@@ -41,6 +49,69 @@ const pattern = {
   leftBracket: '[',
   rightBracket: ']',
 };
+
+// What Spark reads a backslash and the character after it as; any other
+// character stands for itself, a quote or a backslash among them.
+const SparkEscapes: Readonly<Record<string, string>> = {
+  '0': '\0',
+  b: '\b',
+  n: '\n',
+  r: '\r',
+  t: '\t',
+  Z: '\x1a',
+  '%': '\\%',
+  _: '\\_',
+};
+
+// UTF-16 units of a code point as Spark builds them, each cut to 16 bits, so
+// one past U+10FFFF reads as two units instead of throwing.
+const fromSparkCodePoint = (codePoint: number) =>
+  codePoint < 0x10000
+    ? String.fromCharCode(codePoint)
+    : String.fromCharCode(
+        Math.floor((codePoint - 0x10000) / 0x400) + 0xd800,
+        ((codePoint - 0x10000) % 0x400) + 0xdc00
+      );
+
+// Spark's escape at the start of rest, the text after a backslash: what it
+// reads as and how many characters of rest it spans. \u0041 and \101 are A.
+const readSparkEscape = (rest: string): [string, number] => {
+  const unicode = /^(?:u([\da-fA-F]{4})|U([\da-fA-F]{8}))/.exec(rest);
+  if (unicode) {
+    const hex = unicode[1] ?? unicode[2];
+    return [fromSparkCodePoint(parseInt(hex, 16)), hex.length + 1];
+  }
+
+  const octal = /^[01][0-7]{2}/.exec(rest);
+  if (octal) return [String.fromCharCode(parseInt(octal[0], 8)), 3];
+
+  // A backslash the source ends on stands for itself.
+  if (!rest) return ['\\', 0];
+
+  return [SparkEscapes[rest[0]] ?? rest[0], 1];
+};
+
+// The words that make the single-quoted literal right after them another kind
+// of string: national, escape, bit, hex, Unicode or charset introduced.
+const PREFIX = String.raw`(?:[nebx]|u&|_[a-z\d]+)`;
+
+// The operator characters a word may hold, glued to a literal: SQL Server's
+// N'a'+N'b', PostgreSQL's data->>'key'.
+const OPERATOR = String.raw`[+\-*/%|<>!^~#@?]`;
+
+// A quote opens a literal after a prefix that opens the word so far or follows
+// an operator in it (N'x', +N'x'), and after an operator ('a'||'b').
+const OPENS_LITERAL = new RegExp(
+  String.raw`(?:(?:^|${OPERATOR})${PREFIX}|${OPERATOR})$`,
+  'i'
+);
+
+// That word cut into what stands before its operators, the operators and the
+// prefix: a+N'x' is a, + and N'x'.
+const GLUED_LITERAL = new RegExp(
+  String.raw`^(.*?)(${OPERATOR}*)(${PREFIX}?)$`,
+  'is'
+);
 
 const createEqual = (type: string) => (char: string) => type === char;
 const createTest = (regexp: RegExp) => (char: string) => regexp.test(char);
@@ -56,6 +127,7 @@ const match = {
   whiteSpace: createTest(pattern.whiteSpace),
   string: createTest(pattern.string),
   breakString: createTest(pattern.breakString),
+  literalEnd: createTest(pattern.literalEnd),
   equal: createEqual(pattern.equal),
   period: createEqual(pattern.period),
   comma: createEqual(pattern.comma),
@@ -66,11 +138,69 @@ const match = {
   rightBracket: createEqual(pattern.rightBracket),
 };
 
-export function tokenizer(source: string): Token[] {
+// A Databricks source reads a single-quoted literal by Spark's rules, where
+// every backslash escapes what follows it; any other by the guess below.
+export function tokenizer(source: string, database?: DatabaseVendor): Token[] {
   const tokens: Token[] = [];
+  const spark = database === 'Databricks';
   let pos = 0;
 
   const isChar = () => pos < source.length;
+
+  // MySQL's it\'s: a quote behind an odd run of backslashes, unless what
+  // follows may end a literal. 'C:\', is how standard SQL writes a trailing
+  // backslash, and so are 'C:\'::text and T-SQL's 'C:\'+name.
+  const isEscapedQuote = (value: string) => {
+    if (pos + 1 >= source.length || match.literalEnd(source[pos + 1])) {
+      return false;
+    }
+
+    let run = 0;
+
+    while (value[value.length - 1 - run] === '\\') {
+      run++;
+    }
+
+    return run % 2 === 1;
+  };
+
+  // A doubled quote inside a quoted token is one quote of its value, the way
+  // SQL escapes it: 'it''s'. Not inside brackets, where ]] also ends a nested
+  // array literal, ARRAY[[1, 2]].
+  const readQuoted = (quote: Quote, prefix?: string) => {
+    const close = quote === '[' ? ']' : quote;
+    let value = '';
+    pos++;
+
+    while (isChar()) {
+      const char = source[pos];
+
+      if (spark && quote === "'" && char === '\\') {
+        const [text, length] = readSparkEscape(source.slice(pos + 1, pos + 10));
+        value += text;
+        pos += length + 1;
+        continue;
+      }
+
+      if (char === close && quote === "'" && !spark && isEscapedQuote(value)) {
+        value = value.slice(0, -1);
+      } else if (char === close) {
+        if (quote === '[' || source[pos + 1] !== close) break;
+        pos++;
+      }
+
+      value += char;
+      pos++;
+    }
+
+    tokens.push({
+      type: TokenType.string,
+      value,
+      quoted: quote,
+      ...(prefix ? { prefix } : {}),
+    });
+    pos++;
+  };
 
   while (isChar()) {
     let char = source[pos];
@@ -152,58 +282,22 @@ export function tokenizer(source: string): Token[] {
     }
 
     if (match.leftBracket(char)) {
-      let value = '';
-      char = source[++pos];
-
-      while (isChar() && !match.rightBracket(char)) {
-        value += char;
-        char = source[++pos];
-      }
-
-      tokens.push({ type: TokenType.string, value, quoted: true });
-      pos++;
+      readQuoted('[');
       continue;
     }
 
     if (match.doubleQuote(char)) {
-      let value = '';
-      char = source[++pos];
-
-      while (isChar() && !match.doubleQuote(char)) {
-        value += char;
-        char = source[++pos];
-      }
-
-      tokens.push({ type: TokenType.string, value, quoted: true });
-      pos++;
+      readQuoted('"');
       continue;
     }
 
     if (match.singleQuote(char)) {
-      let value = '';
-      char = source[++pos];
-
-      while (isChar() && !match.singleQuote(char)) {
-        value += char;
-        char = source[++pos];
-      }
-
-      tokens.push({ type: TokenType.string, value, quoted: true });
-      pos++;
+      readQuoted("'");
       continue;
     }
 
     if (match.backtick(char)) {
-      let value = '';
-      char = source[++pos];
-
-      while (isChar() && !match.backtick(char)) {
-        value += char;
-        char = source[++pos];
-      }
-
-      tokens.push({ type: TokenType.string, value, quoted: true });
-      pos++;
+      readQuoted('`');
       continue;
     }
 
@@ -216,13 +310,26 @@ export function tokenizer(source: string): Token[] {
         !match.breakString(char) &&
         // A comment needs no whitespace in front of it: INT-- pk.
         !(match.dash(char) && match.dash(source[pos + 1])) &&
-        !(match.slash(char) && match.asterisk(source[pos + 1]))
+        !(match.slash(char) && match.asterisk(source[pos + 1])) &&
+        !(match.singleQuote(char) && OPENS_LITERAL.test(value))
       ) {
         value += char;
         char = source[++pos];
       }
 
-      tokens.push({ type: TokenType.string, value });
+      if (!match.singleQuote(char)) {
+        tokens.push({ type: TokenType.string, value });
+        continue;
+      }
+
+      const [, head, operator, prefix] = GLUED_LITERAL.exec(
+        value
+      ) as RegExpExecArray;
+
+      for (const word of [head, operator]) {
+        if (word) tokens.push({ type: TokenType.string, value: word });
+      }
+      readQuoted("'", prefix);
       continue;
     }
 

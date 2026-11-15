@@ -11,19 +11,22 @@ describe('StatementType', () => {
       alterTableAddUnique: 'alter.table.add.unique',
       alterTableAddPrimaryKey: 'alter.table.add.primaryKey',
       alterTableAddForeignKey: 'alter.table.add.foreignKey',
+      alterTableAddDefault: 'alter.table.add.default',
+      alterTableAlterColumnAutoIncrement:
+        'alter.table.alter.column.autoIncrement',
       commentOnTable: 'comment.on.table',
       commentOnColumn: 'comment.on.column',
     });
   });
 
-  it('exposes exactly seven distinct discriminators', () => {
+  it('exposes exactly nine distinct discriminators', () => {
     const values = Object.values(StatementType);
 
-    expect(values).toHaveLength(7);
-    expect(new Set(values).size).toBe(7);
+    expect(values).toHaveLength(9);
+    expect(new Set(values).size).toBe(9);
   });
 
-  it('names alter statements after their ALTER TABLE ADD prefix', () => {
+  it('names alter statements after the ALTER TABLE clause they read', () => {
     const alterValues = Object.entries(StatementType)
       .filter(([key]) => key.startsWith('alter'))
       .map(([, value]) => value);
@@ -32,9 +35,11 @@ describe('StatementType', () => {
       'alter.table.add.unique',
       'alter.table.add.primaryKey',
       'alter.table.add.foreignKey',
+      'alter.table.add.default',
+      'alter.table.alter.column.autoIncrement',
     ]);
     for (const value of alterValues) {
-      expect(value.startsWith('alter.table.add.')).toBe(true);
+      expect(value).toMatch(/^alter\.table\.(add|alter\.column)\./);
     }
   });
 });
@@ -98,8 +103,9 @@ describe('Statement discriminators', () => {
         case StatementType.createIndex:
           return `${statement.type}:${statement.unique}`;
         case StatementType.alterTableAddPrimaryKey:
-        case StatementType.alterTableAddUnique:
           return `${statement.type}:${statement.columnNames.join()}`;
+        case StatementType.alterTableAddUnique:
+          return `${statement.type}:${statement.columns.map(({ name }) => name).join()}`;
         case StatementType.alterTableAddForeignKey:
           return `${statement.type}:${statement.refTableName}`;
       }

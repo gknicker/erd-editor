@@ -2,9 +2,9 @@ import { expect, test } from '../support/fixtures';
 import { type ErdEditorPage } from '../support/ErdEditorPage';
 import { CANVAS_SIZE, createSchema, type ErdDocument } from '../support/schema';
 
-// The document carries two views: settings.originX/originY, which the editor
-// draws with, and settings.scrollLeft/scrollTop, which only the migration
-// reads. Nothing writes the second, so a file survives a trip through both.
+// A document saved before the origin carries settings.scrollLeft/scrollTop
+// alone, which the parser migrates once into settings.originX/originY, the
+// view the editor draws with, and then drops: nothing writes the legacy pair.
 
 const ZOOM = 0.5;
 
@@ -19,8 +19,9 @@ const LEGACY = { scrollLeft: -300, scrollTop: -400 };
 const TABLE = { x: 600, y: 400 };
 
 /**
- * The origin the shipped editor drew a legacy document at: the scroll it stored
- * plus the half of the canvas box the css transform-origin shrank away.
+ * The origin an editor before the origin pair drew a legacy document at: the
+ * scroll it stored plus the half of the canvas box the css transform-origin
+ * shrank away.
  */
 const migrated = (scroll: number) => scroll + (CANVAS_SIZE * (1 - ZOOM)) / 2;
 
@@ -71,8 +72,9 @@ test.describe('the origin pair and the legacy scroll pair', () => {
 
     const placement = await tablePlacement(erd, 'users');
 
-    // The formula the released editor drew with, written out: scale about the
-    // middle of the canvas box, then carry the result by the stored scroll.
+    // The formula an editor before the origin pair drew with, written out:
+    // scale about the middle of the canvas box, then carry the result by the
+    // stored scroll.
     expect(placement.x).toBeCloseTo(
       TABLE.x * ZOOM + LEGACY.scrollLeft + (CANVAS_SIZE * (1 - ZOOM)) / 2,
       1
@@ -83,16 +85,14 @@ test.describe('the origin pair and the legacy scroll pair', () => {
     );
   });
 
-  test('hands the legacy pair back untouched, beside the origin it migrated to', async ({
+  test('hands back the origin it migrated to and none of the legacy pair', async ({
     erd,
   }) => {
     await erd.seed(legacyDocument());
 
     const settings = await erd.settings();
-    expect([settings.scrollLeft, settings.scrollTop]).toEqual([
-      LEGACY.scrollLeft,
-      LEGACY.scrollTop,
-    ]);
+    expect(settings).not.toHaveProperty('scrollLeft');
+    expect(settings).not.toHaveProperty('scrollTop');
     expect(settings.originX).toBeCloseTo(migrated(LEGACY.scrollLeft), 4);
     expect(settings.originY).toBeCloseTo(migrated(LEGACY.scrollTop), 4);
   });
@@ -107,10 +107,6 @@ test.describe('the origin pair and the legacy scroll pair', () => {
       .toBeLessThan(before.originY);
 
     const after = await erd.settings();
-    expect([after.scrollLeft, after.scrollTop]).toEqual([
-      LEGACY.scrollLeft,
-      LEGACY.scrollTop,
-    ]);
     expect(after.originX).toBe(before.originX);
     expect(after.originY).toBeCloseTo(before.originY - 200, 1);
 
@@ -138,7 +134,6 @@ test.describe('the origin pair and the legacy scroll pair', () => {
       origin.originX,
       origin.originY,
     ]);
-    expect([settings.scrollLeft, settings.scrollTop]).toEqual([0, 0]);
 
     // Migrating that legacy pair would have drawn the scene at origin 500 on
     // both axes, 260px and 380px away from the origin the document names, so
@@ -146,5 +141,35 @@ test.describe('the origin pair and the legacy scroll pair', () => {
     const placement = await tablePlacement(erd, 'users');
     expect(placement.x).toBeCloseTo(TABLE.x * ZOOM + origin.originX, 1);
     expect(placement.y).toBeCloseTo(TABLE.y * ZOOM + origin.originY, 1);
+  });
+});
+
+/**
+ * An element given no value is a new document, every setting locked: the
+ * reader's scroll and zoom move the scene and leave the value alone.
+ */
+test.describe('a new document', () => {
+  test('keeps the scroll and the zoom a reader makes out of the value', async ({
+    erd,
+  }) => {
+    const before = await erd.value();
+    const zero = await erd.pointAt(0, 0);
+    const readout = (await erd.zoomReadout.textContent()) ?? '';
+
+    await erd.wheel(200);
+    await expect
+      .poll(async () => (await erd.pointAt(0, 0)).y)
+      .toBeLessThan(zero.y);
+    await erd.floatingToolbar.locator('[title^="Zoom in"]').click();
+    await expect(erd.zoomReadout).not.toHaveText(readout);
+
+    expect(before.settings).not.toHaveProperty('ignoreSaveSettings');
+    expect(before.settings).toMatchObject({
+      lockSettings: 63,
+      originX: 0,
+      originY: 0,
+      zoomLevel: 1,
+    });
+    expect(await erd.value()).toEqual(before);
   });
 });

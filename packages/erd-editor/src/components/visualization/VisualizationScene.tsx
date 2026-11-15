@@ -1,18 +1,20 @@
 /** @jsxHost konva */
 
 import { FC, repeat } from '@dineug/r-html';
+import { renderKonva } from '@dineug/r-html-konva';
 import type { KonvaEventObject } from 'konva/lib/Node';
 import type { Stage } from 'konva/lib/Stage';
 
 import { useAppContext } from '@/components/appContext';
+import { useI18n } from '@/components/localeContext';
 import { useThemeContext } from '@/components/themeContext';
-import { captureDrag } from '@/components/visualization/captureDrag';
 import {
   Group,
   linkEnds,
   type Visualization,
 } from '@/components/visualization/createVisualization';
 import GraphNode from '@/components/visualization/graph-node/GraphNode';
+import { captureGraphPan } from '@/components/visualization/graphPan';
 import {
   DIM_OPACITY,
   hasName,
@@ -23,9 +25,6 @@ import {
   type VisualizationState,
 } from '@/components/visualization/visualizationView';
 import { TextFontFamily } from '@/constants/fonts';
-import { renderKonva } from '@/konva/host';
-import { isMultiTouch } from '@/utils/domEvent';
-import type { DragMove } from '@/utils/globalEventObservable';
 
 export type VisualizationSceneProps = {
   graph: Visualization;
@@ -59,37 +58,28 @@ const DIMMED_LINK_OPACITY = LINK_OPACITY * DIM_OPACITY;
 const VisualizationScene: FC<VisualizationSceneProps> = (props, ctx) => {
   const app = useAppContext(ctx);
   const themeRef = useThemeContext(ctx);
+  const i18n = useI18n(ctx);
 
-  const handleMove = ({ event, movementX, movementY }: DragMove) => {
-    event.type === 'mousemove' && event.preventDefault();
-    props.state.x += movementX;
-    props.state.y += movementY;
-  };
-
-  // A pan is a drag too: a dot the pointer crosses on the way would otherwise
-  // open its preview under a hand that is busy moving the view.
   const handlePanStart = (event: KonvaEventObject<Event>) => {
-    if (isMultiTouch(event.evt)) return;
-
-    const { state } = props;
-
-    state.drag = true;
-    captureDrag(event, {
-      next: handleMove,
-      complete: () => {
-        state.drag = false;
-      },
-    });
+    captureGraphPan(event, props.state);
   };
 
   return () => {
     const { graph, state } = props;
     const { store } = app.value;
     const { viewport } = store.state.editor;
+    // Read here for the same reason as the placeholder below: the labels
+    // repeat draws outside this pass, and a switch of view has to reach them.
+    const settings = { nameViewMode: store.state.settings.nameViewMode };
     const theme = themeRef.value;
     const { x, y, scale, hoveredTableId } = state;
     const opacity = labelOpacity(scale);
     const tables = graph.nodes.filter(node => node.group === Group.table);
+    // Read here rather than in the labels, which repeat draws outside this
+    // pass, and only while a table without a name has a label to put it in.
+    const placeholder = tables.every(node => hasName(node, settings))
+      ? ''
+      : i18n.value.t('common.placeholder.table');
     const highlight = hoveredTableId
       ? highlightOf(graph.links, hoveredTableId)
       : null;
@@ -176,8 +166,12 @@ const VisualizationScene: FC<VisualizationSceneProps> = (props, ctx) => {
                   x={node.x - LABEL_WIDTH / 2}
                   y={node.y + TABLE_RADIUS + LABEL_GAP}
                   width={LABEL_WIDTH}
-                  text={labelOf(node)}
-                  fill={hasName(node) ? theme.foreground : theme.placeholder}
+                  text={labelOf(node, placeholder, settings)}
+                  fill={
+                    hasName(node, settings)
+                      ? theme.foreground
+                      : theme.placeholder
+                  }
                   fontFamily={TextFontFamily}
                   fontSize={LABEL_FONT_SIZE}
                   fontStyle="bold"

@@ -1,8 +1,14 @@
 import { query } from '@dineug/erd-editor-schema';
+import { compositionActionsFlat } from '@dineug/r-html';
 import { describe, expect, it } from 'vite-plus/test';
 
-import { ColumnOption } from '@/constants/schema';
+import { createTestAppContext } from '@/__test-utils__';
+import { ColumnOption, ColumnType, NameViewMode } from '@/constants/schema';
 import { Clock } from '@/engine/clock';
+import {
+  addDictionaryAction,
+  removeDictionaryAction,
+} from '@/engine/modules/dictionary/atom.actions';
 import {
   focusColumnAction,
   selectAction,
@@ -11,14 +17,26 @@ import { FocusType, SelectType } from '@/engine/modules/editor/state';
 import { addIndexAction } from '@/engine/modules/index/atom.actions';
 import { addIndexColumnAction } from '@/engine/modules/index-column/atom.actions';
 import { addRelationshipAction } from '@/engine/modules/relationship/atom.actions';
-import { changeRelationshipDataTypeSyncAction } from '@/engine/modules/settings/atom.actions';
+import {
+  changeColumnOrderAction,
+  changeNameViewModeAction,
+  changeRelationshipDataTypeSyncAction,
+} from '@/engine/modules/settings/atom.actions';
 import { addTableAction } from '@/engine/modules/table/atom.actions';
-import { addColumnAction } from '@/engine/modules/table-column/atom.actions';
+import {
+  addColumnAction,
+  changeColumnDataTypeAction,
+  changeColumnDomainAction,
+  changeColumnNameDerivedAction,
+  changeColumnPrimaryKeyAction,
+  removeColumnAction,
+} from '@/engine/modules/table-column/atom.actions';
 import {
   actions$,
   addColumnAction$,
   changeColumnDataTypeAction$,
   changeColumnPrimaryKeyAction$,
+  changeColumnsPrimaryKeyAction$,
   changeColumnValueAction$,
   isChangeColumnTypes,
   isToggleColumnTypes,
@@ -77,6 +95,25 @@ const column = (store: Store, id: string) =>
     .collection('tableColumnEntities')
     .selectById(id)!;
 
+const flatten = (store: Store, action: unknown) =>
+  compositionActionsFlat(store.state, store.context, [action as any]);
+
+/** Adds a domain of that type and links each column to it, typed as it is. */
+function linkDomain(
+  store: Store,
+  id: string,
+  dataType: string,
+  columns: Array<[tableId: string, columnId: string]>
+) {
+  store.dispatchSync(
+    addDictionaryAction({ kind: 'domain', id, values: { name: id, dataType } }),
+    ...columns.flatMap(([tableId, columnId]) => [
+      changeColumnDataTypeAction({ tableId, id: columnId, value: dataType }),
+      changeColumnDomainAction({ tableId, id: columnId, value: id }),
+    ])
+  );
+}
+
 describe('isToggleColumnTypes / isChangeColumnTypes', () => {
   it('accepts only the three boolean option focus types', () => {
     expect(isToggleColumnTypes(FocusType.columnNotNull)).toBe(true);
@@ -86,12 +123,14 @@ describe('isToggleColumnTypes / isChangeColumnTypes', () => {
     expect(isToggleColumnTypes(FocusType.tableName)).toBe(false);
   });
 
-  it('accepts only the four textual focus types', () => {
+  it('accepts only the five textual focus types', () => {
     expect(isChangeColumnTypes(FocusType.columnName)).toBe(true);
+    expect(isChangeColumnTypes(FocusType.columnLogicalName)).toBe(true);
     expect(isChangeColumnTypes(FocusType.columnDataType)).toBe(true);
     expect(isChangeColumnTypes(FocusType.columnDefault)).toBe(true);
     expect(isChangeColumnTypes(FocusType.columnComment)).toBe(true);
     expect(isChangeColumnTypes(FocusType.columnNotNull)).toBe(false);
+    expect(isChangeColumnTypes(FocusType.columnDomain)).toBe(false);
     expect(isChangeColumnTypes(FocusType.tableComment)).toBe(false);
   });
 });
@@ -134,6 +173,48 @@ describe('addColumnAction$', () => {
       columnId: table(store, 't2').columnIds[0],
       focusType: FocusType.columnName,
     });
+  });
+
+  it('focuses the logical name, the first cell a row lays out, in the view of both', () => {
+    const store = setup();
+    addTable(store, 't1');
+    addTable(store, 't2');
+    store.dispatchSync(
+      changeNameViewModeAction({
+        value: NameViewMode.both,
+        shared: false,
+        editorId: store.state.editor.id,
+      })
+    );
+
+    store.dispatchSync(addColumnAction$('t1'));
+    expect(store.state.editor.focusTable?.focusType).toBe(
+      FocusType.columnLogicalName
+    );
+
+    store.dispatchSync(selectAction({ t2: SelectType.table }));
+    store.dispatchSync(addColumnAction$());
+    expect(store.state.editor.focusTable).toMatchObject({
+      tableId: 't2',
+      focusType: FocusType.columnLogicalName,
+    });
+  });
+
+  it('focuses the first cell of a row whose order puts another before the name', () => {
+    const store = setup();
+    addTable(store, 't1');
+    store.dispatchSync(
+      changeColumnOrderAction({
+        value: ColumnType.columnDataType,
+        target: ColumnType.columnLogicalName,
+      })
+    );
+
+    store.dispatchSync(addColumnAction$('t1'));
+
+    expect(store.state.editor.focusTable?.focusType).toBe(
+      FocusType.columnDataType
+    );
   });
 
   it('does nothing when nothing is selected', () => {
@@ -432,6 +513,144 @@ describe('changeColumnDataTypeAction$', () => {
     expect(column(store, 'c3').dataType).toBe('bigint');
   });
 
+  it('unlinks a linked column typed off its domain in the same dispatch, and keeps one typed to it', () => {
+    const store = setup();
+    addTable(store, 't1', ['c1', 'c2']);
+    linkDomain(store, 'd1', 'bigint', [
+      ['t1', 'c1'],
+      ['t1', 'c2'],
+    ]);
+    store.dispatchSync(changeRelationshipDataTypeSyncAction({ value: false }));
+
+    expect(
+      flatten(
+        store,
+        changeColumnDataTypeAction$({ tableId: 't1', id: 'c1', value: 'int' })
+      )
+    ).toEqual([
+      expect.objectContaining({
+        type: 'column.changeDataType',
+        payload: { tableId: 't1', id: 'c1', value: 'int' },
+      }),
+      expect.objectContaining({
+        type: 'column.changeDomain',
+        payload: { tableId: 't1', id: 'c1', value: '' },
+      }),
+    ]);
+
+    store.dispatchSync(
+      changeColumnDataTypeAction$({ tableId: 't1', id: 'c1', value: 'int' }),
+      changeColumnDataTypeAction$({ tableId: 't1', id: 'c2', value: 'bigint' })
+    );
+
+    expect(column(store, 'c1')).toMatchObject({
+      dataType: 'int',
+      domainId: '',
+    });
+    expect(column(store, 'c2')).toMatchObject({
+      dataType: 'bigint',
+      domainId: 'd1',
+    });
+  });
+
+  it('unlinks a column typed off the type of a removed domain it links, and keeps one typed to it', () => {
+    const store = setup();
+    addTable(store, 't1', ['c1', 'c2']);
+    linkDomain(store, 'd1', 'bigint', [
+      ['t1', 'c1'],
+      ['t1', 'c2'],
+    ]);
+    store.dispatchSync(
+      changeRelationshipDataTypeSyncAction({ value: false }),
+      removeDictionaryAction({ kind: 'domain', id: 'd1' })
+    );
+
+    store.dispatchSync(
+      changeColumnDataTypeAction$({ tableId: 't1', id: 'c1', value: 'int' }),
+      changeColumnDataTypeAction$({ tableId: 't1', id: 'c2', value: 'bigint' })
+    );
+
+    expect(column(store, 'c1')).toMatchObject({
+      dataType: 'int',
+      domainId: '',
+    });
+    expect(column(store, 'c2')).toMatchObject({
+      dataType: 'bigint',
+      domainId: 'd1',
+    });
+  });
+
+  it('unlinks a foreign key the sync takes off the domain it links, sending none it leaves equal', () => {
+    const store = setup();
+    addTable(store, 't1', ['c1']);
+    addTable(store, 't2', ['c2']);
+    addTable(store, 't3', ['c3']);
+    addRelationship(
+      store,
+      'r1',
+      { tableId: 't1', columnIds: ['c1'] },
+      { tableId: 't2', columnIds: ['c2'] }
+    );
+    addRelationship(
+      store,
+      'r2',
+      { tableId: 't1', columnIds: ['c1'] },
+      { tableId: 't3', columnIds: ['c3'] }
+    );
+    linkDomain(store, 'd2', 'int', [['t2', 'c2']]);
+    store.dispatchSync(
+      changeColumnDataTypeAction({ tableId: 't3', id: 'c3', value: 'bigint' }),
+      changeRelationshipDataTypeSyncAction({ value: true })
+    );
+
+    expect(
+      flatten(
+        store,
+        changeColumnDataTypeAction$({
+          tableId: 't1',
+          id: 'c1',
+          value: 'bigint',
+        })
+      ).map(({ type, payload: { id, value } }) => [type, id, value])
+    ).toEqual([
+      ['column.changeDataType', 'c1', 'bigint'],
+      ['column.changeDataType', 'c2', 'bigint'],
+      ['column.changeDomain', 'c2', ''],
+    ]);
+  });
+
+  it('unlinks the key a foreign key typed off its own domain reaches back to', () => {
+    const store = setup();
+    addTable(store, 't1', ['c1']);
+    addTable(store, 't2', ['c2']);
+    addRelationship(
+      store,
+      'r1',
+      { tableId: 't1', columnIds: ['c1'] },
+      { tableId: 't2', columnIds: ['c2'] }
+    );
+    linkDomain(store, 'd1', 'int', [['t1', 'c1']]);
+    store.dispatchSync(
+      changeColumnDataTypeAction({ tableId: 't2', id: 'c2', value: 'int' }),
+      changeRelationshipDataTypeSyncAction({ value: true })
+    );
+
+    expect(
+      flatten(
+        store,
+        changeColumnDataTypeAction$({
+          tableId: 't2',
+          id: 'c2',
+          value: 'bigint',
+        })
+      ).map(({ type, payload: { id, value } }) => [type, id, value])
+    ).toEqual([
+      ['column.changeDataType', 'c2', 'bigint'],
+      ['column.changeDataType', 'c1', 'bigint'],
+      ['column.changeDomain', 'c1', ''],
+    ]);
+  });
+
   it('recomputes the rendered data-type width', () => {
     const store = setup();
     addTable(store, 't1', ['c1']);
@@ -486,6 +705,77 @@ describe('changeColumnValueAction$', () => {
 
     expect(column(store, 'c1').name).toBe('user_id');
     expect(column(store, 'c1').ui.widthName).toBe(70);
+  });
+
+  it('turns the derived flag off in the dispatch that writes the name, and sends none while it is off', () => {
+    const store = setup();
+    addTable(store, 't1', ['c1', 'c2']);
+    store.dispatchSync(
+      changeColumnNameDerivedAction({ tableId: 't1', id: 'c1', value: true })
+    );
+    const typesOf = (columnId: string) =>
+      flatten(
+        store,
+        changeColumnValueAction$(FocusType.columnName, 't1', columnId, 'no')
+      ).map(({ type, payload }) => [type, payload.value]);
+
+    expect(typesOf('c1')).toEqual([
+      ['column.changeName', 'no'],
+      ['column.changeNameDerived', false],
+    ]);
+    expect(typesOf('c2')).toEqual([['column.changeName', 'no']]);
+
+    store.dispatchSync(
+      changeColumnValueAction$(FocusType.columnName, 't1', 'c1', 'member_no')
+    );
+
+    expect(column(store, 'c1').name).toBe('member_no');
+    expect(bHas(column(store, 'c1').options, ColumnOption.nameDerived)).toBe(
+      false
+    );
+  });
+
+  it('writes the logical name alone, deriving no name from a term that matches it', () => {
+    const store = setup();
+    addTable(store, 't1', ['c1']);
+    store.dispatchSync(
+      addDictionaryAction({
+        kind: 'term',
+        id: 'term-1',
+        values: { name: 'Member no', physicalName: 'member_no' },
+      }),
+      changeColumnNameDerivedAction({ tableId: 't1', id: 'c1', value: true })
+    );
+
+    expect(
+      flatten(
+        store,
+        changeColumnValueAction$(
+          FocusType.columnLogicalName,
+          't1',
+          'c1',
+          'Member no'
+        )
+      ).map(({ type, payload }) => [type, payload.value])
+    ).toEqual([['column.changeLogicalName', 'Member no']]);
+
+    store.dispatchSync(
+      changeColumnValueAction$(
+        FocusType.columnLogicalName,
+        't1',
+        'c1',
+        'Member no'
+      )
+    );
+
+    expect(column(store, 'c1')).toMatchObject({
+      logicalName: 'Member no',
+      name: '',
+    });
+    expect(column(store, 'c1').ui.widthLogicalName).toBe(90);
+    expect(bHas(column(store, 'c1').options, ColumnOption.nameDerived)).toBe(
+      true
+    );
   });
 
   it('routes the data type through the sync-aware generator', () => {
@@ -561,6 +851,177 @@ describe('changeColumnPrimaryKeyAction$', () => {
   });
 });
 
+describe('changeColumnsPrimaryKeyAction$', () => {
+  const isPrimaryKey = (store: Store, id: string) =>
+    bHas(column(store, id).options, ColumnOption.primaryKey);
+
+  const keys = (store: Store, ids: string[]) =>
+    ids.map(id => isPrimaryKey(store, id));
+
+  function setKeys(store: Store, ids: string[]) {
+    for (const id of ids) {
+      store.dispatchSync(
+        changeColumnPrimaryKeyAction({ tableId: 't1', id, value: true })
+      );
+    }
+  }
+
+  /** The atom actions the generator sends on the state given, nothing else. */
+  const emitted = (store: Store, columnIds: string[]) =>
+    compositionActionsFlat(store.state, store.context, [
+      changeColumnsPrimaryKeyAction$('t1', columnIds),
+    ]).map(({ type, payload }) => ({ type, payload }));
+
+  it('makes every column named a key while one of them is not', () => {
+    const store = setup();
+    addTable(store, 't1', ['c1', 'c2', 'c3', 'c4']);
+    setKeys(store, ['c2']);
+
+    store.dispatchSync(
+      changeColumnsPrimaryKeyAction$('t1', ['c1', 'c2', 'c3'])
+    );
+
+    expect(keys(store, ['c1', 'c2', 'c3', 'c4'])).toEqual([
+      true,
+      true,
+      true,
+      false,
+    ]);
+  });
+
+  it('sends nothing for a column already a key, whose undo would clear it', () => {
+    const store = setup();
+    addTable(store, 't1', ['c1', 'c2', 'c3']);
+    setKeys(store, ['c2']);
+
+    expect(emitted(store, ['c1', 'c2', 'c3'])).toEqual([
+      {
+        type: changeColumnPrimaryKeyAction.type,
+        payload: { tableId: 't1', id: 'c1', value: true },
+      },
+      {
+        type: changeColumnPrimaryKeyAction.type,
+        payload: { tableId: 't1', id: 'c3', value: true },
+      },
+    ]);
+  });
+
+  it('clears every column named once all of them are keys, and only those', () => {
+    const store = setup();
+    addTable(store, 't1', ['c1', 'c2', 'c3']);
+    setKeys(store, ['c1', 'c2', 'c3']);
+
+    store.dispatchSync(changeColumnsPrimaryKeyAction$('t1', ['c1', 'c2']));
+
+    expect(keys(store, ['c1', 'c2', 'c3'])).toEqual([false, false, true]);
+  });
+
+  it('toggles one column the way changeColumnPrimaryKeyAction$ does', () => {
+    const store = setup();
+    addTable(store, 't1', ['c1']);
+
+    store.dispatchSync(changeColumnsPrimaryKeyAction$('t1', ['c1']));
+    expect(isPrimaryKey(store, 'c1')).toBe(true);
+
+    store.dispatchSync(changeColumnsPrimaryKeyAction$('t1', ['c1']));
+    expect(isPrimaryKey(store, 'c1')).toBe(false);
+  });
+
+  it('passes over an id with no column, and sends nothing for none', () => {
+    const store = setup();
+    addTable(store, 't1', ['c1']);
+
+    expect(emitted(store, ['nope', 'c1'])).toEqual([
+      {
+        type: changeColumnPrimaryKeyAction.type,
+        payload: { tableId: 't1', id: 'c1', value: true },
+      },
+    ]);
+    expect(emitted(store, ['nope'])).toEqual([]);
+    expect(emitted(store, [])).toEqual([]);
+  });
+
+  it('passes over a column taken out of the table, whose entity stays behind', () => {
+    const store = setup();
+    addTable(store, 't1', ['c1', 'c2']);
+    setKeys(store, ['c1']);
+    // The bare atom an undo of an add, a peer or an agent sends: a selection
+    // can still name the column, and only table.columnIds lets go of it.
+    store.dispatchSync(removeColumnAction({ id: 'c2', tableId: 't1' }));
+    expect(column(store, 'c2')).toBeDefined();
+    expect(table(store, 't1').columnIds).toEqual(['c1']);
+
+    expect(emitted(store, ['c2', 'c1'])).toEqual([
+      {
+        type: changeColumnPrimaryKeyAction.type,
+        payload: { tableId: 't1', id: 'c1', value: false },
+      },
+    ]);
+    expect(emitted(store, ['c2'])).toEqual([]);
+  });
+
+  it('sends nothing for a table that is not there', () => {
+    const store = setup();
+    addTable(store, 't1', ['c1']);
+
+    expect(
+      compositionActionsFlat(store.state, store.context, [
+        changeColumnsPrimaryKeyAction$('nope', ['c1']),
+      ])
+    ).toEqual([]);
+  });
+
+  it('leaves a relationship on the table as it was', () => {
+    const store = setup();
+    addTable(store, 't1', ['c1', 'c2']);
+    addTable(store, 't2', ['c3']);
+    setKeys(store, ['c1']);
+    addRelationship(
+      store,
+      'r1',
+      { tableId: 't1', columnIds: ['c1'] },
+      { tableId: 't2', columnIds: ['c3'] }
+    );
+    const before = JSON.stringify(
+      store.state.collections.relationshipEntities.r1
+    );
+
+    store.dispatchSync(changeColumnsPrimaryKeyAction$('t1', ['c1', 'c2']));
+
+    expect(keys(store, ['c1', 'c2'])).toEqual([true, true]);
+    expect(store.state.doc.relationshipIds).toEqual(['r1']);
+    expect(
+      JSON.stringify(store.state.collections.relationshipEntities.r1)
+    ).toBe(before);
+  });
+
+  it('is one undo that gives back the keys each column had', () => {
+    const { store } = createTestAppContext();
+    store.dispatchSync(
+      addTableAction({ id: 't1', ui: { x: 0, y: 0, zIndex: 1 } }),
+      addColumnAction({ id: 'c1', tableId: 't1' }),
+      addColumnAction({ id: 'c2', tableId: 't1' }),
+      addColumnAction({ id: 'c3', tableId: 't1' })
+    );
+    store.dispatchSync(
+      changeColumnPrimaryKeyAction({ tableId: 't1', id: 'c2', value: true })
+    );
+
+    store.dispatchSync(
+      changeColumnsPrimaryKeyAction$('t1', ['c1', 'c2', 'c3'])
+    );
+    expect(keys(store, ['c1', 'c2', 'c3'])).toEqual([true, true, true]);
+
+    store.undo();
+    expect(keys(store, ['c1', 'c2', 'c3'])).toEqual([false, true, false]);
+
+    store.redo();
+    expect(keys(store, ['c1', 'c2', 'c3'])).toEqual([true, true, true]);
+
+    store.destroy();
+  });
+});
+
 describe('actions$', () => {
   it('exposes every generator action of the module', () => {
     expect(actions$).toEqual({
@@ -570,6 +1031,7 @@ describe('actions$', () => {
       changeColumnDataTypeAction$,
       changeColumnValueAction$,
       changeColumnPrimaryKeyAction$,
+      changeColumnsPrimaryKeyAction$,
     });
     expect(
       Object.values(actions$).every(value => typeof value === 'function')

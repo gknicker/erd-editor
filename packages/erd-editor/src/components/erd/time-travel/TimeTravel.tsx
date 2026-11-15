@@ -18,12 +18,16 @@ import {
 } from '@/components/appContext';
 import Canvas from '@/components/erd/canvas/Canvas';
 import Minimap from '@/components/erd/minimap/Minimap';
+import { readerNameViewAction } from '@/components/erd/readerNameView';
+import { useI18n } from '@/components/localeContext';
 import Button from '@/components/primitives/button/Button';
 import Slider from '@/components/primitives/slider/Slider';
+import { sceneInteractionContext } from '@/components/sceneInteractionContext';
 import { sceneSourceContext } from '@/components/sceneSourceContext';
 import { changeViewportAction } from '@/engine/modules/editor/atom.actions';
 import { initialLoadJsonAction$ } from '@/engine/modules/editor/generator.actions';
 import { HISTORY_LIMIT } from '@/engine/rx-store';
+import { RootState } from '@/engine/state';
 import { useUnmounted } from '@/hooks/useUnmounted';
 import { KeyBindingName } from '@/utils/keyboard-shortcut';
 
@@ -34,6 +38,17 @@ export type TimeTravelProps = {
   onChange: (cursor: number) => void;
   onClose: () => void;
 };
+
+/**
+ * The reader's document at the scroll and zoom they are looking at, which the
+ * file holds at the values it was locked at while the viewport is locked.
+ */
+function toPreviewJson(state: RootState): string {
+  const { originX, originY, zoomLevel } = state.settings;
+  const json = JSON.parse(toJson(state));
+  Object.assign(json.settings, { originX, originY, zoomLevel });
+  return JSON.stringify(json);
+}
 
 const TimeTravel: FC<TimeTravelProps> = (props, ctx) => {
   const root = createRef<HTMLDivElement>();
@@ -50,12 +65,16 @@ const TimeTravel: FC<TimeTravelProps> = (props, ctx) => {
   const { store } = app;
   const { history } = store;
   const { addUnsubscribe } = useUnmounted();
+  const i18n = useI18n(ctx);
   const provider = useProvider(ctx, appContext, app);
   // A replayed history is a document of its own, so it names the document
   // source rather than inheriting whatever scene it was opened over.
   const sceneSource = useProvider(ctx, sceneSourceContext, 'document');
+  // Its scene takes a press as an editor's does, whatever the ERD tab reads.
+  const sceneInteraction = useProvider(ctx, sceneInteractionContext, 'edit');
 
   addUnsubscribe(() => {
+    sceneInteraction.destroy();
     sceneSource.destroy();
     provider.destroy();
   });
@@ -70,7 +89,8 @@ const TimeTravel: FC<TimeTravelProps> = (props, ctx) => {
   // the screen it is shown on rather than against the store's default size.
   store.dispatchSync(
     changeViewportAction(getViewport()),
-    initialLoadJsonAction$(toJson(originApp.store.state))
+    initialLoadJsonAction$(toPreviewJson(originApp.store.state)),
+    readerNameViewAction(store.state, originApp.store.state)
   );
 
   const runTimeTravel = (cursor: number) => {
@@ -112,13 +132,13 @@ const TimeTravel: FC<TimeTravelProps> = (props, ctx) => {
 
   return () => (
     <>
-      <div class={styles.root}>
+      <div class={styles.root} prop:dir="ltr">
         <div class={styles.container} use:ref={ref(root)}>
           <Canvas root={root} canvas={canvas} grabMove={true} />
           <Minimap />
         </div>
       </div>
-      <div class={styles.slider}>
+      <div class={['time-travel-slider', styles.slider]} prop:dir="ltr">
         <Slider
           min={-1}
           max={history.size - 1}
@@ -126,8 +146,17 @@ const TimeTravel: FC<TimeTravelProps> = (props, ctx) => {
           onChange={handleChange}
         />
         <div class={styles.vertical}></div>
-        <Button size="1" text="Apply" onClick={handleApply} />
-        <Button variant="soft" size="1" text="Cancel" onClick={handleClose} />
+        <Button
+          size="1"
+          text={i18n.value.t('common.apply')}
+          onClick={handleApply}
+        />
+        <Button
+          variant="soft"
+          size="1"
+          text={i18n.value.t('common.cancel')}
+          onClick={handleClose}
+        />
       </div>
     </>
   );

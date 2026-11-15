@@ -1,117 +1,84 @@
-# intellij-plugin
+# ERD Editor
 
-The [ERD Editor](https://plugins.jetbrains.com/plugin/23594-erd-editor) plugin for IntelliJ-based
-IDEs. The Kotlin code here is the host layer — it registers the file editor, runs a JCEF webview
-and bridges it to the IDE — and the hub coding agents join through the ERD Editor MCP server. The
-diagram editor itself is `@dineug/erd-editor`, bundled for this panel by
-[`packages/intellij-webview`](../intellij-webview).
+> Entity-Relationship Diagram Editor for IntelliJ-based IDEs
 
 <!-- Plugin description -->
-Design a database schema visually, without leaving your IDE. Diagrams are plain JSON files in your
-project, so they diff and review like any other source file.
+Design a database schema visually, without leaving your IDE. Diagrams are plain `.erd.json` files in
+your project, and the editor never connects to a database.
 
 ![erd-editor](https://github.com/dineug/erd-editor/blob/main/img/erd-editor-intellij.png?raw=true)
 
-The editor never connects to a database — it reads and writes files only. You bring a schema in from
-a `.sql` dump or a GraphQL SDL file, and take one back out as DDL.
-
 ## Getting started
 
-Create an empty file with a `.erd.json` extension and open it. The diagram opens in the ERD Editor
-instead of the text editor.
-
-To start from a schema you already have, right-click the canvas and choose **Import → Schema SQL**
-for a `.sql` dump, or **Import → GraphQL** for a `.graphql`, `.gql` or `.graphqls` file. The editor
-opens its own file chooser for both; the file does not have to be inside the project.
+1. Create an empty file with a `.erd.json` extension and open it. It opens in ERD Editor.
+2. Right-click the canvas for every action: add a table, or choose **Import** to start from a
+   `.sql`, GraphQL, DBML or AML file.
+3. Edits are written to the file a fraction of a second after you stop. Undo and redo, on the
+   editor's toolbar, are its own history.
 
 ## Features
 
-- **Visual schema design** — tables, columns, memos, and four relationship cardinalities (zero-one,
-  zero-N, one-only, one-N)
-- **SQL DDL import** — bring in a `.sql` dump from any of the six vendors below. The parser reads
-  `CREATE TABLE`, `CREATE INDEX` and `ALTER TABLE` constraints and skips what it does not recognize,
-  so an awkward dump imports partially rather than failing outright
-- **GraphQL SDL import** — bring in a schema from any tool that emits SDL. Object types become
-  tables, scalars map to the diagram's own dialect, and the fields pointing at another type become
-  the relationships; the generated types an API layer wraps its rows in are left out rather than
-  drawn as tables
-- **DBML import** — bring in a `.dbml` file written for dbdiagram.io or dbdocs.io, or emitted by
-  `sql2dbml` or `prisma-dbml-generator`. Tables, columns, indexes, enums and every `Ref` spelling
-  arrive; a `Project`, `TableGroup` or sticky `Note` is skipped rather than refused
-- **AML import** — bring in an `.aml` file written for [Azimutt](https://azimutt.app), in either the
-  v2 or the legacy v1 spelling. Entities, attributes, indexes, enums and every relation arrow
-  arrive; a check, a struct type and a view are skipped rather than refused
-- **SQL DDL export** — MariaDB, MSSQL, MySQL, Oracle, PostgreSQL, SQLite
-- **Code generation** — TypeScript, GraphQL, C#, Java, JPA, Kotlin, Scala, Go, SQLAlchemy,
-  TypeORM, Sequelize, Drizzle, DBML, AML
-- **Visualization** — a force-directed view of how the tables actually relate
-- **Export** — `.erd.json`, `.sql`, `.png`
-- **Quick search** to jump to any table, **time travel** through this session's edit history, and
-  **undo / redo**
-- **Theming** — pick the appearance, gray color and accent color on the canvas or under
-  **Settings | Tools | ERD Editor**, remembered across restarts. Auto, the default appearance,
-  follows the IDE's light or dark theme and switches with it
+- **Design** — tables, columns, memos and table groups, four relationship cardinalities, ON DELETE
+  and ON UPDATE, alternate keys, Auto Layout
+- **Naming standards** — logical and physical names, physical names and data types derived from
+  word, term and domain dictionaries, which have their own tab with CSV import and export and checks
+- **Import** — SQL DDL, GraphQL SDL, DBML and AML, replacing the diagram or adding to it
+- **Export** — DDL for eight databases, code in 22 languages and ORMs, PNG and SVG
+- **Navigate** — a command palette, an Explorer tree with find and replace, Graph and Flow views
+- **History** — undo and redo, time travel through the session, a diff viewer against another file
+- **25 languages** and a System, Light or Dark theme, following the IDE by default
+- **Coding agents** — Claude Code or Codex edits the diagram live on the canvas (Coding agents,
+  below)
+- **Multiple editors** — the same diagram open in several editors, such as a split, stays in sync
 
-Edits are written to the file a fraction of a second after you stop changing it; the tab never shows as modified.
+**Databases:** Databricks, MariaDB, MSSQL, MySQL, Oracle, PostgreSQL, Snowflake, SQLite
+
+**Code:** TypeScript, GraphQL, C#, Java, JPA, Kotlin, Scala, Go, SQLAlchemy, TypeORM, Sequelize,
+Drizzle, DBML, AML, Mermaid, PHP, Doctrine, Rust, SeaORM, Swift, Zod, JSON Schema
+
+Every feature step by step: the [Editing Guide](https://docs.erd-editor.io/docs/category/guides).
 
 ## Coding agents
 
-A coding agent such as Claude Code or Codex can edit the diagrams open in this IDE through the
-[`@dineug/erd-editor-mcp`](https://github.com/dineug/erd-editor/tree/main/packages/mcp-server#readme)
-MCP server. The agent joins the editor like a collaborator: each change shows up on the canvas as
-it happens, and the agent's undo reverts only its own edits.
+A coding agent such as Claude Code or Codex edits the diagrams of the projects open in this IDE
+through the
+[ERD Editor MCP server](https://github.com/dineug/erd-editor/tree/main/packages/mcp-server#readme).
+Each change shows up on the canvas as it happens, and the agent's undo reverts only its own edits.
 
-### Install the MCP server
+Add it with one command, in your project folder (Node.js 22.12 or later):
 
-The server needs Node.js 22.12 or later. `npx` downloads it the first time the agent starts it, so
-there is nothing else to install.
+```sh
+# Claude Code
+claude mcp add --transport stdio erd-editor -- npx -y @dineug/erd-editor-mcp
+# Codex
+codex mcp add erd-editor -- npx -y @dineug/erd-editor-mcp
+```
 
-- **Claude Code** — run `claude mcp add --transport stdio erd-editor -- npx -y @dineug/erd-editor-mcp`
-  in your project folder
-- **Codex** — add a `[mcp_servers.erd-editor]` table with `command = "npx"` and
-  `args = ["-y", "@dineug/erd-editor-mcp"]` to `~/.codex/config.toml`, or to `.codex/config.toml`
-  in a trusted project
-- **Any other MCP client** — run `npx -y @dineug/erd-editor-mcp` as a stdio server. Start it in
-  your project folder: it resolves relative document paths against its working directory
+Then trust the project, start the agent in the same folder and ask, for example "Add a reviews
+table to schema.erd.json, related to users and products". Other clients and the tool list
+are in the
+[MCP server's README](https://github.com/dineug/erd-editor/tree/main/packages/mcp-server#readme).
 
-### Edit with an agent
+Unticking **Settings | Tools | ERD Editor → Coding agents** turns the connection off for the whole
+IDE, as an untrusted project does for itself: the agent can then read the diagrams but never writes
+them. In an IDE installed as a Flatpak, which the MCP server cannot reach, the agent edits the files
+on disk, so close the diagram first: ERD Editor does not reload a file changed on disk.
 
-1. Open the project in the IDE and trust it.
-2. Start the agent in the project folder and ask in plain words, for example "Add a reviews table
-   to schema.erd.json, related to users and products".
-3. Watch the change land on the canvas. The IDE writes it to the file a fraction of a second after
-   editing stops, as it writes your own edits; asking the agent to save writes it at once.
+## Settings
 
-A diagram that is not open yet opens in the ERD Editor on the agent's first edit, without taking
-the keyboard focus. One IDE serves the diagrams of every project open in it. With no IDE, VS Code
-window or Obsidian vault window with ERD Editor serving the document's folder, the agent edits the
-file on disk instead.
-
-Unticking **Settings | Tools | ERD Editor → Coding agents**, which is on by default, turns the
-connection off for the whole IDE. The agent can still read the diagrams of the open projects from
-disk, but it never writes one behind the editor, where the next save would overwrite the change. A
-project you have not trusted, opened in safe mode, is kept the same way: agents read its diagrams
-but never change them. The [MCP documentation](https://docs.erd-editor.io/docs/mcp/tools) lists
-every tool with its arguments.
-
-The settings page says when coding agents are unavailable: in an IDE without JCEF, where the
-editor cannot run either, and in an IDE installed as a Flatpak, whose sandbox the MCP server cannot
-reach. There the agent edits the files on disk. The ERD Editor does not reload a diagram changed on
-disk while it is open, and your next edit in it would overwrite the agent's, so close the diagram
-first.
+**Settings | Tools | ERD Editor** holds, for the whole IDE, the appearance, gray color and accent
+color, the display language and **Coding agents**. Auto, the default, follows the IDE's theme and
+language, and the editor's theme builder and language button change these same settings.
 
 ## Requirements
 
-- An IntelliJ-based IDE, 2025.2 or later.
-- The IDE must be running on the JetBrains Runtime. The editor is a JCEF webview, which is
-  unavailable when the IDE is started on an alternative OpenJDK build.
+- An IntelliJ-based IDE, 2025.2 or later, running on the JetBrains Runtime, since the editor is a
+  JCEF webview.
 
 ## Documentation
 
-- [Editing Guide](https://docs.erd-editor.io/docs/category/guides) — editing, import and export,
-  relationships, quick search, visualization, code generation, settings
-- [MCP](https://docs.erd-editor.io/docs/mcp/introduction) — installing the MCP server, live and
-  headless editing, every tool
+- [Editing Guide](https://docs.erd-editor.io/docs/category/guides) — every editor feature
+- [MCP](https://docs.erd-editor.io/docs/mcp/introduction) — the MCP server and its tools
 - [Documentation](https://docs.erd-editor.io)
 
 ## Also available
@@ -121,88 +88,67 @@ first.
   and save diagrams in Google Drive
 - [VS Code extension](https://marketplace.visualstudio.com/items?itemName=dineug.vuerd-vscode)
 - [Obsidian plugin](https://community.obsidian.md/plugins/erd-editor)
-- [`@dineug/erd-editor`](https://www.npmjs.com/package/@dineug/erd-editor) — the editor as a
-  custom element for your own app
+- [`@dineug/erd-editor`](https://www.npmjs.com/package/@dineug/erd-editor) — the editor as a custom
+  element for your own app
+- [`@dineug/erd-editor-mcp`](https://www.npmjs.com/package/@dineug/erd-editor-mcp) — the MCP server
+  coding agents edit diagrams through
 <!-- Plugin description end -->
 
 ## Development
 
-### Setup
+This folder is the Kotlin side of the plugin: the file editor, its JCEF webview, the bridge to the
+IDE and the hub coding agents join. The diagram editor is `@dineug/erd-editor`, bundled for this
+panel by
+[`packages/intellij-webview`](https://github.com/dineug/erd-editor/tree/main/packages/intellij-webview).
+[`AGENTS.md`](https://github.com/dineug/erd-editor/blob/main/packages/intellij-plugin/AGENTS.md)
+holds the rules for changing it and what each check covers.
 
-The webview bundle (`src/main/resources/assets`) is **not** committed. A fresh clone has none
-until you build it, and every Gradle task below is run from this directory.
-
-```sh
-pnpm install          # from the repository root
-./gradlew buildWebview
-```
-
-Run `buildWebview` again whenever the editor source changes. It is deliberately not part of
-`buildPlugin` — the bundle changes far less often than the Kotlin side, and pnpm has no business
-running on every Gradle build. `buildPlugin` and `runIde` do check that the bundle is there, and
-fail pointing back at this task rather than packaging an empty `assets/` that would ship as a
-blank editor.
-
-`buildWebview` is a convenience wrapper; the underlying command works from anywhere in the
-workspace:
+Run Gradle from this directory with a JDK 17 or later; the toolchain resolver downloads the JDK 21
+the plugin compiles against. The webview bundle is not committed, so build it first and again
+whenever the editor source changes:
 
 ```sh
-pnpm exec vp run --filter @dineug/erd-editor-intellij-webview --fail-if-no-match build
-```
-
-### Build and run
-
-```sh
+pnpm install             # at the repository root
 ./gradlew buildWebview   # webview bundle → src/main/resources/assets
-./gradlew buildPlugin    # distributable zip → build/distributions/
 ./gradlew runIde         # sandbox IDE with the plugin loaded
-./gradlew check          # unit tests, and the coding-agent hub's coverage gate
-./gradlew verifyPlugin   # Plugin Verifier compatibility check
+./gradlew check          # JUnit specs, the MCP conformance run and the hub's coverage gate
+./gradlew verifyPlugin   # Plugin Verifier on the 2025.2 floor and the latest release
+./gradlew buildPlugin    # distributable zip → build/distributions/
 ```
 
-The plugin compiles against JDK 21; Gradle's toolchain resolver fetches it if your machine has none.
+On Windows, where Gradle cannot start corepack's `pnpm.cmd`, build the webview at the repository
+root with `pnpm exec vp run --filter @dineug/erd-editor-intellij-webview --fail-if-no-match build`.
 
-The hub's tests read the conformance vectors of [`packages/agent-hub`](../agent-hub) and
-[`packages/agent-hub-host`](../agent-hub-host), and `check` also runs the MCP server against the
-hub when it is built (`ERD_MCP_CONFORMANCE=required` fails instead of skipping without the build):
-
-```sh
-pnpm exec vp run --filter @dineug/erd-editor-mcp --fail-if-no-match build   # from the repository root
-```
-
-`pnpm --filter @dineug/erd-editor-intellij-plugin smoke` runs the plugin in a sandbox IDE on macOS
-and drives its hub with that server. [`AGENTS.md`](./AGENTS.md) says what the smoke checks, and how
-to check the hub on Windows.
+The conformance run starts the built MCP server against the hub and skips without it, or fails
+under `ERD_MCP_CONFORMANCE=required`; build it at the repository root with
+`pnpm exec vp run --filter @dineug/erd-editor-mcp --fail-if-no-match build`.
+`pnpm --filter @dineug/erd-editor-intellij-plugin smoke` drives a sandbox IDE's hub on macOS.
 
 ### Layout
 
+`…` stands for `src/main/kotlin/com/github/dineug/erdeditorintellijplugin`.
+
 | Path | What it is |
 | --- | --- |
-| `src/main/kotlin/.../editor/` | The file editor, JCEF webview, scheme handler and the webview ↔ IDE bridge |
-| `src/main/kotlin/.../files/` | `.erd`, `.vuerd`, `.erd.json` and `.vuerd.json` recognition, in any letter case, and the file icon |
-| `src/main/kotlin/.../settings/` | The theme and Coding agents settings, and the settings page that edits them |
-| `src/main/kotlin/.../hub/` | The coding-agent hub, free of IntelliJ API: the wire format, the lock file, the socket and named pipe, the document registry and the request handlers |
-| `src/main/kotlin/.../agents/` | The hub's IDE side: its service, the folders and trust of the open projects, opening files, the platform events |
-| `e2e/` | The live smoke and `mcp-probe.mjs`, which checks a running IDE's hub with the MCP server |
-| `src/main/resources/META-INF/plugin.xml` | Plugin manifest |
-| `src/main/resources/assets/` | The webview bundle, written here by `packages/intellij-webview` |
-
-The bridge command names in `WebviewBridge.kt` must match the definitions in
-[`packages/webview-bridge`](../webview-bridge) exactly — change one side only and messages are
-silently dropped.
+| `…/editor/` | The file editor, its JCEF webview and scheme handler, and `WebviewBridge.kt`, mirroring `packages/webview-bridge`'s commands |
+| `…/files/` | Which files open in the editor, and their icon |
+| `…/settings/` | The theme, display language and Coding agents settings, and the settings page |
+| `…/hub/` | The coding-agent hub, free of IntelliJ API |
+| `…/agents/` | The hub's IDE side: its service, the projects' folders and trust, opening files |
+| `src/main/resources/META-INF/plugin.xml` | The plugin manifest |
+| `src/test/kotlin/` | The JUnit 4 specs |
+| `e2e/` | The macOS smoke, and `mcp-probe.mjs`, which checks a running IDE's hub through the built MCP server |
 
 ### Releasing
 
-Publishing to the JetBrains Marketplace is manual: no signing key or publish token lives in this
-repository. Bump `pluginVersion` in `gradle.properties`, fill in the matching section of
-`CHANGELOG.md`, run `./gradlew buildPlugin`, and upload the zip from `build/distributions/`.
-The build derives the plugin description from the marked section of this file and the release notes
-from the changelog, so neither belongs in `plugin.xml`.
-
-> The `<!-- Plugin description -->` markers above are load-bearing: `build.gradle.kts` extracts
-> everything between them into the Marketplace listing. It strips the screenshot by exact string
-> match, so keep that line as it is, and keep the section to headings, lists, links and inline code.
+The maintainer publishes to the JetBrains Marketplace by hand. A release bumps `pluginVersion` in
+`gradle.properties`, fills in its `CHANGELOG.md` section, runs `pnpm cache:clear` at the repository
+root, then `./gradlew buildWebview buildPlugin` here, and uploads the zip from
+`build/distributions/`. `buildPlugin` takes the plugin description from the part of this file
+between the `Plugin description` markers, without the screenshot line, and the change notes from
+`CHANGELOG.md`.
 
 ## License
 
-[MIT](./LICENSE) © SeungHwan-Lee
+[MIT](https://github.com/dineug/erd-editor/blob/main/packages/intellij-plugin/LICENSE)
+© SeungHwan-Lee

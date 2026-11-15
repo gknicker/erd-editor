@@ -1,6 +1,6 @@
 // P4-A: a scene node owns its own interaction. It calls its own hooks and
 // dispatches its own actions, so a callback prop is only justified where a
-// parent must coordinate siblings, which today is the column drag pair alone.
+// parent must coordinate siblings: the column drag pair and the connector hover.
 
 import { readdirSync, readFileSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
@@ -16,16 +16,23 @@ const CALLBACK_PROP_DECLARATION = /\bon[A-Z][A-Za-z0-9_]*\??\s*:/g;
 const CALLBACK_PROP_PASSED = /\bon[A-Z][A-Za-z0-9_]*\s*=\{/g;
 
 /**
- * Column hands the drag boundary up because Table decides the drop index, and
- * that decision reads the order of every sibling column. Nothing else in the
- * scene needs a parent to answer a question for it.
+ * Column hands its drag up as Table orders the sibling columns, a connector its
+ * hover as the group draws the label in a later pass, and a group sash its
+ * draft box as the title bar, body and lines beside it draw that box.
  */
 const DECLARED = [
+  'relationship-group/relationship/Relationship.tsx onHover',
+  'table-group/TableGroupSash.tsx onDraft',
   'table/column/Column.tsx onDragend',
   'table/column/Column.tsx onDragstart',
 ];
 
-const PASSED = ['table/Table.tsx onDragend', 'table/Table.tsx onDragstart'];
+const PASSED = [
+  'relationship-group/RelationshipGroup.tsx onHover',
+  'table-group/TableGroup.tsx onDraft',
+  'table/Table.tsx onDragend',
+  'table/Table.tsx onDragstart',
+];
 
 /**
  * The two dom files AC-S1 whitelists under this root. They mount dom shells and
@@ -76,7 +83,7 @@ describe('the canvas scene owns its interaction (P4-A)', () => {
     expect(hits(CALLBACK_PROP_DECLARATION)).toEqual([...DECLARED].sort());
   });
 
-  it('passes a callback prop only from the table that owns the drop order', () => {
+  it('passes a callback prop only from the parents that coordinate siblings', () => {
     expect(hits(CALLBACK_PROP_PASSED, DOM_SHELLS)).toEqual([...PASSED].sort());
   });
 
@@ -108,19 +115,55 @@ const DOM_TAG = /<(div|svg)\b/;
 const OUTSIDE_REFERENCES = [
   '__test-utils__/index.ts @/components/erd/canvas/highlightTransition',
   'components/erd/Erd.tsx @/components/erd/canvas/Canvas',
+  // The ERD tab hands its canvas the cell editor and the scene's editing and
+  // presence parts, which a canvas that edits nothing is never handed.
+  'components/erd/Erd.tsx @/components/erd/canvas/EditOverlay',
+  'components/erd/Erd.tsx @/components/erd/canvas/editingLayers',
+  // A readonly ERD tab takes a press by the read-only view's rule.
+  'components/erd/Erd.tsx @/components/erd/canvas/readPress',
   'components/erd/automatic-table-placement/AutomaticTablePlacement.tsx @/components/erd/canvas/Canvas',
-  'components/erd/diff-viewer/erd-viewer/ErdViewer.tsx @/components/erd/canvas/Canvas',
+  'components/erd/diff-viewer/diff-erd-viewer/DiffErdViewer.tsx @/components/erd/canvas/Canvas',
+  // Rename opens the name editor a title bar's double click opens, which sits
+  // beside the bar so the scene reaches no group command.
+  'components/erd/erd-context-menu/ErdContextMenu.tsx @/components/erd/canvas/table-group/tableGroupNameEditor',
+  'components/erd/goToErdTarget.test.ts @/components/erd/canvas/table/cellLayout',
+  'components/erd/goToErdTarget.ts @/components/erd/canvas/table/cellLayout',
   'components/erd/hitTest.browser.test.tsx @/components/erd/canvas/CanvasScene',
   'components/erd/minimap/Minimap.browser.test.tsx @/components/erd/canvas/Canvas.styles',
   'components/erd/minimap/Minimap.tsx @/components/erd/canvas/Canvas.styles',
+  // The minimap draws each group in the box the canvas draws it in, the one a
+  // drag holds included, off the member lists the canvas reads them by.
+  'components/erd/minimap/MinimapScene.tsx @/components/erd/canvas/table-group/tableGroupBox',
+  'components/erd/minimap/table-group/TableGroup.browser.test.tsx @/components/erd/canvas/entityDrag',
+  'components/erd/minimap/table-group/TableGroup.tsx @/components/erd/canvas/table-group/tableGroupBox',
+  // A group a draw or Group selected tables just added opens that editor too.
+  'components/erd/table-group/tableGroupName.ts @/components/erd/canvas/table-group/tableGroupNameEditor',
   'components/erd/time-travel/TimeTravel.tsx @/components/erd/canvas/Canvas',
+  // The read-only view mounts the canvas with no overlay and no layers, and
+  // drops its editor's highlight transitions as it goes, which CanvasScene
+  // never does for the document.
+  'components/erd-view/ErdView.browser.test.tsx @/components/erd/canvas/highlightTransition',
+  'components/erd-view/ErdView.tsx @/components/erd/canvas/Canvas',
+  'components/erd-view/ErdView.tsx @/components/erd/canvas/highlightTransition',
+  // The read-only view's press rule lives under this root, not beside the view,
+  // since Obsidian's loader, which bundles the editor, may not reach the view.
+  'components/erd-view/ErdView.tsx @/components/erd/canvas/readPress',
+  // The viewer element's destroy takes that view down at once, which its spec
+  // reads off the transitions the view's editor left.
+  'components/erd-viewer/ErdViewer.test.ts @/components/erd/canvas/highlightTransition',
+  'components/localeContext.browser.test.tsx @/components/erd/canvas/high-level-table/HighLevelTable',
+  'components/localeContext.browser.test.tsx @/components/erd/canvas/table/Table',
+  'components/localeContext.browser.test.tsx @/components/erd/canvas/table/column/Column',
+  'components/sceneInteractionContext.browser.test.tsx @/components/erd/canvas/CanvasScene',
   'components/sceneSourceContext.browser.test.tsx @/components/erd/canvas/CanvasScene',
   'components/themeContext.browser.test.tsx @/components/erd/canvas/memo/Memo',
   'components/visualization/VisualizationFlow.tsx @/components/erd/canvas/Canvas',
-  'services/export-png/ExportScene.tsx @/components/erd/canvas/high-level-table/HighLevelTable',
+  // The Flow hands its canvas the marquee a modifier press opens.
+  'components/visualization/VisualizationFlow.tsx @/components/erd/canvas/drag-select/DragSelect',
   'services/export-png/ExportScene.tsx @/components/erd/canvas/memo/Memo',
   'services/export-png/ExportScene.tsx @/components/erd/canvas/relationship-group/RelationshipGroup',
   'services/export-png/ExportScene.tsx @/components/erd/canvas/table/Table',
+  'services/export-png/ExportScene.tsx @/components/erd/canvas/table-group/TableGroups',
 ];
 
 const CANVAS_REFERENCE = /@\/components\/erd\/canvas\/[\w./-]+/g;
@@ -155,7 +198,7 @@ describe('the canvas root keeps its boundary (P6-51)', () => {
     expect(withDomTag).toEqual([...DOM_SHELLS].sort());
   });
 
-  it('is reached from outside by the fifteen references that own a reason to', () => {
+  it('is reached from outside by the thirty-five references that own a reason to', () => {
     const references = sourceFiles(SRC_ROOT)
       .filter(path => !path.startsWith(CANVAS_ROOT))
       .flatMap(path =>

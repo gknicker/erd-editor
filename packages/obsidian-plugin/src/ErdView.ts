@@ -21,7 +21,13 @@ import {
 import { type DocumentRegistry, type HubTab } from '@/hub';
 import { ERD_ICON } from '@/icon';
 import { type ScopeKey } from '@/keys';
-import { type ResolvedTheme, type ThemeHost } from '@/settings';
+import { isReadableDiagram } from '@/readableDiagram';
+import {
+  type EditorLocale,
+  type EditorTheme,
+  type LocaleHost,
+  type ThemeHost,
+} from '@/settings';
 import {
   currentValue,
   type ExitSave,
@@ -62,21 +68,6 @@ export function isDiagramJson(file: TFile): boolean {
   return file.extension === 'json' && DIAGRAM_JSON_SUFFIX.test(file.basename);
 }
 
-/** Empty starts a new diagram; otherwise a v3 document or the v2 one .vuerd files hold. */
-function isReadableDiagram(text: string): boolean {
-  if (text.trim() === '') return true;
-  try {
-    const json: unknown = JSON.parse(text);
-    return (
-      typeof json === 'object' &&
-      json !== null &&
-      ('doc' in json || 'canvas' in json)
-    );
-  } catch {
-    return false;
-  }
-}
-
 /**
  * One diagram file in a tab. A replica of the document in a worker serializes
  * it for every save, as in the IDE hosts, so the tab never stringifies a large
@@ -90,9 +81,9 @@ export class ErdView extends TextFileView implements HubTab {
   private session: TFile | null = null;
   private sharedStore: SharedStore | null = null;
   private disposeSharedStore: (() => void) | null = null;
-  /** The document as loaded, handed back while nothing has changed it. */
+  /** The document as loaded, handed back while nothing has changed it; never a runtime value. */
   private loadedData = '';
-  /** The document as the replica last serialized it, which a save writes. */
+  /** The document in the form a file holds as the replica last serialized it, which a save writes. */
   private replicaValue: string | null = null;
   private unreadable = false;
   /** Stops the load a tab opened beside others may still wait for. */
@@ -113,6 +104,7 @@ export class ErdView extends TextFileView implements HubTab {
     leaf: WorkspaceLeaf,
     private readonly registry: DocumentRegistry<ErdView>,
     private readonly theme: ThemeHost,
+    private readonly locale: LocaleHost,
     editorKeys: readonly ScopeKey[]
   ) {
     super(leaf);
@@ -150,6 +142,10 @@ export class ErdView extends TextFileView implements HubTab {
     editor.enableThemeBuilder = true;
     editor.addEventListener('changePresetTheme', this.handlePickedTheme);
     this.applyTheme(this.theme.current());
+    // In the task that created the editor, so its first paint is in this language.
+    editor.enableLocalePicker = true;
+    editor.addEventListener('changeLocale', this.handlePickedLocale);
+    this.applyLocale(this.locale.current());
 
     this.registerEvent(
       this.app.workspace.on('active-leaf-change', leaf => {
@@ -172,6 +168,7 @@ export class ErdView extends TextFileView implements HubTab {
       'changePresetTheme',
       this.handlePickedTheme
     );
+    this.editor?.removeEventListener('changeLocale', this.handlePickedLocale);
     this.editor?.destroy();
     this.editor?.remove();
     this.editor = null;
@@ -279,12 +276,23 @@ export class ErdView extends TextFileView implements HubTab {
   }
 
   /** The theme every open diagram shows; one the tab's own builder picked is on screen already. */
-  applyTheme(theme: ResolvedTheme): void {
+  applyTheme({ systemAppearance, ...theme }: EditorTheme): void {
+    this.editor?.setSystemAppearance(systemAppearance);
     this.editor?.setPresetTheme(theme);
+  }
+
+  /** The display language every open diagram shows; one the tab's own picker picked is on screen already. */
+  applyLocale({ locale, systemLocale }: EditorLocale): void {
+    this.editor?.setSystemLocale(systemLocale);
+    this.editor?.setLocale(locale);
   }
 
   private readonly handlePickedTheme = (event: Event): void => {
     this.theme.picked((event as CustomEvent<unknown>).detail);
+  };
+
+  private readonly handlePickedLocale = (event: Event): void => {
+    this.locale.picked((event as CustomEvent<unknown>).detail);
   };
 
   private saveState(): SaveState {
@@ -368,7 +376,7 @@ export class ErdView extends TextFileView implements HubTab {
 
   /**
    * Loads the tab once every edit its file's other tabs made is in their
-   * replica values. Until then it has no replica, is read-only, hands back
+   * replica saves. Until then it has no replica, is read-only, hands back
    * what the file holds and is not ready, so it neither writes nor takes an edit.
    */
   private seed(data: string): void {
@@ -380,19 +388,20 @@ export class ErdView extends TextFileView implements HubTab {
     this.syncHubState();
 
     let seeded = false;
-    const cancel = this.registry.seedWhenQuiet(this, () => {
+    const cancel = this.registry.seedWhenQuiet(this, runtimeValue => {
       seeded = true;
       this.pendingSeed = null;
       // A drag still held in the other tab reaches this one once it subscribes.
       const peer = this.tabs().find(tab => tab !== this && tab.hasDocument());
-      const value = seedValue({
+      const { loaded, initialValue } = seedValue({
+        runtimeValue,
         peer: peer && currentValue(peer.tabState()),
         handed: this.session ? handedByFile.get(this.session) : undefined,
         file: this.data,
         opened: data,
       });
-      this.loadDocument(value);
-      this.registry.loaded(this, value, false);
+      this.loadDocument(loaded, initialValue);
+      this.registry.loaded(this, loaded, false);
       this.syncSharedStore();
     });
     this.pendingSeed = seeded ? null : cancel;
@@ -467,12 +476,17 @@ export class ErdView extends TextFileView implements HubTab {
     );
   }
 
-  private loadDocument(data: string): void {
+  /**
+   * The editor and its replica load initialValue, which a tab opened beside
+   * others takes from the runtime value; the tab keeps data, the text a save
+   * hands back, so the runtime value never reaches the file.
+   */
+  private loadDocument(data: string, initialValue = data): void {
     const { editor } = this;
     if (!editor) return;
 
     this.unreadable = !isReadableDiagram(data);
-    const value = this.unreadable ? '' : data;
+    const value = this.unreadable ? '' : initialValue;
 
     editor.readonly = this.unreadable;
     if (this.unreadable) {
@@ -481,6 +495,8 @@ export class ErdView extends TextFileView implements HubTab {
       this.startReplica(value);
     }
     editor.setInitialValue(value);
+    // Only once a document is in, so the guide never shows over a file still loading.
+    editor.enableWelcomeScreen = true;
     this.loadedData = data;
     this.replicaValue = null;
 
@@ -517,10 +533,12 @@ export class ErdView extends TextFileView implements HubTab {
     replica.addEventListener('messageerror', handleError);
     const disposeCommand = bridge.registerCommand(
       hostSaveValueCommand,
-      ({ value }) => {
-        this.replicaValue = value;
-        this.registry.valueSaved(this, value);
-        if (this.isWriter()) this.requestSave();
+      saved => {
+        // A save that changed nothing, such as a scroll the file does not keep,
+        // leaves the tab's value as it was, so no save of Obsidian's writes it.
+        if (saved.changed) this.replicaValue = saved.value;
+        this.registry.valueSaved(this, saved);
+        if (saved.changed && this.isWriter()) this.requestSave();
       }
     );
     replica.postMessage(

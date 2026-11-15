@@ -206,8 +206,8 @@ export default defineConfig({
         ...builtinModules,
         ...builtinModules.map(name => `node:${name}`),
       ],
-      // The editor loads its color picker and code generators on demand, and
-      // main.js has to carry them: singleMainJs fails a build that splits.
+      // The editor loads its code generators on demand, and main.js has to
+      // carry them: singleMainJs fails a build that splits.
       output: { exports: 'default', codeSplitting: false },
     },
   },
@@ -223,19 +223,23 @@ export default defineConfig({
       build: {
         command: ['tsc --noEmit', 'vp build'],
         dependsOn,
-        input: [
-          ...typeInputs,
-          'manifest.json',
-          'styles.css',
-          { pattern: 'tools/vite/inline-worker.ts', base: 'workspace' },
-          '!dist/**',
-        ],
-        output: ['dist/**'],
+        cache: {
+          input: [
+            ...typeInputs,
+            'manifest.json',
+            'styles.css',
+            { pattern: 'tools/vite/inline-worker.ts', base: 'workspace' },
+            '!dist/**',
+          ],
+          output: ['dist/**'],
+        },
       },
       test: {
         command: ['tsc --noEmit', 'vp test run'],
         dependsOn,
-        input: [...typeInputs, 'vitest.config.ts'],
+        cache: {
+          input: [...typeInputs, 'vitest.config.ts'],
+        },
       },
     },
   },

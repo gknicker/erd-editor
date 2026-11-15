@@ -1,11 +1,12 @@
 import { query } from '@dineug/erd-editor-schema';
-import { nanoid } from 'nanoid';
+import { uuid25 } from '@dineug/uuid';
 
 import { GeneratorAction } from '@/engine/generator.actions';
 import { selectAction } from '@/engine/modules/editor/atom.actions';
 import { unselectAllAction$ } from '@/engine/modules/editor/generator.actions';
 import { SelectType } from '@/engine/modules/editor/state';
 import { nextPoint, nextZIndex } from '@/utils';
+import { arrayHas } from '@/utils/arrayHas';
 
 import {
   addMemoAction,
@@ -22,10 +23,9 @@ export const addMemoAction$ = (): GeneratorAction =>
       .collection('memoEntities')
       .selectByIds(memoIds);
     const point = nextPoint(settings, tables, memos);
-    const id = nanoid();
+    const id = uuid25();
 
     yield unselectAllAction$();
-    yield selectAction({ [id]: SelectType.memo });
     yield addMemoAction({
       id,
       ui: {
@@ -33,17 +33,21 @@ export const addMemoAction$ = (): GeneratorAction =>
         zIndex: nextZIndex(tables, memos),
       },
     });
+    yield selectAction({ [id]: SelectType.memo });
   };
 
 export const removeMemoAction$ = (id?: string): GeneratorAction =>
-  function* ({ editor: { selectedMap } }) {
+  function* ({ doc: { memoIds }, editor: { selectedMap } }) {
     if (id) {
       yield removeMemoAction({ id });
       return;
     }
 
+    // A memo a peer, an agent or an undo removes stays selected, and its
+    // removal recorded again would make an undo that brings it back.
+    const isInDoc = arrayHas(memoIds);
     const selectedMemos = Object.entries(selectedMap).filter(
-      ([, type]) => type === SelectType.memo
+      ([id, type]) => type === SelectType.memo && isInDoc(id)
     );
     for (const [id] of selectedMemos) {
       yield removeMemoAction({ id });

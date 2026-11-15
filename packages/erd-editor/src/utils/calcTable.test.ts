@@ -2,6 +2,7 @@ import { schemaV3Parser } from '@dineug/erd-editor-schema';
 import { describe, expect, it } from 'vite-plus/test';
 
 import {
+  COLUMN_ALTERNATE_KEY_CHAR_WIDTH,
   COLUMN_HEIGHT,
   COLUMN_KEY_WIDTH,
   INPUT_MARGIN_RIGHT,
@@ -17,10 +18,16 @@ import {
   VIEW_TABLE_HEADER_ICON_SIZE,
   VIEW_TABLE_MIN_WIDTH,
 } from '@/constants/layout';
-import { ColumnType, ColumnUIKey, Show } from '@/constants/schema';
+import {
+  ColumnType,
+  ColumnUIKey,
+  NameViewMode,
+  Show,
+} from '@/constants/schema';
 import { createEngineContext } from '@/engine/context';
 import {
   createEditor,
+  FocusType,
   ShowMode,
   ViewKind,
 } from '@/engine/modules/editor/state';
@@ -29,13 +36,18 @@ import { RootState } from '@/engine/state';
 import { Column, Table } from '@/internal-types';
 import { getVisibleColumnIds } from '@/konva/scene/viewLayout';
 import {
+  calcAlternateKeyWidth,
   calcTableHeight,
   calcTableWidths,
   calcViewTableWidths,
+  headerCellWidth,
   measureTableSize,
   recalculateTableWidth,
   viewHeaderNameWidth,
 } from '@/utils/calcTable';
+import { createDomain } from '@/utils/collection/domain.entity';
+import { createIndex } from '@/utils/collection/index.entity';
+import { createIndexColumn } from '@/utils/collection/indexColumn.entity';
 import { createTable } from '@/utils/collection/table.entity';
 import { createColumn } from '@/utils/collection/tableColumn.entity';
 
@@ -80,9 +92,12 @@ describe('calcTableWidths', () => {
     // 12 + 8 + 60 + 8 + 28 = 116 -> 1 + 8 + 116 + 8 + 1
     expect(calcTableWidths(table, state)).toEqual({
       width: 134,
+      alternateKey: 0,
       name: 0,
+      logicalName: 0,
       comment: 0,
       dataType: 0,
+      domain: 0,
       default: 0,
       notNull: 0,
       autoIncrement: 0,
@@ -175,9 +190,12 @@ describe('calcTableWidths', () => {
 
     expect(calcTableWidths(table, state)).toEqual({
       width: 568,
+      alternateKey: 0,
       name: 80,
+      logicalName: 0,
       comment: 120,
       dataType: 90,
+      domain: 0,
       default: 100,
       notNull: 35,
       autoIncrement: 15,
@@ -205,9 +223,12 @@ describe('calcTableWidths', () => {
 
     expect(calcTableWidths(table, state)).toEqual({
       width: 236,
+      alternateKey: 0,
       name: 80,
+      logicalName: 0,
       comment: 0,
       dataType: 90,
+      domain: 0,
       default: 0,
       notNull: 0,
       autoIncrement: 0,
@@ -250,9 +271,12 @@ describe('calcTableWidths', () => {
 
     expect(calcTableWidths(table, state)).toEqual({
       width: 214,
+      alternateKey: 0,
       name: 0,
+      logicalName: 0,
       comment: 0,
       dataType: 0,
+      domain: 0,
       default: 0,
       notNull: 35,
       autoIncrement: 15,
@@ -279,9 +303,12 @@ describe('calcTableWidths', () => {
     // 12 + 8 + 12 + (200 + 8) = 240 -> 1 + 8 + 240 + 8 + 1
     expect(calcTableWidths(table, state)).toEqual({
       width: 258,
+      alternateKey: 0,
       name: 200,
+      logicalName: 0,
       comment: 0,
       dataType: 0,
+      domain: 0,
       default: 0,
       notNull: 0,
       autoIncrement: 0,
@@ -304,6 +331,177 @@ describe('calcTableWidths', () => {
 
     // 12 + 8 + (500 + 8) + 28 = 556 -> 1 + 8 + 556 + 8 + 1
     expect(calcTableWidths(table, state).width).toBe(574);
+  });
+});
+
+/** The cells of the name views: the logical name in the name's place or beside it, and the domain in the type's. */
+describe('calcTableWidths in the name views', () => {
+  const ALL_SHOW = Object.values(Show).reduce((acc, bit) => acc | bit, 0);
+
+  /** A row with a logical name and a listed domain, and a row with neither. */
+  function named(
+    show: number,
+    nameViewMode: RootState['settings']['nameViewMode']
+  ) {
+    const columns = [
+      createColumn({
+        id: 'column-1',
+        tableId: 'table-1',
+        logicalName: 'Created at',
+        domainId: 'domain-1',
+        ui: {
+          widthName: 80,
+          widthLogicalName: 150,
+          widthDataType: 70,
+          widthDomain: 140,
+        },
+      }),
+      createColumn({
+        id: 'column-2',
+        tableId: 'table-1',
+        ui: {
+          widthName: 100,
+          widthLogicalName: 60,
+          widthDataType: 90,
+          widthDomain: 60,
+        },
+      }),
+    ];
+    const table = createTable({
+      id: 'table-1',
+      columnIds: ['column-1', 'column-2'],
+    });
+    const state = createState({ show, tables: [table], columns });
+    state.settings.nameViewMode = nameViewMode;
+    state.collections.domainEntities['domain-1'] = createDomain({
+      id: 'domain-1',
+      name: 'Timestamp',
+    });
+    state.doc.domainIds = ['domain-1'];
+
+    return { table, columns, state };
+  }
+
+  it('measures the name cell by the logical names in the logical view, a row with none by its name', () => {
+    const physical = named(0, NameViewMode.physical);
+    const logical = named(0, NameViewMode.logical);
+
+    expect(calcTableWidths(physical.table, physical.state)).toMatchObject({
+      name: 100,
+      logicalName: 0,
+    });
+    expect(calcTableWidths(logical.table, logical.state)).toMatchObject({
+      name: 150,
+      logicalName: 0,
+    });
+
+    // A logical name of blanks draws the name, as an empty one does.
+    logical.columns[0].logicalName = '  ';
+    expect(calcTableWidths(logical.table, logical.state).name).toBe(100);
+  });
+
+  it('adds the logical name cell beside the name in the view of both', () => {
+    const physical = named(0, NameViewMode.physical);
+    const both = named(0, NameViewMode.both);
+    const widths = calcTableWidths(both.table, both.state);
+
+    expect(widths).toMatchObject({ name: 100, logicalName: 150 });
+    expect(widths.width).toBe(
+      calcTableWidths(physical.table, physical.state).width +
+        150 +
+        INPUT_MARGIN_RIGHT
+    );
+  });
+
+  it('measures the type cell by the listed domain in the logical view, by the type elsewhere', () => {
+    const physical = named(Show.columnDataType, NameViewMode.physical);
+    const logical = named(Show.columnDataType, NameViewMode.logical);
+
+    expect(calcTableWidths(physical.table, physical.state).dataType).toBe(90);
+    expect(calcTableWidths(logical.table, logical.state).dataType).toBe(140);
+
+    // A domain the document no longer lists names no cell.
+    logical.state.doc.domainIds = [];
+    expect(calcTableWidths(logical.table, logical.state).dataType).toBe(90);
+  });
+
+  it('gives the domain a cell of its own under its show bit, the type cell keeping the type', () => {
+    for (const nameViewMode of Object.values(NameViewMode)) {
+      const { table, state } = named(
+        Show.columnDataType | Show.columnDomain,
+        nameViewMode
+      );
+
+      expect(calcTableWidths(table, state)).toMatchObject({
+        dataType: 90,
+        domain: 140,
+      });
+    }
+  });
+
+  it('adds the domain cell to a row of every shown cell', () => {
+    const shown = named(ALL_SHOW, NameViewMode.physical);
+    const hidden = named(ALL_SHOW & ~Show.columnDomain, NameViewMode.physical);
+    const widths = calcTableWidths(shown.table, shown.state);
+
+    expect(widths.domain).toBe(140);
+    expect(widths.width).toBe(
+      calcTableWidths(hidden.table, hidden.state).width +
+        140 +
+        INPUT_MARGIN_RIGHT
+    );
+  });
+
+  it('runs the header over the cells the view lays out', () => {
+    const table = createTable({
+      id: 'table-1',
+      logicalName: 'Member',
+      ui: { widthName: 100, widthLogicalName: 150 },
+    });
+    const state = createState({ tables: [table] });
+    const widthIn = (nameViewMode: typeof state.settings.nameViewMode) => {
+      state.settings.nameViewMode = nameViewMode;
+      return calcTableWidths(table, state).width;
+    };
+
+    // 20 + (100 + 8) + 28 = 156 -> 1 + 8 + 156 + 8 + 1
+    expect(widthIn(NameViewMode.physical)).toBe(174);
+    // 20 + (150 + 8) + 28 = 206 -> 224
+    expect(widthIn(NameViewMode.logical)).toBe(224);
+    // 20 + (150 + 8) + (100 + 8) + 28 = 314 -> 332
+    expect(widthIn(NameViewMode.both)).toBe(332);
+
+    // The logical view draws the name, dimmed, for a table with no logical name.
+    table.logicalName = '';
+    expect(widthIn(NameViewMode.logical)).toBe(174);
+    expect(widthIn(NameViewMode.both)).toBe(332);
+    table.logicalName = '  ';
+    expect(widthIn(NameViewMode.logical)).toBe(174);
+  });
+
+  it('gives each header cell the width the header lays it out at', () => {
+    const table = createTable({
+      id: 'table-1',
+      logicalName: 'Member',
+      ui: { widthName: 100, widthLogicalName: 150, widthComment: 120 },
+    });
+    const state = createState({ maxWidthComment: 90, tables: [table] });
+
+    expect(headerCellWidth(state, table, FocusType.tableName)).toBe(100);
+    expect(headerCellWidth(state, table, FocusType.tableLogicalName)).toBe(150);
+    expect(headerCellWidth(state, table, FocusType.tableComment)).toBe(90);
+  });
+
+  it('keeps the least room for the logical name and the domain cells', () => {
+    const table = createTable({ id: 'table-1' });
+    const state = createState({ show: Show.columnDomain, tables: [table] });
+
+    // 12 + 8 + 60 + 8 + 12 = 100, and the domain's 60 + 8 -> 168 -> 186
+    expect(calcTableWidths(table, state).width).toBe(186);
+
+    // And the logical name's 60 + 8 -> 236 -> 254, over the header's 184
+    state.settings.nameViewMode = NameViewMode.both;
+    expect(calcTableWidths(table, state).width).toBe(254);
   });
 });
 
@@ -446,9 +644,12 @@ describe('calcViewTableWidths', () => {
 
     expect(viewWidths(table, state)).toEqual({
       width: CHROME + rowWidth(80, 90),
+      alternateKey: 0,
       name: 80,
+      logicalName: 0,
       comment: 0,
       dataType: 90,
+      domain: 0,
       default: 0,
       notNull: 0,
       autoIncrement: 0,
@@ -530,9 +731,12 @@ describe('calcViewTableWidths', () => {
     expect(headerWidth(40)).toBe(105);
     expect(viewWidths(table, state)).toEqual({
       width: VIEW_TABLE_MIN_WIDTH,
+      alternateKey: 0,
       name: 0,
+      logicalName: 0,
       comment: 0,
       dataType: 0,
+      domain: 0,
       default: 0,
       notNull: 0,
       autoIncrement: 0,
@@ -587,6 +791,117 @@ describe('calcViewTableWidths', () => {
     expect(widths.dataType).toBe(90);
     expect(rowWidth(widths.name, widths.dataType)).toBe(headerWidth(1_000));
   });
+
+  /**
+   * Two key rows: one with a logical name linking a listed domain, the other
+   * with neither, under a table with a logical name of its own.
+   */
+  function namedState(nameViewMode: RootState['settings']['nameViewMode']) {
+    const columns = [
+      createColumn({
+        id: 'key',
+        tableId: 'table-1',
+        logicalName: 'Member ID',
+        domainId: 'domain-1',
+        ui: {
+          keys: ColumnUIKey.primaryKey,
+          widthName: 80,
+          widthLogicalName: 120,
+          widthDataType: 90,
+          widthDomain: 110,
+        },
+      }),
+      createColumn({
+        id: 'plain',
+        tableId: 'table-1',
+        ui: {
+          keys: ColumnUIKey.primaryKey,
+          widthName: 70,
+          widthDataType: 100,
+        },
+      }),
+    ];
+    const table = createTable({
+      id: 'table-1',
+      logicalName: 'Member',
+      columnIds: ['key', 'plain'],
+      ui: { widthName: 40, widthLogicalName: 50 },
+    });
+    const state = createState({ tables: [table], columns });
+    state.settings.nameViewMode = nameViewMode;
+    state.collections.domainEntities['domain-1'] = createDomain({
+      id: 'domain-1',
+      name: 'Identifier',
+    });
+    state.doc.domainIds = ['domain-1'];
+    openKeysOnly(state, table.id);
+
+    return { state, table, columns };
+  }
+
+  it('measures the logical names in the logical view, the name for a blank one, and the domain the type cell draws under any bit', () => {
+    for (const show of [0, Show.columnDomain]) {
+      const { state, table } = namedState(NameViewMode.logical);
+      state.settings.show = show;
+
+      expect(viewWidths(table, state)).toMatchObject({
+        width: CHROME + rowWidth(120, 110),
+        name: 120,
+        logicalName: 0,
+        dataType: 110,
+        domain: 0,
+      });
+    }
+
+    // A domain the sheet no longer lists leaves the type in the cell.
+    const { state, table } = namedState(NameViewMode.logical);
+    state.doc.domainIds = [];
+    expect(viewWidths(table, state).dataType).toBe(100);
+  });
+
+  it('measures the logical name, the name, the domain and the type of each row in the view of both', () => {
+    const { state, table } = namedState(NameViewMode.both);
+    const four =
+      VIEW_COLUMN_ICON_SIZE +
+      VIEW_COLUMN_ICON_GAP +
+      120 +
+      INPUT_MARGIN_RIGHT +
+      80 +
+      INPUT_MARGIN_RIGHT +
+      110 +
+      INPUT_MARGIN_RIGHT +
+      100;
+
+    expect(viewWidths(table, state)).toMatchObject({
+      width: CHROME + four,
+      logicalName: 120,
+      name: 80,
+      domain: 110,
+      dataType: 100,
+    });
+  });
+
+  it('sets the header names the name view names, each at the view header size', () => {
+    const logical = namedState(NameViewMode.logical);
+    logical.table.ui.widthLogicalName = 1_000;
+    expect(viewWidths(logical.table, logical.state).width).toBe(
+      CHROME + headerWidth(1_000)
+    );
+
+    const both = namedState(NameViewMode.both);
+    both.table.ui.widthLogicalName = 1_000;
+    expect(viewWidths(both.table, both.state).width).toBe(
+      CHROME + headerWidth(1_000) + viewHeaderNameWidth(40) + INPUT_MARGIN_RIGHT
+    );
+
+    // The logical view's header draws the name in a blank logical name's place.
+    logical.table.logicalName = '';
+    logical.table.ui.widthName = 1_000;
+    logical.table.ui.widthLogicalName = 0;
+    expect(viewWidths(logical.table, logical.state).width).toBe(
+      CHROME + headerWidth(1_000)
+    );
+  });
 });
 
 describe('recalculateTableWidth', () => {
@@ -619,6 +934,47 @@ describe('recalculateTableWidth', () => {
     expect(column.ui.widthComment).toBe(60);
   });
 
+  it('measures the logical names, and the domain cell by the name of the domain a column links while a row lists it', () => {
+    const linked = createColumn({
+      id: 'column-1',
+      tableId: 'table-1',
+      logicalName: 'Created at',
+      domainId: 'domain-1',
+    });
+    const removed = createColumn({
+      id: 'column-2',
+      tableId: 'table-1',
+      domainId: 'domain-2',
+      ui: { widthDomain: 900 },
+    });
+    const table = createTable({
+      id: 'table-1',
+      logicalName: 'Member list',
+      columnIds: ['column-1', 'column-2'],
+    });
+    const state = createState({ tables: [table], columns: [linked, removed] });
+    state.collections.domainEntities['domain-1'] = createDomain({
+      id: 'domain-1',
+      name: 'datetime_utc',
+    });
+    state.collections.domainEntities['domain-2'] = createDomain({
+      id: 'domain-2',
+      name: 'a removed domain',
+    });
+    state.doc.domainIds = ['domain-1'];
+
+    recalculateTableWidth(
+      state,
+      createEngineContext({ toWidth: text => text.length * 10 })
+    );
+
+    expect(table.ui.widthLogicalName).toBe(110);
+    expect(linked.ui.widthLogicalName).toBe(100);
+    expect(linked.ui.widthDomain).toBe(120);
+    expect(removed.ui.widthLogicalName).toBe(60);
+    expect(removed.ui.widthDomain).toBe(60);
+  });
+
   it('leaves tables that are not referenced by the doc untouched', () => {
     const listed = createTable({ id: 'table-1', name: 'a-very-long-name' });
     const unlisted = createTable({
@@ -647,6 +1003,109 @@ describe('recalculateTableWidth', () => {
 
     expect(() => recalculateTableWidth(state, context)).not.toThrow();
     expect(table.ui.widthName).toBe(150);
+  });
+});
+
+describe('calcAlternateKeyWidth', () => {
+  /** A table of three columns and a unique index over each list of columns named. */
+  function keyed(show: number, ...keyColumnIds: string[][]) {
+    const columns = ['a', 'b', 'c'].map(id =>
+      createColumn({
+        id,
+        tableId: 'table-1',
+        name: id,
+        ui: { widthName: 200 },
+      })
+    );
+    const table = createTable({
+      id: 'table-1',
+      columnIds: columns.map(column => column.id),
+    });
+    const state = createState({ show, tables: [table], columns });
+
+    keyColumnIds.forEach((columnIds, keyIndex) => {
+      const index = createIndex({
+        id: `index-${keyIndex}`,
+        tableId: table.id,
+        unique: true,
+      });
+
+      for (const columnId of columnIds) {
+        const indexColumn = createIndexColumn({
+          id: `${index.id}-${columnId}`,
+          indexId: index.id,
+          columnId,
+        });
+        index.indexColumnIds.push(indexColumn.id);
+        state.collections.indexColumnEntities[indexColumn.id] = indexColumn;
+      }
+
+      state.collections.indexEntities[index.id] = index;
+      state.doc.indexIds.push(index.id);
+    });
+
+    return { table, state };
+  }
+
+  const markWidth = (mark: string) =>
+    Math.ceil(mark.length * COLUMN_ALTERNATE_KEY_CHAR_WIDTH);
+
+  it('is the longest mark of the table while the marks are shown', () => {
+    const { table, state } = keyed(
+      Show.columnAlternateKey,
+      ['a', 'b'],
+      ['b', 'c']
+    );
+
+    expect(calcAlternateKeyWidth(table, state)).toBe(markWidth('AK1.2,AK2.1'));
+  });
+
+  it('is nothing while the marks are hidden or the table has none', () => {
+    expect(
+      calcAlternateKeyWidth(
+        ...(Object.values(keyed(0, ['a', 'b'])) as [Table, RootState])
+      )
+    ).toBe(0);
+
+    const { table, state } = keyed(Show.columnAlternateKey);
+    expect(calcAlternateKeyWidth(table, state)).toBe(0);
+  });
+
+  it('is nothing for a unique index over one column, which keys no alternate key', () => {
+    const { table, state } = keyed(Show.columnAlternateKey, ['a'], ['c']);
+
+    expect(calcAlternateKeyWidth(table, state)).toBe(0);
+  });
+
+  it('widens only a table that shows a mark, by the mark and its margin', () => {
+    const shown = keyed(Show.columnAlternateKey, ['a', 'b']);
+    const hidden = keyed(0, ['a', 'b']);
+    const widths = calcTableWidths(shown.table, shown.state);
+
+    expect(widths.alternateKey).toBe(markWidth('AK1.1'));
+    expect(widths.width).toBe(
+      calcTableWidths(hidden.table, hidden.state).width +
+        markWidth('AK1.1') +
+        INPUT_MARGIN_RIGHT
+    );
+  });
+
+  it('keeps the room when the default columns set the width', () => {
+    const { table, state } = keyed(Show.columnAlternateKey, ['a', 'b']);
+    for (const id of table.columnIds) {
+      state.collections.tableColumnEntities[id].ui.widthName = 0;
+    }
+    state.settings.show |= Show.columnNotNull | Show.columnUnique;
+    const hidden = keyed(Show.columnNotNull | Show.columnUnique, ['a', 'b']);
+    for (const id of hidden.table.columnIds) {
+      hidden.state.collections.tableColumnEntities[id].ui.widthName = 0;
+    }
+
+    expect(calcTableWidths(table, state).width).toBe(
+      calcTableWidths(hidden.table, hidden.state).width +
+        markWidth('AK1.1') +
+        INPUT_MARGIN_RIGHT
+    );
   });
 });
 
@@ -688,6 +1147,20 @@ describe('measureTableSize', () => {
       width: calcTableWidths(table, state).width,
       height: calcTableHeight(table),
     });
+  });
+
+  it('measures in the name view the store shows', () => {
+    const { table, column, state } = fixture();
+    table.logicalName = 'a member of the club';
+    column.logicalName = 'the moment it was created';
+    const physical = measureTableSize(table, state, toWidth);
+
+    state.settings.nameViewMode = NameViewMode.both;
+    const both = measureTableSize(table, state, toWidth);
+    recalculateTableWidth(state, createEngineContext({ toWidth }));
+
+    expect(both.width).toBe(calcTableWidths(table, state).width);
+    expect(both.width).toBeGreaterThan(physical.width);
   });
 
   it('writes nothing into the state and ignores the widths it holds', () => {

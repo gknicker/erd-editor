@@ -1,8 +1,9 @@
-import { schemaV3Parser } from '@dineug/erd-editor-schema';
+import { createSchema } from '@dineug/erd-editor-schema';
 import { createStore as runStore, Store as StoreType } from '@dineug/r-html';
 
 import { RootActionMap } from '@/engine/action-types';
 import { EngineContext } from '@/engine/context';
+import { dictionaryReducers } from '@/engine/modules/dictionary/atom.actions';
 import { editorReducers } from '@/engine/modules/editor/atom.actions';
 import { createEditor } from '@/engine/modules/editor/state';
 import { indexReducers } from '@/engine/modules/index/atom.actions';
@@ -12,6 +13,7 @@ import { relationshipReducers } from '@/engine/modules/relationship/atom.actions
 import { settingsReducers } from '@/engine/modules/settings/atom.actions';
 import { tableReducers } from '@/engine/modules/table/atom.actions';
 import { tableColumnReducers } from '@/engine/modules/table-column/atom.actions';
+import { tableGroupReducers } from '@/engine/modules/table-group/atom.actions';
 import { RootState } from '@/engine/state';
 
 export type Store = StoreType<RootState, EngineContext>;
@@ -23,7 +25,7 @@ export function createStore(
   return runStore<RootState, RootActionMap, EngineContext>({
     context,
     state: {
-      ...schemaV3Parser({}),
+      ...createSchema(),
       editor: createEditor(),
       lww: {},
     },
@@ -36,6 +38,8 @@ export function createStore(
       ...settingsReducers,
       ...indexReducers,
       ...indexColumnReducers,
+      ...tableGroupReducers,
+      ...dictionaryReducers,
     },
     enableObservable: enableObservable ?? true,
   });

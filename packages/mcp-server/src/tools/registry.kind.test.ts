@@ -2,10 +2,12 @@ import {
   ChangeActionTypes,
   createEngineContext,
   defaultToWidth,
+  dictionaryActions$,
   editorActions$,
   FocusType,
   indexActions$,
   indexColumnActions$,
+  LockSettingType,
   memoActions$,
   relationshipActions$,
   RelationshipType,
@@ -13,10 +15,12 @@ import {
   settingsActions$,
   tableActions$,
   tableColumnActions$,
+  tableGroupActions$,
 } from '@dineug/erd-editor/peer.js';
 import { type CompositionAction, compositionActionsFlat } from '@dineug/r-html';
 import { afterAll, describe, expect, it } from 'vite-plus/test';
 
+import { TOOL_SCENARIOS } from '@/__test-utils__/scenarios';
 import { createSeededPeer, SEED } from '@/__test-utils__/seed';
 import { actionTools, toolByName } from '@/tools/registry';
 
@@ -35,7 +39,9 @@ const MODULES = [
   indexActions$,
   indexColumnActions$,
   memoActions$,
+  tableGroupActions$,
   settingsActions$,
+  dictionaryActions$,
 ];
 
 /**
@@ -56,6 +62,9 @@ const CENSUS: Census = {
     ]),
   ],
   sortTablesToMoveAction$: () => [tableActions$.sortTablesToMoveAction$()],
+  changeTableNameAction$: () => [
+    tableActions$.changeTableNameAction$(SEED.users, 'members'),
+  ],
   addColumnAction$: () => [tableColumnActions$.addColumnAction$(SEED.empty)],
   removeColumnAction$: () => [
     tableColumnActions$.removeColumnAction$(SEED.orders, [
@@ -75,13 +84,14 @@ const CENSUS: Census = {
         SEED.userName
       )
     ),
-  changeColumnDataTypeAction$: () => [
-    tableColumnActions$.changeColumnDataTypeAction$({
-      tableId: SEED.users,
-      id: SEED.userName,
-      value: 'TEXT',
-    }),
-  ],
+  changeColumnDataTypeAction$: () =>
+    [SEED.userName, SEED.userId].map(id =>
+      tableColumnActions$.changeColumnDataTypeAction$({
+        tableId: SEED.users,
+        id,
+        value: 'TEXT',
+      })
+    ),
   changeColumnValueAction$: () =>
     [
       FocusType.columnName,
@@ -102,6 +112,10 @@ const CENSUS: Census = {
       SEED.userName
     ),
   ],
+  changeColumnsPrimaryKeyAction$: () =>
+    [[SEED.userId, SEED.userName], [SEED.userId], ['gone']].map(columnIds =>
+      tableColumnActions$.changeColumnsPrimaryKeyAction$(SEED.users, columnIds)
+    ),
   addRelationshipAction$: () =>
     [
       [SEED.users, SEED.orders],
@@ -139,8 +153,168 @@ const CENSUS: Census = {
     memoActions$.removeMemoAction$(),
   ],
   selectMemoAction$: () => [memoActions$.selectMemoAction$(SEED.memo, false)],
+  addTableGroupAction$: () => [
+    tableGroupActions$.addTableGroupAction$(
+      { x: 0, y: 600, width: 400, height: 300 },
+      { name: 'empty', color: '#22c55e' }
+    ),
+  ],
+  addTableGroupFromTablesAction$: () => [
+    tableGroupActions$.addTableGroupFromTablesAction$([SEED.orders], {
+      name: 'orders',
+    }),
+    tableGroupActions$.addTableGroupFromTablesAction$(),
+  ],
+  removeTableGroupAction$: () => [
+    tableGroupActions$.removeTableGroupAction$(SEED.group),
+    tableGroupActions$.removeTableGroupAction$(),
+  ],
+  moveTableGroupAction$: () => [
+    tableGroupActions$.moveTableGroupAction$([SEED.group], 40, 0),
+  ],
+  setTableGroupAction$: () => [
+    tableGroupActions$.setTableGroupAction$([SEED.orders], SEED.group),
+    tableGroupActions$.setTableGroupAction$([SEED.users], ''),
+  ],
+  dropTablesIntoGroupsAction$: () => [
+    tableGroupActions$.dropTablesIntoGroupsAction$(),
+  ],
+  selectTableGroupAction$: () => [
+    tableGroupActions$.selectTableGroupAction$(SEED.group, false),
+  ],
+  selectTableGroupTablesAction$: () => [
+    tableGroupActions$.selectTableGroupTablesAction$(SEED.group),
+  ],
   changeZoomLevelAction$: () => [settingsActions$.changeZoomLevelAction$(0.5)],
   streamZoomLevelAction$: () => [settingsActions$.streamZoomLevelAction$(0.1)],
+  changeLockSettingsAction$: () => [
+    settingsActions$.changeLockSettingsAction$(LockSettingType.language, false),
+  ],
+  addDictionaryEntryAction$: () => [
+    dictionaryActions$.addDictionaryEntryAction$('word', {
+      name: 'Order',
+      abbreviation: 'ORD',
+    }),
+    dictionaryActions$.addDictionaryEntryAction$('domain', {
+      name: 'Money',
+      dataType: 'NUMERIC(15,2)',
+    }),
+    // A physical name the seed's words compose, a live domain, a name the
+    // sheet holds and an unknown domain, both refused, and an empty row.
+    dictionaryActions$.addDictionaryEntryAction$('term', {
+      name: 'Number Member',
+    }),
+    dictionaryActions$.addDictionaryEntryAction$('term', {
+      name: 'Order Number',
+      domainId: SEED.domain,
+    }),
+    dictionaryActions$.addDictionaryEntryAction$('word', { name: 'Member' }),
+    dictionaryActions$.addDictionaryEntryAction$('term', {
+      name: 'Order Id',
+      domainId: 'gone',
+    }),
+    dictionaryActions$.addDictionaryEntryAction$('word'),
+  ],
+  updateDictionaryEntryAction$: () => [
+    // The domain's new type reaches the key of users and, by the sync, orders.
+    dictionaryActions$.updateDictionaryEntryAction$('domain', SEED.domain, {
+      dataType: 'BIGINT',
+    }),
+    dictionaryActions$.updateDictionaryEntryAction$('term', SEED.term, {
+      name: 'Number Member',
+      physicalName: '',
+    }),
+    dictionaryActions$.updateDictionaryEntryAction$('word', SEED.memberWord, {
+      name: 'Number',
+    }),
+    dictionaryActions$.updateDictionaryEntryAction$('domain', 'gone', {
+      dataType: 'TEXT',
+    }),
+  ],
+  removeDictionaryEntriesAction$: () => [
+    dictionaryActions$.removeDictionaryEntriesAction$('word', [
+      SEED.numberWord,
+      SEED.memberWord,
+      'gone',
+    ]),
+    dictionaryActions$.removeDictionaryEntriesAction$('domain', ['gone']),
+  ],
+  importDictionaryAction$: () => [
+    dictionaryActions$.importDictionaryAction$('domain', [
+      { name: 'Identifier', dataType: 'BIGINT' },
+      { name: 'Money', dataType: 'NUMERIC(15,2)' },
+      { name: 'Money', dataType: 'NUMERIC(18,2)' },
+    ]),
+    dictionaryActions$.importDictionaryAction$('term', [
+      { name: 'Member Number', domain: 'Identifier' },
+      { name: 'Number Member', domain: 'unknown' },
+    ]),
+  ],
+  commitDictionaryCellsAction$: () => [
+    dictionaryActions$.commitDictionaryCellsAction$('word', [
+      { values: { name: 'Order' } },
+      { id: SEED.memberWord, values: { abbreviation: 'MEM' } },
+      { id: 'gone', values: { name: 'Item' } },
+    ]),
+    dictionaryActions$.commitDictionaryCellsAction$('word', [
+      { values: { name: 'Order' } },
+      { values: { name: 'Order' } },
+    ]),
+    dictionaryActions$.commitDictionaryCellsAction$('word', [
+      { id: SEED.memberWord, values: { name: 'Number' } },
+      { id: SEED.numberWord, values: { name: 'Member' } },
+    ]),
+  ],
+  setColumnLogicalNameAction$: () => [
+    // The derived name column takes a term, then a composition; the note
+    // column, named by hand, keeps its name.
+    dictionaryActions$.setColumnLogicalNameAction$(
+      SEED.users,
+      SEED.userName,
+      'Member Number'
+    ),
+    dictionaryActions$.setColumnLogicalNameAction$(
+      SEED.users,
+      SEED.userName,
+      'Number Member'
+    ),
+    dictionaryActions$.setColumnLogicalNameAction$(
+      SEED.orders,
+      SEED.orderNote,
+      'Member Number'
+    ),
+    dictionaryActions$.setColumnLogicalNameAction$(SEED.users, 'gone', 'x'),
+  ],
+  setTableLogicalNameAction$: () => [
+    dictionaryActions$.setTableLogicalNameAction$(SEED.users, 'Member Number'),
+    dictionaryActions$.setTableLogicalNameAction$(SEED.orders, 'Member'),
+    dictionaryActions$.setTableLogicalNameAction$('gone', 'x'),
+  ],
+  deriveColumnNameAction$: () =>
+    [SEED.userName, SEED.userId, 'gone'].map(columnId =>
+      dictionaryActions$.deriveColumnNameAction$(SEED.users, columnId)
+    ),
+  deriveTableNameAction$: () =>
+    [SEED.users, SEED.orders].map(dictionaryActions$.deriveTableNameAction$),
+  rederiveNamesAction$: () =>
+    (
+      [
+        { scope: 'column', tableId: SEED.users, columnId: SEED.userName },
+        { scope: 'table', tableId: SEED.users },
+        { scope: 'selection' },
+        { scope: 'document' },
+      ] as const
+    ).map(dictionaryActions$.rederiveNamesAction$),
+  setColumnDomainAction$: () => [
+    ...[SEED.domain, '', 'gone'].map(domainId =>
+      dictionaryActions$.setColumnDomainAction$(
+        SEED.users,
+        SEED.userName,
+        domainId
+      )
+    ),
+    dictionaryActions$.setColumnDomainAction$(SEED.users, SEED.userId, ''),
+  ],
 };
 
 /**
@@ -153,9 +327,9 @@ const EDITOR_GENERATORS: Record<string, string> = {
   initialLoadJsonAction$:
     'the load a peer reseeds with, which makes no change to replicate',
   moveAllAction$:
-    'drags the selection by a pointer step; erd_move_table and erd_move_memo place one',
+    'drags the selection by a pointer step; erd_move_table and erd_move_memo place one, erd_move_table_group moves one group',
   removeSelectedAction$:
-    'removes the selection; erd_remove_table and erd_remove_memo name theirs',
+    'removes the selection; erd_remove_table, erd_remove_memo and erd_remove_table_group name theirs',
   pasteEntitiesAction$: 'pastes what the clipboard holds',
   duplicateAction$: 'duplicates the selection',
   dragSelectAction$: 'selects what a drag box covers',
@@ -166,11 +340,16 @@ const EDITOR_GENERATORS: Record<string, string> = {
   drawStartAddRelationshipAction$:
     'starts a pointer draw from a table; erd_add_relationship relates two named tables',
   changeColorAllAction$:
-    'colors the selection; erd_change_table_color and erd_change_memo_color color one',
+    'colors the selection; erd_change_table_color, erd_change_memo_color and erd_change_table_group_color color one',
+  removeColorAllAction$:
+    'clears the selection’s colors; erd_change_table_color, erd_change_memo_color and erd_change_table_group_color given an empty color clear one',
   loadSchemaSQLAction$: 'wrapped by erd_import_sql',
   loadSchemaGraphQLAction$: 'wrapped by erd_import_graphql',
   loadSchemaDBMLAction$: 'wrapped by erd_import_dbml',
   loadSchemaAMLAction$: 'wrapped by erd_import_aml',
+  appendSchemaAction$:
+    'adds for erd_import_sql, erd_import_graphql, erd_import_dbml and erd_import_aml with mode append',
+  appendSchemaJsonAction$: 'adds for erd_import_json with mode append',
   dragstartColumnAction$: 'starts a column drag',
   dragoverColumnAction$:
     'moves the dragged columns under a pointer; erd_move_column names the target',
@@ -271,6 +450,36 @@ describe('generator or atom (AC-E4)', () => {
     }
   });
 
+  it('keeps each import tool’s append on the editor generator it adds with', () => {
+    const emit = (actions: CompositionAction[]) =>
+      compositionActionsFlat(peer.state, context, actions).map(
+        ({ type }) => type
+      );
+    const value = (name: string) => TOOL_SCENARIOS[name].value as string;
+
+    for (const [name, type] of [
+      ['erd_import_sql', 'sql'],
+      ['erd_import_graphql', 'graphql'],
+      ['erd_import_dbml', 'dbml'],
+      ['erd_import_aml', 'aml'],
+    ] as const) {
+      const tool = toolByName.get(name)!;
+      expect(
+        emit([...tool.toActions({ value: value(name), mode: 'append' })]),
+        name
+      ).toEqual(emit([editorActions$.appendSchemaAction$(type, value(name))]));
+    }
+    expect(
+      emit([
+        ...toolByName
+          .get('erd_import_json')!
+          .toActions({ value: value('erd_import_json'), mode: 'append' }),
+      ])
+    ).toEqual(
+      emit([editorActions$.appendSchemaJsonAction$(value('erd_import_json'))])
+    );
+  });
+
   it('names, in the atom tool’s reason, every generator that emits its type', () => {
     const declined: string[] = [];
 
@@ -290,6 +499,9 @@ describe('generator or atom (AC-E4)', () => {
 
   it('finds the toggles the flag tools decline in the census', () => {
     expect([...emittedBy('changeColumnPrimaryKeyAction$')]).toEqual([
+      'column.changePrimaryKey',
+    ]);
+    expect([...emittedBy('changeColumnsPrimaryKeyAction$')]).toEqual([
       'column.changePrimaryKey',
     ]);
     expect(emittedBy('toggleColumnValueAction$')).toEqual(

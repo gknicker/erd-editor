@@ -6,6 +6,7 @@ import { OracleTypes } from '@/parser/dataType/Oracle';
 import { PostgreSQLTypes } from '@/parser/dataType/PostgreSQL';
 import { SnowflakeTypes } from '@/parser/dataType/Snowflake';
 import { SQLiteTypes } from '@/parser/dataType/SQLite';
+import { DatabaseVendor, ReferentialAction } from '@/parser/statement';
 import { Token, TokenType } from '@/parser/tokenizer';
 
 const createTypeEqual = (type: string) => (tokens: Token[]) => (pos: number) =>
@@ -38,6 +39,7 @@ export const isRenameValue = createValueEqual('RENAME');
 export const isDeleteValue = createValueEqual('DELETE');
 export const isSelectValue = createValueEqual('SELECT');
 export const isTableValue = createValueEqual('TABLE');
+export const isTablespaceValue = createValueEqual('TABLESPACE');
 export const isIndexValue = createValueEqual('INDEX');
 export const isUniqueValue = createValueEqual('UNIQUE');
 export const isAddValue = createValueEqual('ADD');
@@ -76,6 +78,55 @@ export const isClusterValue = createValueEqual('CLUSTER');
 export const isByValue = createValueEqual('BY');
 export const isFulltextValue = createValueEqual('FULLTEXT');
 export const isSpatialValue = createValueEqual('SPATIAL');
+export const isWithValue = createValueEqual('WITH');
+export const isCheckValue = createValueEqual('CHECK');
+export const isNocheckValue = createValueEqual('NOCHECK');
+export const isConcurrentlyValue = createValueEqual('CONCURRENTLY');
+export const isWhereValue = createValueEqual('WHERE');
+export const isUsingValue = createValueEqual('USING');
+export const isAndValue = createValueEqual('AND');
+export const isOrValue = createValueEqual('OR');
+export const isArrayValue = createValueEqual('ARRAY');
+export const isGeneratedValue = createValueEqual('GENERATED');
+export const isForValue = createValueEqual('FOR');
+export const isExecValue = createValueEqual('EXEC');
+export const isExecuteValue = createValueEqual('EXECUTE');
+export const isGoValue = createValueEqual('GO');
+export const isSignedValue = createValueEqual('SIGNED');
+
+const TypeModifiers: ReadonlyArray<string> = ['SIGNED', 'UNSIGNED', 'ZEROFILL'];
+
+// MySQL's SIGNED, UNSIGNED and ZEROFILL, in any order after a numeric type and
+// its arguments, are part of that type: INT(10) UNSIGNED ZEROFILL.
+export const isTypeModifier = (tokens: Token[]) => (pos: number) => {
+  const token = tokens[pos];
+  return (
+    !!token &&
+    !token.quoted &&
+    TypeModifiers.includes(token.value.toUpperCase())
+  );
+};
+
+// A string literal the vendor reads back as the value, its quotes doubled.
+// Spark escapes a quote and a backslash with a backslash instead: all but its
+// newest releases end the literal at a doubled quote.
+export const toStringLiteral = (value: string, database?: DatabaseVendor) =>
+  database === 'Databricks'
+    ? `'${value.replace(/[\\']/g, '\\$&')}'`
+    : `'${value.replaceAll("'", "''")}'`;
+
+// Writes a quoted token back inside the delimiters it came in, doubling the
+// quotes its value holds: ENUM('it''s') is valid DDL only with them.
+export const requote = (
+  { value, quoted, prefix = '' }: Token,
+  database?: DatabaseVendor
+) => {
+  if (!quoted) return value;
+  if (quoted === '[') return `[${value}]`;
+  if (quoted === "'") return prefix + toStringLiteral(value, database);
+
+  return `${quoted}${value.replaceAll(quoted, quoted + quoted)}${quoted}`;
+};
 
 // What a constraint may carry after its key list, from Databricks' NOT
 // ENFORCED RELY to ANSI's DEFERRABLE INITIALLY DEFERRED. The column branch runs
@@ -99,18 +150,25 @@ export const isConstraintState = (tokens: Token[]) => {
     isImmediate(pos);
 };
 
-const ReferentialActions: ReadonlyArray<ReadonlyArray<string>> = [
-  ['SET', 'NULL'],
-  ['SET', 'DEFAULT'],
-  ['NO', 'ACTION'],
-  ['CASCADE'],
-  ['RESTRICT'],
+const ReferentialActions: ReadonlyArray<ReferentialAction> = [
+  ReferentialAction.setNull,
+  ReferentialAction.setDefault,
+  ReferentialAction.noAction,
+  ReferentialAction.cascade,
+  ReferentialAction.restrict,
 ];
 const MatchKinds: ReadonlyArray<string> = ['FULL', 'PARTIAL', 'SIMPLE'];
 
-// How many tokens a reference's trailing clause spans: ON DELETE SET NULL,
-// MATCH FULL. The action is optional, so MySQL's ON UPDATE CURRENT_TIMESTAMP
-// spans two and leaves its value to be skipped.
+/** A clause a reference may trail; event is '' for MATCH, and span 0 for none. */
+export type ReferentialClause = {
+  span: number;
+  event: 'DELETE' | 'UPDATE' | '';
+  action: ReferentialAction | '';
+};
+
+// How many tokens a reference's trailing clause spans, and which action it
+// names: ON DELETE SET NULL, MATCH FULL. The action is optional, so MySQL's ON
+// UPDATE CURRENT_TIMESTAMP spans two and leaves its value to be skipped.
 export const matchReferentialClause = (tokens: Token[]) => {
   const word = (pos: number) => {
     const token = tokens[pos];
@@ -119,15 +177,41 @@ export const matchReferentialClause = (tokens: Token[]) => {
       : '';
   };
 
-  return (pos: number) => {
-    if (word(pos) === 'ON' && ['DELETE', 'UPDATE'].includes(word(pos + 1))) {
-      const action = ReferentialActions.find(words =>
-        words.every((value, index) => word(pos + 2 + index) === value)
-      );
-      return 2 + (action?.length ?? 0);
+  // PostgreSQL lets SET NULL and SET DEFAULT name the columns they set; left
+  // unread, the list would end the clauses and drop an ON UPDATE after it.
+  const columnList = (pos: number) => {
+    if (tokens[pos]?.type !== TokenType.leftParent) return 0;
+
+    for (let cursor = pos + 1; cursor < tokens.length; cursor++) {
+      const { type } = tokens[cursor];
+
+      if (type === TokenType.rightParent) return cursor - pos + 1;
+      if (type !== TokenType.string && type !== TokenType.comma) return 0;
     }
 
-    return word(pos) === 'MATCH' && MatchKinds.includes(word(pos + 1)) ? 2 : 0;
+    return 0;
+  };
+
+  return (pos: number): ReferentialClause => {
+    const event = word(pos + 1);
+
+    if (word(pos) === 'ON' && (event === 'DELETE' || event === 'UPDATE')) {
+      const action = ReferentialActions.find(value =>
+        value.split(' ').every((part, index) => word(pos + 2 + index) === part)
+      );
+
+      if (!action) return { span: 2, event, action: '' };
+
+      const span = 2 + action.split(' ').length;
+      const list = action.startsWith('SET ') ? columnList(pos + span) : 0;
+
+      return { span: span + list, event, action };
+    }
+
+    const span =
+      word(pos) === 'MATCH' && MatchKinds.includes(word(pos + 1)) ? 2 : 0;
+
+    return { span, event: '', action: '' };
   };
 };
 
@@ -140,6 +224,53 @@ export const isIndexKind = (tokens: Token[]) => {
   const isKey = isKeyValue(tokens);
   return (pos: number) =>
     (isFulltext(pos) || isSpatial(pos)) && (isIndex(pos + 1) || isKey(pos + 1));
+};
+
+// The unquoted word at pos in upper case, '' for anything else: a quoted
+// token names something, so it never spells a keyword.
+const matchKeyword = (tokens: Token[]) => (pos: number) => {
+  const token = tokens[pos];
+  return token && token.type === TokenType.string && !token.quoted
+    ? token.value.toUpperCase()
+    : '';
+};
+
+// SQL Server's clustering of a key or an index, as matchKeyword spells it.
+const isClustering = (word: string) =>
+  word === 'CLUSTERED' || word === 'NONCLUSTERED';
+
+// How many tokens a key modifier spans where a unique key's name may stand:
+// PostgreSQL's NULLS [NOT] DISTINCT, SQL Server's CLUSTERED and MySQL's USING
+// BTREE. Left unclaimed, its first word would be read as the key's name.
+export const matchKeyModifier = (tokens: Token[]) => {
+  const word = matchKeyword(tokens);
+
+  return (pos: number) => {
+    const first = word(pos);
+
+    if (isClustering(first)) return 1;
+    if (first === 'USING') return word(pos + 1) ? 2 : 1;
+    if (first !== 'NULLS') return 0;
+    if (word(pos + 1) === 'DISTINCT') return 2;
+    return word(pos + 1) === 'NOT' && word(pos + 2) === 'DISTINCT' ? 3 : 0;
+  };
+};
+
+// How many tokens the key modifiers in a row at pos span, 0 for none.
+export const matchKeyModifiers = (tokens: Token[]) => {
+  const keyModifier = matchKeyModifier(tokens);
+
+  return (pos: number) => {
+    let cursor = pos;
+    let span = keyModifier(cursor);
+
+    while (span) {
+      cursor += span;
+      span = keyModifier(cursor);
+    }
+
+    return cursor - pos;
+  };
 };
 
 // Angle brackets are not break characters, so a nested type arrives glued to
@@ -174,7 +305,8 @@ export const matchNestedDataType = (tokens: Token[]) => {
     let depth = 0;
 
     for (let cursor = pos; cursor < tokens.length; cursor++) {
-      depth += angleDepth(tokens[cursor].value);
+      // A field's COMMENT 'a > b' is text, not a bracket.
+      if (!tokens[cursor].quoted) depth += angleDepth(tokens[cursor].value);
       if (depth <= 0) return cursor - pos + 1;
     }
 
@@ -224,6 +356,7 @@ export const isNewStatement = (tokens: Token[]) => {
   const isDelete = isDeleteValue(tokens);
   const isSelect = isSelectValue(tokens);
   const commentOn = isCommentOn(tokens);
+  const addExtendedProperty = isAddExtendedProperty(tokens);
   return (pos: number) =>
     isCreate(pos) ||
     isAlter(pos) ||
@@ -232,7 +365,8 @@ export const isNewStatement = (tokens: Token[]) => {
     isRename(pos) ||
     isDelete(pos) ||
     isSelect(pos) ||
-    commentOn(pos);
+    commentOn(pos) ||
+    addExtendedProperty(pos);
 };
 
 // What may sit between CREATE and TABLE. A whitelist rather than a scan to the
@@ -312,20 +446,30 @@ export const isCreateTable = (tokens: Token[]) => {
   return (pos: number) => createTable(pos) > 0;
 };
 
-export const isCreateUniqueIndex = (tokens: Token[]) => {
+// How many tokens the header spans through INDEX, 0 when there is no CREATE
+// INDEX at pos. SQL Server writes its clustering in between, CREATE UNIQUE
+// NONCLUSTERED INDEX, and SSMS scripts every index that way.
+export const matchCreateIndex = (tokens: Token[]) => {
   const isCreate = isCreateValue(tokens);
-  const isIndex = isIndexValue(tokens);
   const isUnique = isUniqueValue(tokens);
-  return (pos: number) =>
-    isCreate(pos) && isUnique(pos + 1) && isIndex(pos + 2);
+  const isIndex = isIndexValue(tokens);
+  const word = matchKeyword(tokens);
+
+  return (pos: number) => {
+    if (!isCreate(pos)) return 0;
+
+    let cursor = pos + 1;
+
+    if (isUnique(cursor)) cursor++;
+    if (isClustering(word(cursor))) cursor++;
+
+    return isIndex(cursor) ? cursor + 1 - pos : 0;
+  };
 };
 
 export const isCreateIndex = (tokens: Token[]) => {
-  const isCreate = isCreateValue(tokens);
-  const isIndex = isIndexValue(tokens);
-  const createUniqueIndex = isCreateUniqueIndex(tokens);
-  return (pos: number) =>
-    (isCreate(pos) && isIndex(pos + 1)) || createUniqueIndex(pos);
+  const createIndex = matchCreateIndex(tokens);
+  return (pos: number) => createIndex(pos) > 0;
 };
 
 export const isAlterTable = (tokens: Token[]) => {
@@ -359,6 +503,143 @@ export const matchQualifiedName = (tokens: Token[]) => {
   };
 };
 
+// How many tokens SQL Server's EXEC [[db.]sys.]sp_addextendedproperty spans
+// before its arguments, 0 when there is none at pos. Only this call is read as
+// a statement: SSMS and the editor's own export write comments with it.
+export const matchAddExtendedProperty = (tokens: Token[]) => {
+  const isExec = isExecValue(tokens);
+  const isExecute = isExecuteValue(tokens);
+  const qualifiedName = matchQualifiedName(tokens);
+
+  return (pos: number) => {
+    if (!isExec(pos) && !isExecute(pos)) return 0;
+
+    const name = qualifiedName(pos + 1);
+    const isProcedure =
+      name > 0 &&
+      tokens[pos + name].value.toUpperCase() === 'SP_ADDEXTENDEDPROPERTY';
+
+    return isProcedure ? name + 1 : 0;
+  };
+};
+
+export const isAddExtendedProperty = (tokens: Token[]) => {
+  const addExtendedProperty = matchAddExtendedProperty(tokens);
+  return (pos: number) => addExtendedProperty(pos) > 0;
+};
+
+// The words Oracle's USING INDEX takes in place of an index name: the index
+// properties, and the constraint states that may follow it with none.
+const IndexProperties: ReadonlyArray<string> = [
+  'COMPRESS',
+  'COMPUTE',
+  'DEFERRABLE',
+  'DISABLE',
+  'ENABLE',
+  'EXCEPTIONS',
+  'FILESYSTEM_LIKE_LOGGING',
+  'GLOBAL',
+  'INDEXING',
+  'INDEXTYPE',
+  'INITIALLY',
+  'INITRANS',
+  'INVISIBLE',
+  'LOCAL',
+  'LOGGING',
+  'MAXTRANS',
+  'NOCOMPRESS',
+  'NOLOGGING',
+  'NOPARALLEL',
+  'NORELY',
+  'NOSORT',
+  'NOT',
+  'NOVALIDATE',
+  'ONLINE',
+  'PARALLEL',
+  'PCTFREE',
+  'PCTUSED',
+  'RELY',
+  'REVERSE',
+  'SORT',
+  'STORAGE',
+  'TABLESPACE',
+  'USING',
+  'VALIDATE',
+  'VISIBLE',
+];
+
+// How many tokens Oracle's USING INDEX [schema.]index spans, 0 where USING
+// INDEX is followed by index properties, a (CREATE INDEX ...) group or nothing.
+export const matchUsingIndexName = (tokens: Token[]) => {
+  const word = matchKeyword(tokens);
+  const qualifiedName = matchQualifiedName(tokens);
+
+  return (pos: number) => {
+    if (word(pos) !== 'USING' || word(pos + 1) !== 'INDEX') return 0;
+
+    const name = qualifiedName(pos + 2);
+    return name && !IndexProperties.includes(word(pos + 2)) ? 2 + name : 0;
+  };
+};
+
+// Whether the WHERE at pos keeps out only rows with a NULL in the key: key IS
+// NOT NULL over the given key columns, AND-joined, in parentheses that pair up,
+// since a close no open pairs may end the CREATE TABLE around the key.
+export const isNullFilter = (tokens: Token[]) => {
+  const isWhere = isWhereValue(tokens);
+  const isString = isStringToken(tokens);
+  const isLeftParent = isLeftParentToken(tokens);
+  const isRightParent = isRightParentToken(tokens);
+  const isIs = isIsValue(tokens);
+  const isNot = isNotValue(tokens);
+  const isNull = isNullValue(tokens);
+  const isAnd = isAndValue(tokens);
+  const isOr = isOrValue(tokens);
+
+  return (pos: number, columnNames: string[]) => {
+    if (!isWhere(pos)) return false;
+
+    const names = new Set(columnNames.map(name => name.toUpperCase()));
+    let depth = 0;
+
+    do {
+      pos++;
+
+      for (; isLeftParent(pos); pos++) {
+        depth++;
+      }
+
+      if (
+        !isString(pos) ||
+        !names.has(tokens[pos].value.toUpperCase()) ||
+        !isIs(pos + 1) ||
+        !isNot(pos + 2) ||
+        !isNull(pos + 3)
+      ) {
+        return false;
+      }
+
+      pos += 4;
+
+      for (; depth > 0 && isRightParent(pos); pos++) {
+        depth--;
+      }
+    } while (isAnd(pos));
+
+    return !isOr(pos);
+  };
+};
+
+// What the optional symbol after CONSTRAINT can never be: the words that open
+// the constraint itself.
+const ConstraintBodies: ReadonlyArray<string> = [
+  'UNIQUE',
+  'PRIMARY',
+  'FOREIGN',
+  'CHECK',
+  'DEFAULT',
+];
+
 // How many tokens the ALTER TABLE ADD head spans, 0 when there is none at pos,
 // and whether ONLY was read as the keyword rather than the table name. The name
 // is measured rather than counted, which lets a three-part name through.
@@ -368,7 +649,11 @@ const matchAlterTableAddHead = (tokens: Token[]) => {
   const isAdd = isAddValue(tokens);
   const isConstraint = isConstraintValue(tokens);
   const isString = isStringToken(tokens);
+  const isWith = isWithValue(tokens);
+  const isCheck = isCheckValue(tokens);
+  const isNocheck = isNocheckValue(tokens);
   const qualifiedName = matchQualifiedName(tokens);
+  const word = matchKeyword(tokens);
 
   // ONLY is optional, and it is also a legal table name: both readings are
   // tried, the one that reaches ADD wins.
@@ -379,11 +664,23 @@ const matchAlterTableAddHead = (tokens: Token[]) => {
     if (!name) return 0;
     cursor += name;
 
+    // SQL Server says whether the rows already there are checked, and the
+    // scripts SSMS writes always do: ALTER TABLE t WITH CHECK ADD CONSTRAINT.
+    if (isWith(cursor) && (isCheck(cursor + 1) || isNocheck(cursor + 1))) {
+      cursor += 2;
+    }
+
     if (!isAdd(cursor)) return 0;
     cursor++;
 
-    if (isConstraint(cursor) && isString(cursor + 1)) {
-      cursor += 2;
+    // The symbol is optional, and MySQL's CONSTRAINT UNIQUE (a) names nothing:
+    // read as the symbol, UNIQUE would leave the key nothing to open it.
+    if (isConstraint(cursor)) {
+      cursor++;
+
+      if (isString(cursor) && !ConstraintBodies.includes(word(cursor))) {
+        cursor++;
+      }
     }
 
     return cursor - pos;
@@ -438,14 +735,52 @@ export const isAlterTableAddForeignKey = (tokens: Token[]) => {
   };
 };
 
-export const isAlterTableAddUnique = (tokens: Token[]) => {
+// SQL Server's ADD [CONSTRAINT name] DEFAULT expression FOR column, the form
+// SSMS scripts every default of a table in, apart from the table.
+export const isAlterTableAddDefault = (tokens: Token[]) => {
   const alterTableAdd = matchAlterTableAdd(tokens);
-  const isUnique = isUniqueValue(tokens);
+  const isDefault = isDefaultValue(tokens);
 
   return (pos: number) => {
     const length = alterTableAdd(pos);
-    return length > 0 && isUnique(pos + length);
+    return length > 0 && isDefault(pos + length);
   };
+};
+
+// Any ALTER TABLE name ADD, whatever it adds: one statement may add several
+// keys, and a unique key can follow a clause of another kind.
+export const isAlterTableAdd = (tokens: Token[]) => {
+  const alterTableAdd = matchAlterTableAdd(tokens);
+  return (pos: number) => alterTableAdd(pos) > 0;
+};
+
+// How many tokens ALTER TABLE [ONLY] name spans before the ALTER of a column
+// action, 0 when none follows at pos (an ALTER TABLE is the next statement).
+// ONLY is also a legal table name, so both readings are tried, as for ADD.
+export const matchAlterTableAlter = (tokens: Token[]) => {
+  const alterTable = isAlterTable(tokens);
+  const isOnly = isOnlyValue(tokens);
+  const isAlter = isAlterValue(tokens);
+  const isTable = isTableValue(tokens);
+  const qualifiedName = matchQualifiedName(tokens);
+
+  const fromName = (pos: number, start: number) => {
+    const name = qualifiedName(start);
+    const end = start + name;
+    return name && isAlter(end) && !isTable(end + 1) ? end - pos : 0;
+  };
+
+  return (pos: number) => {
+    if (!alterTable(pos)) return 0;
+
+    const start = pos + 2;
+    return (isOnly(start) && fromName(pos, start + 1)) || fromName(pos, start);
+  };
+};
+
+export const isAlterTableAlter = (tokens: Token[]) => {
+  const alterTableAlter = matchAlterTableAlter(tokens);
+  return (pos: number) => alterTableAlter(pos) > 0;
 };
 
 const DataTypes: ReadonlyArray<string> = Array.from(
@@ -485,15 +820,12 @@ const groupByFirstWord = (types: ReadonlyArray<string>) => {
 
 const DataTypeWords = groupByFirstWord(DataTypes);
 
-// How many tokens the data type at pos spans, 0 when there is none. The
-// argument list is part of the span, and it can sit on any word of a
-// multi-word name -- TIMESTAMP(3) WITH TIME ZONE.
-export const matchDataType = (tokens: Token[]) => {
-  const isString = isStringToken(tokens);
+// The end of the argument list opening at pos, past its closing paren.
+const createSkipArguments = (tokens: Token[]) => {
   const isLeftParent = isLeftParentToken(tokens);
   const isRightParent = isRightParentToken(tokens);
 
-  const skipArguments = (pos: number) => {
+  return (pos: number) => {
     let depth = 0;
 
     for (let cursor = pos; cursor < tokens.length; cursor++) {
@@ -508,6 +840,42 @@ export const matchDataType = (tokens: Token[]) => {
     // Unterminated: the permissive parser takes the rest as the argument list.
     return tokens.length;
   };
+};
+
+// PostgreSQL's array brackets, integer[] or text[3][3], reach the parser as
+// bracket-quoted tokens that hold nothing or a length.
+export const isArrayDimensionToken = (tokens: Token[]) => (pos: number) => {
+  const token = tokens[pos];
+  return !!token && token.quoted === '[' && /^\d*$/.test(token.value);
+};
+
+// How many tokens the array suffix at pos spans: [] [3] or the standard's
+// ARRAY with an optional length. Left out, integer[] came in as integer.
+const matchArraySuffix = (tokens: Token[]) => {
+  const isDimension = isArrayDimensionToken(tokens);
+  const isArray = isArrayValue(tokens);
+
+  return (pos: number) => {
+    if (isArray(pos)) return isDimension(pos + 1) ? 2 : 1;
+
+    let cursor = pos;
+
+    while (isDimension(cursor)) {
+      cursor++;
+    }
+
+    return cursor - pos;
+  };
+};
+
+// How many tokens the data type at pos spans, 0 when there is none. The
+// argument list is part of the span, and it can sit on any word of a
+// multi-word name -- TIMESTAMP(3) WITH TIME ZONE.
+export const matchDataType = (tokens: Token[]) => {
+  const isString = isStringToken(tokens);
+  const isLeftParent = isLeftParentToken(tokens);
+  const skipArguments = createSkipArguments(tokens);
+  const arraySuffix = matchArraySuffix(tokens);
 
   const matchWords = (pos: number, words: string[]) => {
     let cursor = pos;
@@ -537,11 +905,169 @@ export const matchDataType = (tokens: Token[]) => {
 
     for (const words of DataTypeWords.get(value) ?? []) {
       const length = matchWords(pos, words);
-      if (length) return length;
+      if (length) return length + arraySuffix(pos + length);
     }
 
     // A whole multi-word name also arrives as one token when it is quoted.
-    return DataTypes.includes(value) ? 1 : 0;
+    return DataTypes.includes(value) ? 1 + arraySuffix(pos + 1) : 0;
+  };
+};
+
+// Words that may follow a column name without being its type: the column
+// constraints, all a typeless SQLite column has, a computed column's AS, the
+// options of a CREATE TABLE AS column, and the reserved FOR and USING.
+const ColumnKeywords: ReadonlyArray<string> = [
+  'AS',
+  'AUTO_INCREMENT',
+  'AUTOINCREMENT',
+  'CHECK',
+  'COLLATE',
+  'COMMENT',
+  'CONSTRAINT',
+  'DEFAULT',
+  'ENCRYPT',
+  'FOR',
+  'FOREIGN',
+  'GENERATED',
+  'IDENTITY',
+  'INVISIBLE',
+  'KEY',
+  'MASKING',
+  'NOT',
+  'NULL',
+  'ON',
+  'PRIMARY',
+  'PROJECTION',
+  'REFERENCES',
+  'UNIQUE',
+  'USING',
+  'VISIBLE',
+  'WITH',
+];
+
+const isKeyword = (value: string) =>
+  ColumnKeywords.includes(value.toUpperCase());
+
+const isColumnKeyword = (token: Token | undefined) =>
+  !!token && !token.quoted && isKeyword(token.value);
+
+// Whether the token at pos is a word that opens a column constraint or option.
+export const isColumnKeywordValue = (tokens: Token[]) => (pos: number) =>
+  isColumnKeyword(tokens[pos]);
+
+// A listed type sheds its quotes, [int] being how T-SQL writes INT, but not
+// PostgreSQL's "char" and "bit": its grammar reads char as character(1) and
+// bit as bit(1), while the quoted names are other types, as pg_dump writes.
+export const unquoteTypeName = (token: Token) =>
+  token.quoted === '"' && (token.value === 'char' || token.value === 'bit')
+    ? requote(token)
+    : token.value;
+
+// How many tokens a type no vendor list carries spans at pos, 0 for a keyword
+// or a string literal: mood, "MyType", public.mood[], hstore. Any identifier
+// matches, so the caller decides where a type may stand.
+export const matchUserDataType = (tokens: Token[]) => {
+  const isString = isStringToken(tokens);
+  const isPeriod = isPeriodToken(tokens);
+  const isComma = isCommaToken(tokens);
+  const isLeftParent = isLeftParentToken(tokens);
+  const isRightParent = isRightParentToken(tokens);
+  const skipArguments = createSkipArguments(tokens);
+  const arraySuffix = matchArraySuffix(tokens);
+  const dataType = matchDataType(tokens);
+
+  const isName = (pos: number) => isString(pos) && tokens[pos].quoted !== "'";
+  const isBareWord = (pos: number) =>
+    isString(pos) && !tokens[pos].quoted && !isKeyword(tokens[pos].value);
+  const endsColumn = (pos: number) =>
+    pos >= tokens.length ||
+    isComma(pos) ||
+    isRightParent(pos) ||
+    isColumnKeyword(tokens[pos]);
+
+  // A CREATE TABLE AS column puts these options where the type would stand,
+  // Snowflake's TAG (k = 'v') and Oracle's SORT, while a PostgreSQL type may
+  // carry either name: the word after it tells which.
+  const isColumnOption = (pos: number) => {
+    const token = tokens[pos];
+    if (token.quoted) return false;
+
+    const word = token.value.toUpperCase();
+    return (
+      (word === 'TAG' && isLeftParent(pos + 1)) ||
+      (word === 'SORT' && endsColumn(pos + 1))
+    );
+  };
+
+  return (pos: number) => {
+    if (!isName(pos)) return 0;
+    if (isColumnKeyword(tokens[pos]) || isColumnOption(pos)) return 0;
+
+    // Words the lists lack in front of one they carry are part of its name:
+    // SQLite takes any words as a type, UNSIGNED BIG INTEGER among them.
+    for (let cursor = pos; isBareWord(cursor); cursor++) {
+      const known = dataType(cursor + 1);
+      if (known) return cursor + 1 + known - pos;
+    }
+
+    let cursor = pos + 1;
+
+    while (isPeriod(cursor) && isName(cursor + 1)) {
+      cursor += 2;
+    }
+
+    if (isLeftParent(cursor)) {
+      cursor = skipArguments(cursor);
+    }
+
+    return cursor + arraySuffix(cursor) - pos;
+  };
+};
+
+// Table items that open with a word a column may be named too: an unnamed
+// CHECK (...) or CHECK NOT FOR REPLICATION, PostgreSQL's LIKE s and EXCLUDE,
+// MySQL's FULLTEXT ft (c), T-SQL's PERIOD FOR, Oracle's SUPPLEMENTAL LOG.
+export const isTableItemWord = (tokens: Token[]) => {
+  const isString = isStringToken(tokens);
+  const isLeftParent = isLeftParentToken(tokens);
+  const dataType = matchDataType(tokens);
+
+  const word = (pos: number) => {
+    const token = tokens[pos];
+    return token && isString(pos) && !token.quoted
+      ? token.value.toUpperCase()
+      : '';
+  };
+  // A name that is no listed type: spatial GEOMETRY(Point, 4326) is a column.
+  const isItemName = (pos: number) =>
+    isString(pos) && tokens[pos].quoted !== "'" && !dataType(pos);
+
+  return (pos: number) => {
+    switch (word(pos)) {
+      case 'CHECK':
+        return (
+          isLeftParent(pos + 1) ||
+          (word(pos + 1) === 'NOT' &&
+            word(pos + 2) === 'FOR' &&
+            word(pos + 3) === 'REPLICATION')
+        );
+      case 'LIKE':
+        return isItemName(pos + 1);
+      case 'EXCLUDE':
+        return word(pos + 1) === 'USING' || isLeftParent(pos + 1);
+      case 'FULLTEXT':
+      case 'SPATIAL':
+        return (
+          isLeftParent(pos + 1) ||
+          (isItemName(pos + 1) && isLeftParent(pos + 2))
+        );
+      case 'PERIOD':
+        return word(pos + 1) === 'FOR';
+      case 'SUPPLEMENTAL':
+        return word(pos + 1) === 'LOG';
+      default:
+        return false;
+    }
   };
 };
 

@@ -1,13 +1,13 @@
-import { EntityType } from '@/internal-types';
-
-export type Relationship = EntityType<{
+export type Relationship = {
   id: string;
   identification: boolean;
   relationshipType: number;
   startRelationshipType: number;
+  onDelete: number;
+  onUpdate: number;
   start: RelationshipPoint;
   end: RelationshipPoint;
-}>;
+};
 
 export type RelationshipPoint = {
   tableId: string;
@@ -36,6 +36,19 @@ export const StartRelationshipType = {
 export const StartRelationshipTypeList: ReadonlyArray<number> = Object.values(
   StartRelationshipType
 );
+
+// Append only. A stored document holds the number, so reordering these
+// remaps every diagram already saved. none writes no clause at all.
+export const ReferentialAction = {
+  none: 1,
+  noAction: 2,
+  cascade: 4,
+  setNull: 8,
+  setDefault: 16,
+  restrict: 32,
+} as const;
+export const ReferentialActionList: ReadonlyArray<number> =
+  Object.values(ReferentialAction);
 
 export const Direction = {
   left: 1,

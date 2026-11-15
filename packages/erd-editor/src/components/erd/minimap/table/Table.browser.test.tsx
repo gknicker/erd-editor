@@ -4,6 +4,7 @@
 // the numbers below are the ones the dom minimap laid out with, restated
 // against a rect whose stroke centres on its edge instead of sitting outside.
 
+import { whenDrawn } from '@dineug/r-html-konva';
 import type { Node as KonvaNode } from 'konva/lib/Node';
 import type { Stage } from 'konva/lib/Stage';
 import { afterEach, describe, expect, it } from 'vite-plus/test';
@@ -17,8 +18,8 @@ import { Show } from '@/constants/schema';
 import { changeShowAction } from '@/engine/modules/settings/atom.actions';
 import { addTableAction } from '@/engine/modules/table/atom.actions';
 import { addColumnAction } from '@/engine/modules/table-column/atom.actions';
+import { addTableGroupAction } from '@/engine/modules/table-group/atom.actions';
 import type { Table as TableType } from '@/internal-types';
-import { whenDrawn } from '@/konva/batchDraw';
 import { renderScene } from '@/konva/scene/renderScene';
 import type { Theme } from '@/themes/tokens';
 
@@ -33,23 +34,27 @@ afterEach(async () => {
 
 const createTable = (
   ui: Partial<TableType['ui']> = {},
-  columnIds: string[] = []
+  columnIds: string[] = [],
+  groupId = ''
 ): TableType => ({
   id: 'table-1',
   name: 'users',
+  logicalName: '',
   comment: '',
   columnIds,
   seqColumnIds: [...columnIds],
+  groupId,
+  nameDerived: false,
   ui: {
     x: 11,
     y: 22,
     zIndex: 5,
     widthName: 60,
+    widthLogicalName: 60,
     widthComment: 60,
     color: '',
     ...ui,
   },
-  meta: { updateAt: 0, createAt: 0 },
 });
 
 /**
@@ -171,6 +176,25 @@ describe('the minimap table box', () => {
     expect(box.getAttr('fill')).toBe(THEME.tableBackground);
     expect(box.getAttr('stroke')).toBe(THEME.tableBorder);
     expect(box.getAttr('strokeWidth')).toBe(TABLE_BORDER);
+  });
+
+  it('fills the box in the color the table wears, never its group color', async () => {
+    const app = createTestAppContext();
+    app.store.dispatchSync(
+      addTableGroupAction({
+        id: 'group-1',
+        color: '#3b82f6',
+        ui: { x: 0, y: 0, width: 100, height: 100, zIndex: 1 },
+      })
+    );
+    const stage = await mountTable(
+      createTable({ color: '#22c55e' }, [], 'group-1'),
+      app
+    );
+    const box = boxOf(stage);
+
+    expect(box.getAttr('fill')).toBe('#22c55e');
+    expect(box.getAttr('stroke')).toBe(THEME.tableBorder);
   });
 
   /**

@@ -25,9 +25,9 @@ test.describe('keyboard shortcuts', () => {
   }) => {
     await erd.seed(oneTable());
     await erd.focusCanvas();
-    // tinykeys is bound to the editor root, so every press below is meaningful
-    // only while DOM focus is inside the element. Asserting the precondition
-    // turns a lost-focus regression into a clear failure.
+    // The key bindings listen on the editor root, so every press below is
+    // meaningful only while DOM focus is inside the element. Asserting the
+    // precondition turns a lost-focus regression into a clear failure.
     await erd.expectKeyboardFocusInside();
 
     await erd.press(Shortcut.addTable);
@@ -73,6 +73,65 @@ test.describe('keyboard shortcuts', () => {
     await expect(erd.canvas.locator('.table')).toHaveCount(1);
     // deletes are LWW tombstones, so doc is the only honest count
     expect(await erd.tableIds()).toEqual(['posts']);
+  });
+
+  test('Delete removes the selected table and memo, and one undo brings both back', async ({
+    erd,
+  }) => {
+    await erd.seed(tableAndMemo());
+    const memo = await erd.sceneBox(`#memo-${MEMO_ID}`);
+
+    await erd.clickAt(await erd.tableHeaderPoint('users'));
+    await erd.modClickAt({ x: memo.x + 20, y: memo.y + 8 });
+    await expect(erd.selectedTables()).toHaveCount(1);
+    await expect(erd.canvas.locator('.memo[data-selected]')).toHaveCount(1);
+
+    await erd.press(Shortcut.removeSelection);
+    await expect.poll(() => erd.tableIds()).toEqual([]);
+    expect(await erd.memoIds()).toEqual([]);
+
+    await erd.press(Shortcut.undo);
+    await expect.poll(() => erd.tableIds()).toEqual(['users']);
+    expect(await erd.memoIds()).toEqual([MEMO_ID]);
+  });
+
+  test('Backspace removes the selected columns of the one selected table, and one undo brings them back', async ({
+    erd,
+  }) => {
+    await erd.seed(twoTables());
+
+    await erd.focusCell(erd.cell(erd.columnEl('users_name'), 'columnName'));
+    await erd.press(Shortcut.selectAllColumn);
+    await expect(erd.selectedColumns()).toHaveCount(2);
+    await expect(erd.selectedTables()).toHaveCount(1);
+
+    await erd.press('Backspace');
+    await expect.poll(() => erd.columnIds('users')).toEqual([]);
+    expect(await erd.tableIds()).toEqual(['users', 'posts']);
+    expect(await erd.columnIds('posts')).toEqual(['posts_id', 'posts_title']);
+
+    await erd.press(Shortcut.undo);
+    await expect
+      .poll(async () => [...(await erd.columnIds('users'))].sort())
+      .toEqual(['users_id', 'users_name']);
+  });
+
+  test('Backspace in the cell editor erases a character and removes nothing', async ({
+    erd,
+  }) => {
+    await erd.seed(oneTable());
+    const nameCell = erd.cell(erd.columnEl('users_name'), 'columnName');
+    await nameCell.dblclick();
+    await expect(erd.editInput(nameCell)).toBeFocused();
+    await expect(erd.selectedTables()).toHaveCount(1);
+
+    await erd.page.keyboard.press('End');
+    await erd.press('Backspace');
+
+    await expect(erd.editInput(nameCell)).toHaveValue('nam');
+    await expect(erd.editInput(nameCell)).toBeFocused();
+    expect(await erd.tableIds()).toEqual(['users']);
+    expect(await erd.columnIds('users')).toEqual(['users_id', 'users_name']);
   });
 
   test('undo/redo round-trip an add, and fire from inside an open edit input', async ({
@@ -313,6 +372,38 @@ test.describe('keyboard shortcuts', () => {
     expect(cleared.ui.keys).toBe(0);
   });
 
+  test('Alt+KeyK keys every selected column, then clears them all in one undo step', async ({
+    erd,
+  }) => {
+    // users.id is a key already and users.name is not; posts sits outside.
+    await erd.seed(twoTables());
+
+    await erd.focusCell(erd.cell(erd.columnEl('users_name'), 'columnName'));
+    await erd.press(Shortcut.selectAllColumn);
+    await expect(
+      erd.tableEl('users').locator('.column-row[data-selected]')
+    ).toHaveCount(2);
+
+    await erd.press(Shortcut.primaryKey);
+    await expect(erd.columnKey('users_name', 'pk')).toHaveCount(1);
+    await expect(erd.columnKey('users_id', 'pk')).toHaveCount(1);
+    await expect(erd.columnKey('posts_title', 'pk')).toHaveCount(0);
+
+    await erd.press(Shortcut.primaryKey);
+    await expect(erd.columnKey('users_name', 'pk')).toHaveCount(0);
+    await expect(erd.columnKey('users_id', 'pk')).toHaveCount(0);
+    await expect(erd.columnKey('posts_id', 'pk')).toHaveCount(1);
+
+    await erd.press(Shortcut.undo);
+    await expect(erd.columnKey('users_name', 'pk')).toHaveCount(1);
+    await expect(erd.columnKey('users_id', 'pk')).toHaveCount(1);
+
+    // The key users.id already held took no action, so its undo clears nothing.
+    await erd.press(Shortcut.undo);
+    await expect(erd.columnKey('users_name', 'pk')).toHaveCount(0);
+    await expect(erd.columnKey('users_id', 'pk')).toHaveCount(1);
+  });
+
   test('$mod+Alt+KeyA selects every table, Alt+KeyA every column of the focused one', async ({
     erd,
   }) => {
@@ -402,8 +493,9 @@ test.describe('keyboard shortcuts', () => {
     });
     await page.locator('#outside').focus();
 
-    // tinykeys is bound to the editor root, and the editor dims itself the
-    // moment focus leaves it — that class is the signal the keys are gone too.
+    // The key bindings listen on the editor root, and the editor dims itself
+    // the moment focus leaves it — that class is the signal the keys are gone
+    // too.
     await expect(erd.host.locator('.root')).toHaveClass(/\bnone-focus\b/);
 
     await erd.press(Shortcut.addTable);
@@ -592,9 +684,9 @@ const binding = (name: string, chord: string): Press => ({
 });
 
 /**
- * Every canvas shortcut that has to stand down while a text editor owns the
- * keyboard, then the traversal keys keydown carries rather than a binding.
- * Both chords of each removal binding are here, not just the pressed one.
+ * Every canvas shortcut that stands down while a text editor owns the keyboard,
+ * then the traversal keys keydown carries. Both chords of each removal binding
+ * are here but removeSelection's, which erase text and have cases of their own.
  */
 const PRESSES: Press[] = [
   binding('addTable', Shortcut.addTable),
@@ -613,6 +705,7 @@ const PRESSES: Press[] = [
   binding('relationshipOneN', Shortcut.relationshipOneN),
   binding('tableProperties', Shortcut.tableProperties),
   binding('search', Shortcut.search),
+  binding('findReplace', Shortcut.findReplace),
   binding('zoomIn', Shortcut.zoomIn),
   binding('zoomOut', Shortcut.zoomOut),
   binding('zoomReset', Shortcut.zoomReset),
@@ -715,6 +808,7 @@ test.describe('shortcuts while a text editor owns the keyboard', () => {
       // moves, and the icon the root takes as its cursor is where that shows.
       drawArmed: (await erd.canvasCursor()).includes('url('),
       search: await erd.host.locator('.quick-search').count(),
+      explorer: await erd.host.locator('.explorer').count(),
       tableProperties: await erd.host.locator('.table-properties').count(),
       contextMenu: await erd.contextMenu.count(),
     };
@@ -797,6 +891,26 @@ test.describe('shortcuts while a text editor owns the keyboard', () => {
     expect(await erd.columnIds('users')).toEqual(['users_id', 'users_name']);
     await expect(erd.memoEditor).toBeFocused();
     await expect(erd.memoEditor).toHaveValue(MEMO_VALUE);
+  });
+
+  test('Backspace and Delete erase text in the memo editor over a focused column, and remove nothing', async ({
+    erd,
+  }) => {
+    await erd.seed(tableAndMemo());
+    await openMemoEditorOverFocus(erd);
+    await erd.memoEditor.evaluate((element: HTMLTextAreaElement) => {
+      element.setSelectionRange(1, 1);
+    });
+
+    await erd.press('Backspace');
+    await erd.press('Delete');
+
+    await expect
+      .poll(async () => (await erd.memo(MEMO_ID)).value)
+      .toBe(MEMO_VALUE.slice(2));
+    await expect(erd.memoEditor).toBeFocused();
+    expect(await erd.columnIds('users')).toEqual(['users_id', 'users_name']);
+    expect(await erd.tableIds()).toEqual(['users']);
   });
 
   test('Enter types a newline and arms no cell edit underneath', async ({
@@ -1058,6 +1172,7 @@ test.describe('an IME composition owns the keyboard', () => {
       focusRing: await erd.focusRingCells(),
       selectedTables: await erd.selectedTables().count(),
       search: await erd.host.locator('.quick-search').count(),
+      explorer: await erd.host.locator('.explorer').count(),
     };
   };
 
@@ -1081,6 +1196,7 @@ test.describe('an IME composition owns the keyboard', () => {
       Shortcut.zoomOut,
       Shortcut.zoomReset,
       Shortcut.search,
+      Shortcut.findReplace,
     ]) {
       await erd.press(chord);
       await erd.page.waitForTimeout(120);
@@ -1088,5 +1204,48 @@ test.describe('an IME composition owns the keyboard', () => {
 
     expect(await around(erd)).toEqual(before);
     await expect(erd.editInput()).toBeFocused();
+  });
+});
+
+/**
+ * The one case standing on the shadow root production declares closed. Whether
+ * a press landed on the canvas is read from an event crossing that boundary, so
+ * the reopened root of every other case cannot answer for a double click.
+ */
+test.describe('a real double click through the closed shadow root', () => {
+  /** What the cell editor holds, or null while none is open. */
+  const editValue = (erd: ErdEditorPage) =>
+    erd.page.evaluate(() => {
+      const root = Reflect.get(window, '__erdShadowRoot') as
+        | ShadowRoot
+        | undefined;
+      return (
+        root?.querySelector<HTMLInputElement>('.edit-overlay input.edit-input')
+          ?.value ?? null
+      );
+    });
+
+  const dblclickCell = async (erd: ErdEditorPage, path: string[]) => {
+    const box = await erd.sceneBox(path);
+    await erd.page.mouse.dblclick(
+      box.x + box.width / 2,
+      box.y + box.height / 2
+    );
+  };
+
+  test('opens the cell editor on a column name and on a table name', async ({
+    erd,
+  }) => {
+    await erd.gotoClosedShadow();
+    await erd.seed(oneTable());
+
+    await dblclickCell(erd, ['#column-users_name', '.columnName']);
+    await expect.poll(() => editValue(erd)).toBe('name');
+
+    await erd.page.keyboard.press('Escape');
+    await expect.poll(() => editValue(erd)).toBeNull();
+
+    await dblclickCell(erd, ['#table-users', '.tableName']);
+    await expect.poll(() => editValue(erd)).toBe('users');
   });
 });

@@ -16,16 +16,23 @@ import {
   vi,
 } from 'vite-plus/test';
 
+import { iconNameOf } from '@/__test-utils__/icon';
 import {
   createTestAppContext,
+  createTestI18n,
   flush,
   mountAndFlush,
   Mounted,
+  provideI18n,
+  pseudoMessages,
 } from '@/__test-utils__/index';
 import { AppContext } from '@/components/appContext';
 import ErdContextMenu, {
   ErdContextMenuType,
+  READING_MENU_TYPES,
 } from '@/components/erd/erd-context-menu/ErdContextMenu';
+import { openExplorer } from '@/components/explorer/explorerCommands';
+import { explorerViewOf } from '@/components/explorer/explorerView';
 import {
   ContextMenuRootContext,
   contextMenuRootContext,
@@ -35,11 +42,18 @@ import {
   CanvasType,
   ColumnOption,
   Database,
+  NameViewMode,
+  ReferentialAction,
   RelationshipType,
+  Show,
 } from '@/constants/schema';
 import { TablePlacement } from '@/constants/tablePlacement';
+import { addDictionaryAction } from '@/engine/modules/dictionary/atom.actions';
 import {
+  changeOpenMapAction,
+  drawStartRelationshipAction,
   focusColumnAction,
+  focusTableAction,
   selectAction,
 } from '@/engine/modules/editor/atom.actions';
 import {
@@ -47,10 +61,35 @@ import {
   SelectType,
   VisualizationMode,
 } from '@/engine/modules/editor/state';
+import {
+  addMemoAction,
+  changeMemoColorAction,
+} from '@/engine/modules/memo/atom.actions';
 import { addRelationshipAction } from '@/engine/modules/relationship/atom.actions';
-import { changeDatabaseAction } from '@/engine/modules/settings/atom.actions';
-import { addTableAction } from '@/engine/modules/table/atom.actions';
-import { addColumnAction } from '@/engine/modules/table-column/atom.actions';
+import {
+  changeDatabaseAction,
+  changeShowAction,
+  changeZoomLevelAction,
+} from '@/engine/modules/settings/atom.actions';
+import {
+  addTableAction,
+  changeTableColorAction,
+  changeTableGroupAction,
+  changeTableLogicalNameAction,
+  changeTableNameAction,
+} from '@/engine/modules/table/atom.actions';
+import {
+  addColumnAction,
+  changeColumnLogicalNameAction,
+  changeColumnNameAction,
+  changeColumnPrimaryKeyAction,
+  removeColumnAction,
+} from '@/engine/modules/table-column/atom.actions';
+import {
+  addTableGroupAction,
+  changeTableGroupColorAction,
+} from '@/engine/modules/table-group/atom.actions';
+import { createI18n } from '@/i18n/translate';
 import { bHas } from '@/utils/bit';
 import { setExportFileCallback } from '@/utils/file/exportFile';
 import { setImportFileCallback } from '@/utils/file/importFile';
@@ -75,16 +114,31 @@ const Wrapper: FC<WrapperProps> = (props, ctx) => {
 let app: AppContext;
 let mounted: Mounted | null = null;
 let onClose: ReturnType<typeof vi.fn>;
-let importRequests: Array<{ type: string; op: string; accept: string }>;
+let importRequests: Array<{
+  type: string;
+  op: string;
+  accept: string;
+  mode?: string;
+}>;
 let exportedFiles: string[];
 
 type MountOptions = {
   type?: ErdContextMenuType;
   relationshipId?: string;
   tableId?: string;
+  columnId?: string;
+  memoId?: string;
+  tableGroupId?: string;
 };
 
-async function mountMenu({ type, relationshipId, tableId }: MountOptions = {}) {
+async function mountMenu({
+  type,
+  relationshipId,
+  tableId,
+  columnId,
+  memoId,
+  tableGroupId,
+}: MountOptions = {}) {
   mounted = await mountAndFlush(
     html`
       <${Wrapper}
@@ -93,6 +147,9 @@ async function mountMenu({ type, relationshipId, tableId }: MountOptions = {}) {
             type=${type ?? ErdContextMenuType.ERD}
             relationshipId=${relationshipId}
             tableId=${tableId}
+            columnId=${columnId}
+            memoId=${memoId}
+            tableGroupId=${tableGroupId}
             .onClose=${onClose}
           />
         `}
@@ -128,9 +185,12 @@ function labelsOf(items: HTMLElement[]): string[] {
 }
 
 function findItem(items: HTMLElement[], label: string): HTMLElement {
-  const item = items.find(el =>
-    (el.textContent ?? '').replace(/\s+/g, ' ').includes(label)
-  );
+  const text = (el: HTMLElement) =>
+    (el.textContent ?? '').replace(/\s+/g, ' ').trim();
+  // An exact label wins, so Delete is not taken for On Delete above it.
+  const item =
+    items.find(el => text(el) === label) ??
+    items.find(el => text(el).includes(label));
   if (!item) throw new Error(`menu item not found: ${label}`);
   return item;
 }
@@ -144,6 +204,90 @@ async function openSubMenu(item: HTMLElement): Promise<HTMLElement> {
 async function click(item: HTMLElement, init: MouseEventInit = {}) {
   item.dispatchEvent(new MouseEvent('click', { bubbles: true, ...init }));
   await flush();
+}
+
+/**
+ * Two words, then a table per id given whose name and two columns' names were
+ * typed by hand, under logical names the words spell.
+ */
+function seedNamedTables(...ids: string[]) {
+  app.store.dispatchSync(
+    addDictionaryAction({
+      kind: 'word',
+      id: 'word-member',
+      values: { name: 'Member', abbreviation: 'MBR' },
+    }),
+    addDictionaryAction({
+      kind: 'word',
+      id: 'word-name',
+      values: { name: 'Name', abbreviation: 'NM' },
+    })
+  );
+  ids.forEach((id, index) => {
+    const columns: Array<[columnId: string, logicalName: string]> = [
+      [`${id}-member-name`, 'Member Name'],
+      [`${id}-name`, 'Name'],
+    ];
+    app.store.dispatchSync(
+      addTableAction({ id, ui: { x: index * 400, y: 0, zIndex: index + 1 } }),
+      changeTableNameAction({ id, value: `${id}_typed` }),
+      changeTableLogicalNameAction({ id, value: 'Member' }),
+      ...columns.flatMap(([columnId, logicalName]) => [
+        addColumnAction({ id: columnId, tableId: id }),
+        changeColumnNameAction({ tableId: id, id: columnId, value: 'typed' }),
+        changeColumnLogicalNameAction({
+          tableId: id,
+          id: columnId,
+          value: logicalName,
+        }),
+      ])
+    );
+  });
+}
+
+/** The canvas menu of a writable editor over an empty document. */
+const CANVAS_ROWS = [
+  'New TableAlt + N',
+  'New MemoAlt + M',
+  'New Table GroupAlt + G',
+  'Toggle ExplorerCtrl + F',
+  'Relationship',
+  'View Option',
+  'Name View',
+  'Database',
+  'Import',
+  'Import and Add',
+  'Export',
+  'Auto Layout',
+  'Diff Viewer',
+];
+
+/** What a readonly reader keeps of the canvas menu, rows that change nothing in the document. */
+const READ_CANVAS_ROWS = ['View Option', 'Name View', 'Export', 'Diff Viewer'];
+
+/**
+ * Builds the app the menu reads, whose readonly a spec turns while the menu
+ * stands open, as the element's store reads its prop, and hands back the flag.
+ */
+function createTurningApp() {
+  const flags = observable({ readonly: false });
+  app = createTestAppContext({
+    getReadonly: () => flags.readonly,
+    readonlyEditState: true,
+  });
+  return flags;
+}
+
+/** A table's name, then its columns' names in order. */
+function namesOf(tableId: string): string[] {
+  const { collections } = app.store.state;
+  const table = query(collections)
+    .collection('tableEntities')
+    .selectById(tableId);
+  const columns = query(collections)
+    .collection('tableColumnEntities')
+    .selectByIds(table?.columnIds ?? []);
+  return [table?.name ?? '', ...columns.map(column => column.name)];
 }
 
 beforeEach(() => {
@@ -170,17 +314,22 @@ describe('ErdContextMenu / ERD type', () => {
   it('renders the erd level menu entries', async () => {
     await mountMenu();
 
-    expect(labelsOf(rootItems())).toEqual([
-      'New TableAlt + N',
-      'New MemoAlt + M',
-      'Relationship',
-      'View Option',
-      'Database',
-      'Import',
-      'Export',
-      'Auto Layout',
-      'Diff Viewer',
-    ]);
+    expect(labelsOf(rootItems())).toEqual(CANVAS_ROWS);
+  });
+
+  it('draws New Table with the table icon the rest of the editor shows a table by', async () => {
+    await mountMenu();
+
+    expect(iconNameOf(findItem(rootItems(), 'New Table'))).toBe('table-2');
+    expect(iconNameOf(findItem(rootItems(), 'New Memo'))).toBe('sticky-note');
+  });
+
+  it('draws Toggle Explorer with the list-tree icon the palette and the toolbar draw', async () => {
+    await mountMenu();
+
+    expect(iconNameOf(findItem(rootItems(), 'Toggle Explorer'))).toBe(
+      'list-tree'
+    );
   });
 
   it('adds a table and closes the menu', async () => {
@@ -192,6 +341,38 @@ describe('ErdContextMenu / ERD type', () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
+  it("asks for the Explorer's search and closes the menu", async () => {
+    const opened: unknown[] = [];
+    app.emitter.on({
+      openFindReplace: action => {
+        opened.push(action.payload);
+      },
+    });
+    await mountMenu();
+
+    await click(findItem(rootItems(), 'Toggle Explorer'));
+
+    expect(opened).toEqual([undefined]);
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('closes the Explorer the toolbar shows pressed, as the find chord does', async () => {
+    const opened: unknown[] = [];
+    app.emitter.on({
+      openFindReplace: action => {
+        opened.push(action.payload);
+      },
+    });
+    openExplorer(app.store);
+    await mountMenu();
+
+    await click(findItem(rootItems(), 'Toggle Explorer'));
+
+    expect(explorerViewOf(app.store).open).toBe(false);
+    expect(opened).toEqual([]);
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
   it('adds a memo and closes the menu', async () => {
     await mountMenu();
 
@@ -199,6 +380,16 @@ describe('ErdContextMenu / ERD type', () => {
 
     expect(app.store.state.doc.memoIds).toHaveLength(1);
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('offers no New Memo while memos are hidden', async () => {
+    app.store.dispatchSync(
+      changeShowAction({ show: Show.hideMemo, value: true })
+    );
+    await mountMenu();
+
+    expect(labelsOf(rootItems())).not.toContain('New MemoAlt + M');
+    expect(labelsOf(rootItems())).toContain('New TableAlt + N');
   });
 
   it('lists every placement in the automatic table placement submenu', async () => {
@@ -272,11 +463,16 @@ describe('ErdContextMenu / ERD type', () => {
       'Table Comment',
       'Column Comment',
       'DataType',
+      'Domain',
       'Default',
       'Not Null',
       'Unique',
+      'Alternate Key',
       'Auto Increment',
       'Relationship',
+      'Referential Actions',
+      'Table Groups',
+      'Memos',
     ]);
 
     const before = app.store.state.settings.show;
@@ -310,6 +506,54 @@ describe('ErdContextMenu / ERD type', () => {
     expect(onClose).not.toHaveBeenCalled();
   });
 
+  it('switches the name view from the Name View submenu, the view in force checked, and keeps the menu open', async () => {
+    await mountMenu();
+
+    const sub = await openSubMenu(findItem(rootItems(), 'Name View'));
+    const items = itemsOf(sub);
+
+    expect(labelsOf(items)).toEqual([
+      'Physical Names',
+      'Logical Names',
+      'Both Names',
+    ]);
+    expect(items.map(iconNameOf)).toEqual(['check', null, null]);
+
+    await click(findItem(items, 'Both Names'));
+
+    expect(app.store.state.settings.nameViewMode).toBe(NameViewMode.both);
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('derives every name of the document again after Name View, and closes', async () => {
+    seedNamedTables('a', 'b');
+    await mountMenu();
+
+    const labels = labelsOf(rootItems());
+    expect(labels[labels.indexOf('Name View') + 1]).toBe(
+      'Derive Physical Names Again'
+    );
+    const item = findItem(rootItems(), 'Derive Physical Names Again');
+    expect(iconNameOf(item)).toBe('refresh-cw');
+
+    await click(item);
+
+    expect(namesOf('a')).toEqual(['MBR', 'MBR_NM', 'NM']);
+    expect(namesOf('b')).toEqual(['MBR', 'MBR_NM', 'NM']);
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('offers no derivation of the document to a readonly editor, or while it lists no table', async () => {
+    await mountMenu();
+    expect(labelsOf(rootItems())).not.toContain('Derive Physical Names Again');
+    mounted?.unmount();
+
+    app = createTestAppContext({ getReadonly: () => true });
+    seedNamedTables('a');
+    await mountMenu();
+    expect(labelsOf(rootItems())).not.toContain('Derive Physical Names Again');
+  });
+
   it('requests a json import from the import submenu', async () => {
     await mountMenu();
 
@@ -332,19 +576,92 @@ describe('ErdContextMenu / ERD type', () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
+  it('keeps View Option, Name View, Export and Diff Viewer alone for a readonly editor, each still acting', async () => {
+    const flags = createTurningApp();
+    seedNamedTables('a');
+    flags.readonly = true;
+    await mountMenu();
+
+    expect(labelsOf(rootItems())).toEqual(READ_CANVAS_ROWS);
+
+    const show = await openSubMenu(findItem(rootItems(), 'View Option'));
+    const before = app.store.state.settings.show;
+    await click(findItem(itemsOf(show), 'Table Comment'));
+    expect(app.store.state.settings.show).not.toBe(before);
+
+    const exports = await openSubMenu(findItem(rootItems(), 'Export'));
+    await click(findItem(itemsOf(exports), 'json'));
+    expect(exportedFiles).toHaveLength(1);
+
+    await click(findItem(rootItems(), 'Diff Viewer'));
+    expect(importRequests).toEqual([
+      { type: 'json', op: 'diff', accept: '.json' },
+    ]);
+  });
+
+  it('redraws its rows as the editor turns readonly under it, and back', async () => {
+    const flags = createTurningApp();
+    await mountMenu();
+    expect(labelsOf(rootItems())).toEqual(CANVAS_ROWS);
+
+    flags.readonly = true;
+    await flush();
+    expect(labelsOf(rootItems())).toEqual(READ_CANVAS_ROWS);
+
+    flags.readonly = false;
+    await flush();
+    expect(labelsOf(rootItems())).toEqual(CANVAS_ROWS);
+  });
+
+  it('requests an sql file to add from the Import and Add submenu', async () => {
+    await mountMenu();
+
+    const sub = await openSubMenu(findItem(rootItems(), 'Import and Add'));
+    const items = itemsOf(sub);
+
+    expect(labelsOf(items)).toEqual([
+      'json',
+      'Schema SQL',
+      'GraphQL',
+      'DBML',
+      'AML',
+    ]);
+
+    await click(items[1]);
+
+    expect(importRequests).toEqual([
+      { type: 'sql', op: 'set', accept: '.sql', mode: 'append' },
+    ]);
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
   it('exports json from the export submenu', async () => {
     await mountMenu();
 
     const sub = await openSubMenu(findItem(rootItems(), 'Export'));
     const items = itemsOf(sub);
 
-    expect(labelsOf(items)).toEqual(['json', 'Schema SQL', 'png']);
+    expect(labelsOf(items)).toEqual(['json', 'Schema SQL', 'Image']);
 
     await click(items[0]);
 
     expect(exportedFiles).toHaveLength(1);
     expect(exportedFiles[0]).toMatch(/\.erd\.json$/);
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('opens the export image dialog from Image and writes no file', async () => {
+    const opened = vi.fn();
+    const off = app.emitter.on({ openExportImage: opened });
+    await mountMenu();
+
+    const sub = await openSubMenu(findItem(rootItems(), 'Export'));
+    await click(findItem(itemsOf(sub), 'Image'));
+
+    expect(opened).toHaveBeenCalledTimes(1);
+    expect(exportedFiles).toEqual([]);
+    expect(onClose).toHaveBeenCalledTimes(1);
+    off();
   });
 
   it('closes the menu on the stop shortcut only', async () => {
@@ -360,6 +677,17 @@ describe('ErdContextMenu / ERD type', () => {
       type: KeyBindingName.stop,
       event: new KeyboardEvent('keydown'),
     });
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('closes the menu on the key its Delete row names, which takes away what it was raised over', async () => {
+    await mountMenu({ type: ErdContextMenuType.memo, memoId: 'memo-1' });
+
+    app.shortcut$.next({
+      type: KeyBindingName.removeSelection,
+      event: new KeyboardEvent('keydown', { key: 'Delete' }),
+    });
+
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 });
@@ -389,16 +717,406 @@ describe('ErdContextMenu / table type', () => {
     );
   }
 
+  /** The table menu of a writable editor over a table no selection holds. */
+  const TABLE_ROWS = [
+    'Primary KeyAlt + K',
+    'Table PropertiesAlt + Space',
+    'Focus on this tableAlt + F',
+    'Derive Physical Names Again',
+    'Color',
+    'DeleteDelete',
+  ];
+
   it('renders the table level menu entries', async () => {
     seedTable();
     await mountMenu({ type: ErdContextMenuType.table, tableId: TABLE_ID });
 
-    expect(labelsOf(rootItems())).toEqual([
-      'Primary KeyAlt + K',
-      'Table PropertiesAlt + Space',
-      'Focus on this tableAlt + F',
-      'Color',
-    ]);
+    expect(labelsOf(rootItems())).toEqual(TABLE_ROWS);
+  });
+
+  it('keeps Table Properties alone for a readonly editor, which still opens it', async () => {
+    const flags = createTurningApp();
+    seedTable();
+    flags.readonly = true;
+    const openTableProperties = vi.fn();
+    app.emitter.on({ openTableProperties });
+    await mountMenu({
+      type: ErdContextMenuType.table,
+      tableId: TABLE_ID,
+      columnId: COLUMN_ID,
+    });
+
+    expect(labelsOf(rootItems())).toEqual(['Table PropertiesAlt + Space']);
+
+    await click(findItem(rootItems(), 'Table Properties'));
+    expect(openTableProperties).toHaveBeenCalledTimes(1);
+    expect(app.store.state.editor.openMap[Open.tableProperties]).toBe(true);
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('redraws its rows as the editor turns readonly under it, and back', async () => {
+    const flags = createTurningApp();
+    seedTable();
+    await mountMenu({ type: ErdContextMenuType.table, tableId: TABLE_ID });
+    expect(labelsOf(rootItems())).toEqual(TABLE_ROWS);
+
+    flags.readonly = true;
+    await flush();
+    expect(labelsOf(rootItems())).toEqual(['Table PropertiesAlt + Space']);
+
+    flags.readonly = false;
+    await flush();
+    expect(labelsOf(rootItems())).toEqual(TABLE_ROWS);
+  });
+
+  it('draws no icon beside Delete and names the key that does the same', async () => {
+    seedTable();
+    await mountMenu({ type: ErdContextMenuType.table, tableId: TABLE_ID });
+
+    const item = findItem(rootItems(), 'Delete');
+    expect(item.querySelector('svg')).toBeNull();
+    expect(item.querySelector('.kbd')?.textContent?.trim()).toBe('Delete');
+  });
+
+  describe('Delete', () => {
+    const SECOND_TABLE_ID = 'table-2';
+    const MEMO_ID = 'memo-1';
+
+    const tableIds = () => app.store.state.doc.tableIds;
+    const memoIds = () => app.store.state.doc.memoIds;
+    const columnIds = () =>
+      query(app.store.state.collections)
+        .collection('tableEntities')
+        .selectById(TABLE_ID)?.columnIds;
+
+    function seedNeighbors() {
+      seedTable();
+      app.store.dispatchSync(
+        addTableAction({
+          id: SECOND_TABLE_ID,
+          ui: { x: 400, y: 0, zIndex: 2 },
+        }),
+        addMemoAction({ id: MEMO_ID, ui: { x: 0, y: 400, zIndex: 3 } })
+      );
+    }
+
+    it('deletes the table it was raised over alone, and closes', async () => {
+      seedNeighbors();
+      app.store.dispatchSync(
+        selectAction({
+          [SECOND_TABLE_ID]: SelectType.table,
+          [MEMO_ID]: SelectType.memo,
+        })
+      );
+      await mountMenu({ type: ErdContextMenuType.table, tableId: TABLE_ID });
+
+      await click(findItem(rootItems(), 'Delete'));
+
+      expect(tableIds()).toEqual([SECOND_TABLE_ID]);
+      expect(memoIds()).toEqual([MEMO_ID]);
+      expect(onClose).toHaveBeenCalledTimes(1);
+    });
+
+    it('names the selection the table is one of and deletes all of it', async () => {
+      seedNeighbors();
+      app.store.dispatchSync(
+        selectAction({
+          [TABLE_ID]: SelectType.table,
+          [MEMO_ID]: SelectType.memo,
+        })
+      );
+      await mountMenu({ type: ErdContextMenuType.table, tableId: TABLE_ID });
+
+      expect(labelsOf(rootItems()).at(-1)).toBe('Delete selectedDelete');
+      await click(findItem(rootItems(), 'Delete selected'));
+
+      expect(tableIds()).toEqual([SECOND_TABLE_ID]);
+      expect(memoIds()).toEqual([]);
+      expect(onClose).toHaveBeenCalledTimes(1);
+    });
+
+    /** Three columns, the first and the last selected, their table the whole selection. */
+    function seedColumnSelection() {
+      seedTable();
+      app.store.dispatchSync(
+        addColumnAction({ id: 'column-2', tableId: TABLE_ID }),
+        addColumnAction({ id: 'column-3', tableId: TABLE_ID }),
+        selectAction({ [TABLE_ID]: SelectType.table })
+      );
+      focusColumn();
+      app.store.dispatchSync(
+        focusColumnAction({
+          tableId: TABLE_ID,
+          columnId: 'column-3',
+          focusType: FocusType.columnName,
+          $mod: true,
+          shiftKey: false,
+        })
+      );
+    }
+
+    it('names the selected columns when raised over one of them and deletes them', async () => {
+      seedColumnSelection();
+      await mountMenu({
+        type: ErdContextMenuType.table,
+        tableId: TABLE_ID,
+        columnId: 'column-3',
+      });
+
+      expect(labelsOf(rootItems()).at(-1)).toBe('Delete columnsDelete');
+      await click(findItem(rootItems(), 'Delete columns'));
+
+      expect(tableIds()).toEqual([TABLE_ID]);
+      expect(columnIds()).toEqual(['column-2']);
+      expect(onClose).toHaveBeenCalledTimes(1);
+    });
+
+    it('names a lone selected column in the singular when raised over it, and deletes it', async () => {
+      seedTable();
+      app.store.dispatchSync(
+        addColumnAction({ id: 'column-2', tableId: TABLE_ID }),
+        selectAction({ [TABLE_ID]: SelectType.table })
+      );
+      focusColumn();
+      await mountMenu({
+        type: ErdContextMenuType.table,
+        tableId: TABLE_ID,
+        columnId: COLUMN_ID,
+      });
+
+      expect(labelsOf(rootItems()).at(-1)).toBe('Delete columnDelete');
+      await click(findItem(rootItems(), 'Delete column'));
+
+      expect(tableIds()).toEqual([TABLE_ID]);
+      expect(columnIds()).toEqual(['column-2']);
+      expect(onClose).toHaveBeenCalledTimes(1);
+    });
+
+    it('names twenty-one selected columns in the plural, as it names two', async () => {
+      seedTable();
+      const ids = Array.from(
+        { length: 21 },
+        (_, index) => `column-${index + 2}`
+      );
+      app.store.dispatchSync(
+        ...ids.map(id => addColumnAction({ id, tableId: TABLE_ID })),
+        selectAction({ [TABLE_ID]: SelectType.table })
+      );
+      ids.forEach((columnId, index) => {
+        app.store.dispatchSync(
+          focusColumnAction({
+            tableId: TABLE_ID,
+            columnId,
+            focusType: FocusType.columnName,
+            $mod: index > 0,
+            shiftKey: false,
+          })
+        );
+      });
+      await mountMenu({
+        type: ErdContextMenuType.table,
+        tableId: TABLE_ID,
+        columnId: ids[0],
+      });
+
+      expect(labelsOf(rootItems()).at(-1)).toBe('Delete columnsDelete');
+      await click(findItem(rootItems(), 'Delete columns'));
+
+      expect(columnIds()).toEqual([COLUMN_ID]);
+    });
+
+    it('counts only the selected columns still in the table', async () => {
+      seedColumnSelection();
+      // The bare atom a peer, an agent or the undo of an add sends, which
+      // leaves the column in the selection.
+      app.store.dispatchSync(
+        removeColumnAction({ id: COLUMN_ID, tableId: TABLE_ID })
+      );
+      await mountMenu({
+        type: ErdContextMenuType.table,
+        tableId: TABLE_ID,
+        columnId: 'column-3',
+      });
+
+      expect(labelsOf(rootItems()).at(-1)).toBe('Delete columnDelete');
+      await click(findItem(rootItems(), 'Delete column'));
+
+      expect(columnIds()).toEqual(['column-2']);
+    });
+
+    it.each([
+      ['off the rows', undefined],
+      ['over a row outside the selection', 'column-2'],
+    ])(
+      'names the table, not its selected columns, when raised %s',
+      async (_, columnId) => {
+        seedColumnSelection();
+        await mountMenu({
+          type: ErdContextMenuType.table,
+          tableId: TABLE_ID,
+          columnId,
+        });
+
+        expect(labelsOf(rootItems()).at(-1)).toBe('DeleteDelete');
+        await click(findItem(rootItems(), 'Delete'));
+
+        expect(tableIds()).toEqual([]);
+      }
+    );
+
+    it('goes back to the table at a zoom that draws names alone', async () => {
+      seedTable();
+      app.store.dispatchSync(selectAction({ [TABLE_ID]: SelectType.table }));
+      focusColumn();
+      app.store.dispatchSync(changeZoomLevelAction({ value: 0.5 }));
+      await mountMenu({
+        type: ErdContextMenuType.table,
+        tableId: TABLE_ID,
+        columnId: COLUMN_ID,
+      });
+
+      expect(labelsOf(rootItems()).at(-1)).toBe('DeleteDelete');
+      await click(findItem(rootItems(), 'Delete'));
+
+      expect(tableIds()).toEqual([]);
+    });
+
+    it('leaves the columns of another focused table to the key', async () => {
+      seedNeighbors();
+      app.store.dispatchSync(
+        addColumnAction({ id: 'column-9', tableId: SECOND_TABLE_ID }),
+        selectAction({ [SECOND_TABLE_ID]: SelectType.table }),
+        focusColumnAction({
+          tableId: SECOND_TABLE_ID,
+          columnId: 'column-9',
+          focusType: FocusType.columnName,
+          $mod: false,
+          shiftKey: false,
+        })
+      );
+      await mountMenu({ type: ErdContextMenuType.table, tableId: TABLE_ID });
+
+      expect(labelsOf(rootItems()).at(-1)).toBe('DeleteDelete');
+      await click(findItem(rootItems(), 'Delete'));
+
+      expect(tableIds()).toEqual([SECOND_TABLE_ID]);
+    });
+
+    it('follows the key when it is remapped', async () => {
+      seedTable();
+      app.keyBindingMap.removeSelection = [{ shortcut: 'Alt+KeyD' }];
+      await mountMenu({ type: ErdContextMenuType.table, tableId: TABLE_ID });
+
+      expect(labelsOf(rootItems()).at(-1)).toBe('DeleteAlt + D');
+    });
+  });
+
+  describe('Derive Physical Names Again', () => {
+    const select = (...ids: string[]) =>
+      app.store.dispatchSync(
+        selectAction(
+          Object.fromEntries(ids.map(id => [id, SelectType.table] as const))
+        )
+      );
+
+    it('derives the table, its name and every column, when raised off its rows', async () => {
+      seedNamedTables('a', 'b');
+      select('a');
+      await mountMenu({ type: ErdContextMenuType.table, tableId: 'a' });
+
+      const item = findItem(rootItems(), 'Derive Physical Names Again');
+      expect(iconNameOf(item)).toBe('refresh-cw');
+      await click(item);
+
+      expect(namesOf('a')).toEqual(['MBR', 'MBR_NM', 'NM']);
+      expect(namesOf('b')).toEqual(['b_typed', 'typed', 'typed']);
+      expect(onClose).toHaveBeenCalledTimes(1);
+    });
+
+    it('derives the column alone, named in the singular, when raised over its row', async () => {
+      seedNamedTables('a');
+      select('a');
+      await mountMenu({
+        type: ErdContextMenuType.table,
+        tableId: 'a',
+        columnId: 'a-name',
+      });
+
+      expect(labelsOf(rootItems())).not.toContain(
+        'Derive Physical Names Again'
+      );
+      await click(findItem(rootItems(), 'Derive Physical Name Again'));
+
+      expect(namesOf('a')).toEqual(['a_typed', 'typed', 'NM']);
+      expect(onClose).toHaveBeenCalledTimes(1);
+    });
+
+    it('goes back to the table for a row its table no longer holds', async () => {
+      seedNamedTables('a');
+      app.store.dispatchSync(
+        removeColumnAction({ tableId: 'a', id: 'a-name' })
+      );
+      await mountMenu({
+        type: ErdContextMenuType.table,
+        tableId: 'a',
+        columnId: 'a-name',
+      });
+
+      await click(findItem(rootItems(), 'Derive Physical Names Again'));
+
+      expect(namesOf('a')).toEqual(['MBR', 'MBR_NM']);
+    });
+
+    it('derives the selected tables it is one of, over a row too, the rest kept', async () => {
+      seedNamedTables('a', 'b', 'c');
+      select('a', 'b');
+      await mountMenu({
+        type: ErdContextMenuType.table,
+        tableId: 'a',
+        columnId: 'a-name',
+      });
+
+      await click(findItem(rootItems(), 'Derive Physical Names Again'));
+
+      expect(namesOf('a')).toEqual(['MBR', 'MBR_NM', 'NM']);
+      expect(namesOf('b')).toEqual(['MBR', 'MBR_NM', 'NM']);
+      expect(namesOf('c')).toEqual(['c_typed', 'typed', 'typed']);
+    });
+
+    it('counts a memo or a table the document no longer lists out of the selection', async () => {
+      seedNamedTables('a', 'b');
+      app.store.dispatchSync(
+        addMemoAction({ id: 'memo-1', ui: { x: 0, y: 400, zIndex: 9 } }),
+        selectAction({
+          a: SelectType.table,
+          ghost: SelectType.table,
+          'memo-1': SelectType.memo,
+        })
+      );
+      await mountMenu({
+        type: ErdContextMenuType.table,
+        tableId: 'a',
+        columnId: 'a-name',
+      });
+
+      await click(findItem(rootItems(), 'Derive Physical Name Again'));
+
+      expect(namesOf('a')).toEqual(['a_typed', 'typed', 'NM']);
+    });
+
+    it('offers none to a readonly editor', async () => {
+      app = createTestAppContext({ getReadonly: () => true });
+      seedNamedTables('a');
+      await mountMenu({
+        type: ErdContextMenuType.table,
+        tableId: 'a',
+        columnId: 'a-name',
+      });
+
+      expect(
+        labelsOf(rootItems()).filter(label => label.startsWith('Derive'))
+      ).toEqual([]);
+    });
   });
 
   it('toggles the focused column primary key', async () => {
@@ -415,6 +1133,97 @@ describe('ErdContextMenu / table type', () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
+  describe('over a column selection', () => {
+    const SECOND_ID = 'column-2';
+    const THIRD_ID = 'column-3';
+
+    const keys = () =>
+      [COLUMN_ID, SECOND_ID, THIRD_ID].map(columnId =>
+        bHas(
+          query(app.store.state.collections)
+            .collection('tableColumnEntities')
+            .selectById(columnId)?.options ?? 0,
+          ColumnOption.primaryKey
+        )
+      );
+
+    /** Three columns, the focus on the second with the first selected too. */
+    function seedSelection() {
+      seedTable();
+      app.store.dispatchSync(
+        addColumnAction({ id: SECOND_ID, tableId: TABLE_ID }),
+        addColumnAction({ id: THIRD_ID, tableId: TABLE_ID })
+      );
+      focusColumn();
+      app.store.dispatchSync(
+        focusColumnAction({
+          tableId: TABLE_ID,
+          columnId: SECOND_ID,
+          focusType: FocusType.columnName,
+          $mod: true,
+          shiftKey: false,
+        })
+      );
+    }
+
+    it('names the selection while the focused column is one of several', async () => {
+      seedSelection();
+      await mountMenu({ type: ErdContextMenuType.table, tableId: TABLE_ID });
+
+      expect(labelsOf(rootItems())[0]).toBe(
+        'Primary Key on selected columnsAlt + K'
+      );
+    });
+
+    it('keys every selected column and closes', async () => {
+      seedSelection();
+      await mountMenu({ type: ErdContextMenuType.table, tableId: TABLE_ID });
+
+      await click(findItem(rootItems(), 'Primary Key on selected columns'));
+
+      expect(keys()).toEqual([true, true, false]);
+      expect(onClose).toHaveBeenCalledTimes(1);
+    });
+
+    it('goes back to the one column once the selection is that column alone', async () => {
+      seedSelection();
+      await mountMenu({ type: ErdContextMenuType.table, tableId: TABLE_ID });
+
+      focusColumn();
+      await flush();
+
+      expect(labelsOf(rootItems())[0]).toBe('Primary KeyAlt + K');
+      await click(findItem(rootItems(), 'Primary Key'));
+      expect(keys()).toEqual([true, false, false]);
+    });
+
+    it('goes back to the one column once a selected column leaves the table', async () => {
+      seedSelection();
+      app.store.dispatchSync(
+        changeColumnPrimaryKeyAction({
+          tableId: TABLE_ID,
+          id: SECOND_ID,
+          value: true,
+        })
+      );
+      await mountMenu({ type: ErdContextMenuType.table, tableId: TABLE_ID });
+      expect(labelsOf(rootItems())[0]).toBe(
+        'Primary Key on selected columnsAlt + K'
+      );
+
+      // The bare atom a peer, an agent or the undo of an add sends, which
+      // leaves the column in the selection.
+      app.store.dispatchSync(
+        removeColumnAction({ id: COLUMN_ID, tableId: TABLE_ID })
+      );
+      await flush();
+
+      expect(labelsOf(rootItems())[0]).toBe('Primary KeyAlt + K');
+      await click(findItem(rootItems(), 'Primary Key'));
+      expect(keys()).toEqual([false, false, false]);
+    });
+  });
+
   it('does nothing for primary key when no column is focused', async () => {
     seedTable();
     await mountMenu({ type: ErdContextMenuType.table, tableId: TABLE_ID });
@@ -428,10 +1237,11 @@ describe('ErdContextMenu / table type', () => {
     expect(onClose).not.toHaveBeenCalled();
   });
 
-  it('opens the table properties panel', async () => {
+  it('opens the table properties panel, leaving the Explorer open', async () => {
     seedTable();
     const openTableProperties = vi.fn();
     app.emitter.on({ openTableProperties });
+    openExplorer(app.store);
     await mountMenu({ type: ErdContextMenuType.table, tableId: TABLE_ID });
 
     await click(findItem(rootItems(), 'Table Properties'));
@@ -441,6 +1251,7 @@ describe('ErdContextMenu / table type', () => {
       tableId: TABLE_ID,
     });
     expect(app.store.state.editor.openMap[Open.tableProperties]).toBe(true);
+    expect(explorerViewOf(app.store).open).toBe(true);
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
@@ -511,6 +1322,71 @@ describe('ErdContextMenu / table type', () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
+  describe('Remove color', () => {
+    const MEMO_ID = 'memo-1';
+
+    function seedColors() {
+      seedTable();
+      app.store.dispatchSync(
+        addTableAction({ id: 'table-2', ui: { x: 400, y: 0, zIndex: 2 } }),
+        addMemoAction({ id: MEMO_ID, ui: { x: 0, y: 400, zIndex: 3 } }),
+        changeTableColorAction({
+          id: TABLE_ID,
+          color: '#ff0000',
+          prevColor: '',
+        }),
+        changeMemoColorAction({ id: MEMO_ID, color: '#00ff00', prevColor: '' })
+      );
+    }
+
+    it('shows under Color while the selection holds a color, without an icon', async () => {
+      seedColors();
+      app.store.dispatchSync(selectAction({ [TABLE_ID]: SelectType.table }));
+      await mountMenu({ type: ErdContextMenuType.table, tableId: TABLE_ID });
+
+      expect(labelsOf(rootItems())).toEqual([
+        'Primary KeyAlt + K',
+        'Table PropertiesAlt + Space',
+        'Focus on this tableAlt + F',
+        'Derive Physical Names Again',
+        'Color',
+        'Remove color',
+        'Group selected tablesTG',
+        'DeleteDelete',
+      ]);
+      expect(findItem(rootItems(), 'Remove color').querySelector('svg')).toBe(
+        null
+      );
+    });
+
+    it('clears the color of every selected table and memo, and closes', async () => {
+      seedColors();
+      app.store.dispatchSync(
+        selectAction({
+          [TABLE_ID]: SelectType.table,
+          'table-2': SelectType.table,
+          [MEMO_ID]: SelectType.memo,
+        })
+      );
+      await mountMenu({ type: ErdContextMenuType.table, tableId: TABLE_ID });
+
+      await click(findItem(rootItems(), 'Remove color'));
+
+      const { tableEntities, memoEntities } = app.store.state.collections;
+      expect(tableEntities[TABLE_ID].ui.color).toBe('');
+      expect(memoEntities[MEMO_ID].ui.color).toBe('');
+      expect(onClose).toHaveBeenCalledTimes(1);
+    });
+
+    it('stays out while no selected table or memo has a color', async () => {
+      seedColors();
+      app.store.dispatchSync(selectAction({ 'table-2': SelectType.table }));
+      await mountMenu({ type: ErdContextMenuType.table, tableId: 'table-2' });
+
+      expect(labelsOf(rootItems())).not.toContain('Remove color');
+    });
+  });
+
   it('does not open the color picker for an unknown table', async () => {
     const openColorPicker = vi.fn();
     app.emitter.on({ openColorPicker });
@@ -539,6 +1415,141 @@ describe('ErdContextMenu / table type', () => {
   });
 });
 
+describe('ErdContextMenu / memo type', () => {
+  const MEMO_ID = 'memo-1';
+  const TABLE_ID = 'table-1';
+
+  function seedMemo() {
+    app.store.dispatchSync(
+      addMemoAction({ id: MEMO_ID, ui: { x: 0, y: 0, zIndex: 1 } }),
+      changeMemoColorAction({ id: MEMO_ID, color: '#ff8800', prevColor: '' }),
+      addTableAction({ id: TABLE_ID, ui: { x: 400, y: 0, zIndex: 2 } })
+    );
+  }
+
+  it('renders the memo level menu entries', async () => {
+    seedMemo();
+    await mountMenu({ type: ErdContextMenuType.memo, memoId: MEMO_ID });
+
+    expect(labelsOf(rootItems())).toEqual(['Color', 'DeleteDelete']);
+    expect(iconNameOf(findItem(rootItems(), 'Color'))).toBe('palette');
+    expect(findItem(rootItems(), 'Delete').querySelector('svg')).toBeNull();
+  });
+
+  it('lists no row to a readonly editor, and its rows again once writable', async () => {
+    const flags = createTurningApp();
+    seedMemo();
+    flags.readonly = true;
+    await mountMenu({ type: ErdContextMenuType.memo, memoId: MEMO_ID });
+    expect(rootItems()).toEqual([]);
+
+    flags.readonly = false;
+    await flush();
+    expect(labelsOf(rootItems())).toEqual(['Color', 'DeleteDelete']);
+  });
+
+  it('opens the color picker on the memo color at the pointer position', async () => {
+    seedMemo();
+    const openColorPicker = vi.fn();
+    app.emitter.on({ openColorPicker });
+    await mountMenu({ type: ErdContextMenuType.memo, memoId: MEMO_ID });
+
+    await click(findItem(rootItems(), 'Color'), { clientX: 56, clientY: 78 });
+
+    expect(openColorPicker).toHaveBeenCalledTimes(1);
+    expect(openColorPicker.mock.calls[0][0].payload).toEqual({
+      x: 56,
+      y: 78,
+      color: '#ff8800',
+    });
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('offers Remove color under Color while the memo is a colored selection, and clears it', async () => {
+    seedMemo();
+    app.store.dispatchSync(selectAction({ [MEMO_ID]: SelectType.memo }));
+    await mountMenu({ type: ErdContextMenuType.memo, memoId: MEMO_ID });
+
+    expect(labelsOf(rootItems())).toEqual([
+      'Color',
+      'Remove color',
+      'DeleteDelete',
+    ]);
+    await click(findItem(rootItems(), 'Remove color'));
+
+    expect(app.store.state.collections.memoEntities[MEMO_ID].ui.color).toBe('');
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not open the color picker for an unknown memo', async () => {
+    const openColorPicker = vi.fn();
+    app.emitter.on({ openColorPicker });
+    await mountMenu({ type: ErdContextMenuType.memo, memoId: 'missing' });
+
+    await click(findItem(rootItems(), 'Color'));
+
+    expect(openColorPicker).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('deletes the memo it was raised over alone, and closes', async () => {
+    seedMemo();
+    app.store.dispatchSync(selectAction({ [TABLE_ID]: SelectType.table }));
+    await mountMenu({ type: ErdContextMenuType.memo, memoId: MEMO_ID });
+
+    await click(findItem(rootItems(), 'Delete'));
+
+    expect(app.store.state.doc.memoIds).toEqual([]);
+    expect(app.store.state.doc.tableIds).toEqual([TABLE_ID]);
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('names the memo alone while it is the whole selection', async () => {
+    seedMemo();
+    app.store.dispatchSync(selectAction({ [MEMO_ID]: SelectType.memo }));
+    await mountMenu({ type: ErdContextMenuType.memo, memoId: MEMO_ID });
+
+    expect(labelsOf(rootItems()).at(-1)).toBe('DeleteDelete');
+    await click(findItem(rootItems(), 'Delete'));
+
+    expect(app.store.state.doc.memoIds).toEqual([]);
+    expect(app.store.state.doc.tableIds).toEqual([TABLE_ID]);
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('names the selection the memo is one of and deletes all of it', async () => {
+    const OTHER_MEMO_ID = 'memo-2';
+    seedMemo();
+    app.store.dispatchSync(
+      addMemoAction({ id: OTHER_MEMO_ID, ui: { x: 0, y: 400, zIndex: 3 } }),
+      selectAction({ [MEMO_ID]: SelectType.memo, [TABLE_ID]: SelectType.table })
+    );
+    await mountMenu({ type: ErdContextMenuType.memo, memoId: MEMO_ID });
+
+    expect(labelsOf(rootItems()).at(-1)).toBe('Delete selectedDelete');
+    await click(findItem(rootItems(), 'Delete selected'));
+
+    expect(app.store.state.doc.memoIds).toEqual([OTHER_MEMO_ID]);
+    expect(app.store.state.doc.tableIds).toEqual([]);
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('ignores every memo action when no memo id is given', async () => {
+    seedMemo();
+    const openColorPicker = vi.fn();
+    app.emitter.on({ openColorPicker });
+    await mountMenu({ type: ErdContextMenuType.memo });
+
+    for (const item of rootItems()) {
+      await click(item);
+    }
+
+    expect(openColorPicker).not.toHaveBeenCalled();
+    expect(app.store.state.doc.memoIds).toEqual([MEMO_ID]);
+    expect(onClose).not.toHaveBeenCalled();
+  });
+});
+
 describe('ErdContextMenu / relationship type', () => {
   const RELATIONSHIP_ID = 'relationship-1';
 
@@ -560,7 +1571,184 @@ describe('ErdContextMenu / relationship type', () => {
       relationshipId: RELATIONSHIP_ID,
     });
 
-    expect(labelsOf(rootItems())).toEqual(['Relationship Type', 'Delete']);
+    expect(labelsOf(rootItems())).toEqual([
+      'Relationship Type',
+      'On Delete',
+      'On Update',
+      'Map Columns',
+      'Delete',
+    ]);
+  });
+
+  it('lists no row to a readonly editor, Map Columns and Delete among them', async () => {
+    app = createTestAppContext({ getReadonly: () => true });
+    seedRelationship();
+    await mountMenu({
+      type: ErdContextMenuType.relationship,
+      relationshipId: RELATIONSHIP_ID,
+    });
+
+    expect(rootItems()).toEqual([]);
+  });
+
+  it('opens Map Columns on the relationship: the session first, then the open map', async () => {
+    seedRelationship();
+    openExplorer(app.store);
+    const openings: unknown[] = [];
+    app.emitter.on({
+      openMapColumns: ({ payload }) => {
+        openings.push(payload);
+        expect(app.store.state.editor.openMap[Open.mapColumns]).toBeFalsy();
+      },
+    });
+    await mountMenu({
+      type: ErdContextMenuType.relationship,
+      relationshipId: RELATIONSHIP_ID,
+    });
+
+    await click(findItem(rootItems(), 'Map Columns'));
+
+    expect(openings).toEqual([
+      { mode: 'edit', relationshipId: RELATIONSHIP_ID },
+    ]);
+    expect(app.store.state.editor.openMap[Open.mapColumns]).toBe(true);
+    expect(explorerViewOf(app.store).open).toBe(true);
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('ends a draw still armed before it opens Map Columns, so its buttons do not come back once it closes', async () => {
+    seedRelationship();
+    app.store.dispatchSync(
+      drawStartRelationshipAction({ relationshipType: RelationshipType.OneN })
+    );
+    let armedAtOpening: unknown = 'not opened';
+    app.emitter.on({
+      openMapColumns: () => {
+        armedAtOpening = app.store.state.editor.drawRelationship;
+      },
+    });
+    await mountMenu({
+      type: ErdContextMenuType.relationship,
+      relationshipId: RELATIONSHIP_ID,
+    });
+
+    await click(findItem(rootItems(), 'Map Columns'));
+
+    expect(armedAtOpening).toBeNull();
+    expect(app.store.state.editor.drawRelationship).toBeNull();
+    expect(app.store.state.editor.openMap[Open.mapColumns]).toBe(true);
+  });
+
+  it('opens nothing from Map Columns without a relationship id', async () => {
+    seedRelationship();
+    const openings = vi.fn();
+    app.emitter.on({ openMapColumns: openings });
+    await mountMenu({ type: ErdContextMenuType.relationship });
+
+    await click(findItem(rootItems(), 'Map Columns'));
+
+    expect(openings).not.toHaveBeenCalled();
+    expect(app.store.state.editor.openMap[Open.mapColumns]).toBeFalsy();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['On Delete', 'onDelete'],
+    ['On Update', 'onUpdate'],
+  ] as const)(
+    'sets the %s action from its submenu, checking the one it holds',
+    async (label, field) => {
+      app.store.dispatchSync(
+        changeDatabaseAction({ value: Database.PostgreSQL })
+      );
+      seedRelationship();
+      await mountMenu({
+        type: ErdContextMenuType.relationship,
+        relationshipId: RELATIONSHIP_ID,
+      });
+      const checkedOf = (items: HTMLElement[]) =>
+        labelsOf(items.filter(item => item.querySelector('svg')));
+
+      let items = itemsOf(await openSubMenu(findItem(rootItems(), label)));
+
+      expect(labelsOf(items)).toEqual([
+        'Not set',
+        'NO ACTION',
+        'CASCADE',
+        'SET NULL',
+        'SET DEFAULT',
+        'RESTRICT',
+      ]);
+      expect(checkedOf(items)).toEqual(['Not set']);
+
+      await click(findItem(items, 'CASCADE'));
+
+      const relationship = query(app.store.state.collections)
+        .collection('relationshipEntities')
+        .selectById(RELATIONSHIP_ID);
+      expect(relationship?.[field]).toBe(ReferentialAction.cascade);
+      expect(onClose).not.toHaveBeenCalled();
+
+      items = itemsOf(await openSubMenu(findItem(rootItems(), label)));
+      expect(checkedOf(items)).toEqual(['CASCADE']);
+    }
+  );
+
+  it.each([
+    ['MySQL', Database.MySQL, 'On Delete', ['SET DEFAULT not in MySQL']],
+    [
+      'Oracle',
+      Database.Oracle,
+      'On Update',
+      [
+        'NO ACTION not in Oracle',
+        'CASCADE not in Oracle',
+        'SET NULL not in Oracle',
+        'SET DEFAULT not in Oracle',
+        'RESTRICT not in Oracle',
+      ],
+    ],
+  ] as const)(
+    'notes the %s actions its DDL would drop, keeping them choosable',
+    async (_name, database, label, noted) => {
+      app.store.dispatchSync(changeDatabaseAction({ value: database }));
+      seedRelationship();
+      await mountMenu({
+        type: ErdContextMenuType.relationship,
+        relationshipId: RELATIONSHIP_ID,
+      });
+
+      const items = itemsOf(await openSubMenu(findItem(rootItems(), label)));
+
+      // The note sits in the item's right slot, after the name.
+      const notes = items.flatMap(item => {
+        const note = item.querySelector('span')?.textContent ?? '';
+        const [text] = labelsOf([item]);
+        return note ? [`${text.slice(0, -note.length).trim()} ${note}`] : [];
+      });
+      expect(notes).toEqual(noted);
+
+      await click(
+        findItem(items, noted[noted.length - 1].split(' not in ')[0])
+      );
+
+      const relationship = query(app.store.state.collections)
+        .collection('relationshipEntities')
+        .selectById(RELATIONSHIP_ID);
+      expect(
+        relationship?.[label === 'On Delete' ? 'onDelete' : 'onUpdate']
+      ).not.toBe(ReferentialAction.none);
+    }
+  );
+
+  it('renders empty action submenus without a relationship id', async () => {
+    await mountMenu({ type: ErdContextMenuType.relationship });
+
+    for (const label of ['On Delete', 'On Update']) {
+      const sub = await openSubMenu(findItem(rootItems(), label));
+
+      expect(itemsOf(sub)).toHaveLength(0);
+    }
   });
 
   it('changes the relationship type from the submenu: a choice keeps the menu open, an action closes it', async () => {
@@ -618,5 +1806,605 @@ describe('ErdContextMenu / relationship type', () => {
 
     expect(app.store.state.doc.relationshipIds).toContain(RELATIONSHIP_ID);
     expect(onClose).not.toHaveBeenCalled();
+  });
+});
+
+describe('ErdContextMenu / table groups', () => {
+  const GROUP_ID = 'group-1';
+  const OTHER_GROUP_ID = 'group-2';
+
+  /** A readonly switch a spec flips after its seed, which a readonly store would drop. */
+  let locked = false;
+
+  beforeEach(() => {
+    locked = false;
+    app = createTestAppContext({ getReadonly: () => locked });
+  });
+
+  function seedGroups() {
+    app.store.dispatchSync(
+      addTableGroupAction({
+        id: GROUP_ID,
+        ui: { x: 0, y: 0, width: 600, height: 400, zIndex: 1 },
+      }),
+      addTableGroupAction({
+        id: OTHER_GROUP_ID,
+        ui: { x: 800, y: 0, width: 600, height: 400, zIndex: 2 },
+      }),
+      addTableAction({ id: 'a', ui: { x: 40, y: 80, zIndex: 3 } }),
+      addTableAction({ id: 'b', ui: { x: 300, y: 80, zIndex: 4 } }),
+      addTableAction({ id: 'c', ui: { x: 900, y: 80, zIndex: 5 } }),
+      addTableAction({ id: 'loose', ui: { x: 0, y: 900, zIndex: 6 } }),
+      changeTableGroupAction({ id: 'a', value: GROUP_ID }),
+      changeTableGroupAction({ id: 'b', value: GROUP_ID }),
+      changeTableGroupAction({ id: 'c', value: OTHER_GROUP_ID })
+    );
+  }
+
+  const groupOf = (tableId: string) =>
+    app.store.state.collections.tableEntities[tableId].groupId;
+
+  const hideGroups = () =>
+    app.store.dispatchSync(
+      changeShowAction({ show: Show.hideTableGroup, value: true })
+    );
+
+  describe('on the canvas', () => {
+    it('arms the draw mode from New Table Group, drawn with the group icon, and closes', async () => {
+      await mountMenu();
+
+      const item = findItem(rootItems(), 'New Table Group');
+      expect(iconNameOf(item)).toBe('group');
+      expect(item.querySelector('.kbd')?.textContent?.trim()).toBe('Alt + G');
+      await click(item);
+
+      expect(app.store.state.editor.drawTableGroup).toBe(true);
+      expect(app.store.state.doc.tableGroupIds).toEqual([]);
+      expect(onClose).toHaveBeenCalledTimes(1);
+    });
+
+    it('offers no New Table Group to a readonly editor or while groups are hidden', async () => {
+      locked = true;
+      await mountMenu();
+      expect(labelsOf(rootItems())).not.toContain('New Table GroupAlt + G');
+      mounted?.unmount();
+
+      locked = false;
+      hideGroups();
+      await mountMenu();
+      expect(labelsOf(rootItems())).not.toContain('New Table GroupAlt + G');
+    });
+  });
+
+  describe('on a table', () => {
+    it('groups the selected tables, out of any group they were in, and opens the new name', async () => {
+      seedGroups();
+      app.store.dispatchSync(
+        selectAction({ b: SelectType.table, loose: SelectType.table })
+      );
+      await mountMenu({ type: ErdContextMenuType.table, tableId: 'b' });
+
+      const item = findItem(rootItems(), 'Group selected tables');
+      expect(iconNameOf(item)).toBe('group');
+      const keys = item.querySelector('.kbd')?.children ?? [];
+      expect(Array.from(keys, key => key.textContent?.trim())).toEqual([
+        'T',
+        'G',
+      ]);
+      await click(item);
+
+      const id = app.store.state.doc.tableGroupIds[2];
+      expect(id).toBeDefined();
+      expect(groupOf('b')).toBe(id);
+      expect(groupOf('loose')).toBe(id);
+      expect(groupOf('a')).toBe(GROUP_ID);
+      expect(app.store.state.editor.selectedMap).toEqual({
+        [id]: SelectType.tableGroup,
+      });
+      expect(app.store.state.editor.editTableGroupId).toBe(id);
+      expect(onClose).toHaveBeenCalledTimes(1);
+    });
+
+    it('takes every selected table out of its group from Remove from group, the rest kept', async () => {
+      seedGroups();
+      app.store.dispatchSync(
+        selectAction({
+          a: SelectType.table,
+          c: SelectType.table,
+          loose: SelectType.table,
+        })
+      );
+      await mountMenu({ type: ErdContextMenuType.table, tableId: 'a' });
+
+      const item = findItem(rootItems(), 'Remove from group');
+      expect(iconNameOf(item)).toBe('ungroup');
+      await click(item);
+
+      expect(groupOf('a')).toBe('');
+      expect(groupOf('c')).toBe('');
+      expect(groupOf('b')).toBe(GROUP_ID);
+      expect(app.store.state.doc.tableGroupIds).toEqual([
+        GROUP_ID,
+        OTHER_GROUP_ID,
+      ]);
+      expect(onClose).toHaveBeenCalledTimes(1);
+    });
+
+    it('lists both rows above Delete, Remove from group only while a selected table is in a group', async () => {
+      seedGroups();
+      app.store.dispatchSync(selectAction({ loose: SelectType.table }));
+      await mountMenu({ type: ErdContextMenuType.table, tableId: 'loose' });
+      expect(labelsOf(rootItems())).toEqual([
+        'Primary KeyAlt + K',
+        'Table PropertiesAlt + Space',
+        'Focus on this tableAlt + F',
+        'Derive Physical Names Again',
+        'Color',
+        'Group selected tablesTG',
+        'DeleteDelete',
+      ]);
+      mounted?.unmount();
+
+      app.store.dispatchSync(selectAction({ a: SelectType.table }));
+      await mountMenu({ type: ErdContextMenuType.table, tableId: 'a' });
+      expect(labelsOf(rootItems()).slice(-3)).toEqual([
+        'Group selected tablesTG',
+        'Remove from group',
+        'Delete selectedDelete',
+      ]);
+    });
+
+    it('offers neither to a readonly editor, and no grouping while groups are hidden', async () => {
+      seedGroups();
+      app.store.dispatchSync(selectAction({ a: SelectType.table }));
+      locked = true;
+      await mountMenu({ type: ErdContextMenuType.table, tableId: 'a' });
+      expect(labelsOf(rootItems())).not.toContain('Group selected tablesTG');
+      expect(labelsOf(rootItems())).not.toContain('Remove from group');
+      mounted?.unmount();
+
+      locked = false;
+      hideGroups();
+      await mountMenu({ type: ErdContextMenuType.table, tableId: 'a' });
+      expect(labelsOf(rootItems())).not.toContain('Group selected tablesTG');
+      expect(labelsOf(rootItems())).toContain('Remove from group');
+    });
+
+    it('groups nothing while the selection holds no table the document lists', async () => {
+      seedGroups();
+      app.store.dispatchSync(selectAction({ ghost: SelectType.table }));
+      await mountMenu({ type: ErdContextMenuType.table, tableId: 'ghost' });
+
+      expect(labelsOf(rootItems())).not.toContain('Group selected tablesTG');
+      expect(labelsOf(rootItems())).not.toContain('Remove from group');
+    });
+  });
+
+  describe('on a group', () => {
+    const mountGroupMenu = () =>
+      mountMenu({
+        type: ErdContextMenuType.tableGroup,
+        tableGroupId: GROUP_ID,
+      });
+
+    it('lists Select tables, Rename, Color and Delete, which names the key', async () => {
+      seedGroups();
+      app.store.dispatchSync(
+        selectAction({ [GROUP_ID]: SelectType.tableGroup })
+      );
+      await mountGroupMenu();
+
+      expect(labelsOf(rootItems())).toEqual([
+        'Select tables',
+        'Rename',
+        'Color',
+        'DeleteDelete',
+      ]);
+      expect(iconNameOf(findItem(rootItems(), 'Select tables'))).toBe(
+        'mouse-pointer-2'
+      );
+      expect(iconNameOf(findItem(rootItems(), 'Rename'))).toBe('pencil');
+      expect(iconNameOf(findItem(rootItems(), 'Color'))).toBe('palette');
+      expect(findItem(rootItems(), 'Delete').querySelector('svg')).toBeNull();
+    });
+
+    it("selects the group's tables alone from Select tables", async () => {
+      seedGroups();
+      app.store.dispatchSync(
+        selectAction({
+          [GROUP_ID]: SelectType.tableGroup,
+          c: SelectType.table,
+        })
+      );
+      await mountGroupMenu();
+
+      await click(findItem(rootItems(), 'Select tables'));
+
+      expect(app.store.state.editor.selectedMap).toEqual({
+        a: SelectType.table,
+        b: SelectType.table,
+      });
+      expect(onClose).toHaveBeenCalledTimes(1);
+    });
+
+    it('opens the name editor on the group from Rename, letting the table focus go', async () => {
+      seedGroups();
+      app.store.dispatchSync(
+        focusTableAction({ tableId: 'a', focusType: FocusType.tableName })
+      );
+      await mountGroupMenu();
+
+      await click(findItem(rootItems(), 'Rename'));
+
+      expect(app.store.state.editor.editTableGroupId).toBe(GROUP_ID);
+      expect(app.store.state.editor.focusTable).toBeNull();
+      expect(onClose).toHaveBeenCalledTimes(1);
+    });
+
+    it('opens the color picker on the group color at the pointer position', async () => {
+      seedGroups();
+      app.store.dispatchSync(
+        changeTableGroupColorAction({
+          id: GROUP_ID,
+          color: '#3b82f6',
+          prevColor: '',
+        })
+      );
+      const openColorPicker = vi.fn();
+      app.emitter.on({ openColorPicker });
+      await mountGroupMenu();
+
+      await click(findItem(rootItems(), 'Color'), {
+        clientX: 21,
+        clientY: 43,
+      });
+
+      expect(openColorPicker).toHaveBeenCalledTimes(1);
+      expect(openColorPicker.mock.calls[0][0].payload).toEqual({
+        x: 21,
+        y: 43,
+        color: '#3b82f6',
+      });
+      expect(onClose).toHaveBeenCalledTimes(1);
+    });
+
+    it('offers Remove color while the group is a colored selection, and clears it', async () => {
+      seedGroups();
+      app.store.dispatchSync(
+        changeTableGroupColorAction({
+          id: GROUP_ID,
+          color: '#3b82f6',
+          prevColor: '',
+        }),
+        selectAction({ [GROUP_ID]: SelectType.tableGroup })
+      );
+      await mountGroupMenu();
+
+      expect(labelsOf(rootItems())).toEqual([
+        'Select tables',
+        'Rename',
+        'Color',
+        'Remove color',
+        'DeleteDelete',
+      ]);
+      await click(findItem(rootItems(), 'Remove color'));
+
+      expect(
+        app.store.state.collections.tableGroupEntities[GROUP_ID].color
+      ).toBe('');
+      expect(onClose).toHaveBeenCalledTimes(1);
+    });
+
+    it('deletes the group it was raised over alone, keeping its tables', async () => {
+      seedGroups();
+      app.store.dispatchSync(
+        selectAction({ [GROUP_ID]: SelectType.tableGroup })
+      );
+      await mountGroupMenu();
+
+      await click(findItem(rootItems(), 'Delete'));
+
+      expect(app.store.state.doc.tableGroupIds).toEqual([OTHER_GROUP_ID]);
+      expect(app.store.state.doc.tableIds).toEqual(['a', 'b', 'c', 'loose']);
+      expect(groupOf('a')).toBe('');
+      expect(groupOf('c')).toBe(OTHER_GROUP_ID);
+      expect(onClose).toHaveBeenCalledTimes(1);
+    });
+
+    it('names the selection the group is one of and deletes all of it', async () => {
+      seedGroups();
+      app.store.dispatchSync(
+        selectAction({
+          [GROUP_ID]: SelectType.tableGroup,
+          loose: SelectType.table,
+        })
+      );
+      await mountGroupMenu();
+
+      expect(labelsOf(rootItems()).at(-1)).toBe('Delete selectedDelete');
+      await click(findItem(rootItems(), 'Delete selected'));
+
+      expect(app.store.state.doc.tableGroupIds).toEqual([OTHER_GROUP_ID]);
+      expect(app.store.state.doc.tableIds).toEqual(['a', 'b', 'c']);
+      expect(onClose).toHaveBeenCalledTimes(1);
+    });
+
+    it('lists no row to a readonly editor, Select tables among them, since a reader selects by a jump alone', async () => {
+      seedGroups();
+      locked = true;
+      await mountGroupMenu();
+
+      expect(rootItems()).toEqual([]);
+    });
+
+    it('opens no name editor once the editor turns readonly under an open menu', async () => {
+      seedGroups();
+      await mountGroupMenu();
+      locked = true;
+
+      await click(findItem(rootItems(), 'Rename'));
+
+      expect(app.store.state.editor.editTableGroupId).toBeNull();
+      expect(onClose).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not open the color picker for an unknown group', async () => {
+      const openColorPicker = vi.fn();
+      app.emitter.on({ openColorPicker });
+      await mountMenu({
+        type: ErdContextMenuType.tableGroup,
+        tableGroupId: 'missing',
+      });
+
+      await click(findItem(rootItems(), 'Color'));
+
+      expect(openColorPicker).not.toHaveBeenCalled();
+      expect(onClose).not.toHaveBeenCalled();
+    });
+
+    it('ignores every group action when no group id is given', async () => {
+      seedGroups();
+      const openColorPicker = vi.fn();
+      app.emitter.on({ openColorPicker });
+      app.store.dispatchSync(selectAction({ loose: SelectType.table }));
+      await mountMenu({ type: ErdContextMenuType.tableGroup });
+
+      for (const item of rootItems()) {
+        await click(item);
+      }
+
+      expect(openColorPicker).not.toHaveBeenCalled();
+      expect(app.store.state.editor.selectedMap).toEqual({
+        loose: SelectType.table,
+      });
+      expect(app.store.state.editor.editTableGroupId).toBeNull();
+      expect(app.store.state.doc.tableGroupIds).toEqual([
+        GROUP_ID,
+        OTHER_GROUP_ID,
+      ]);
+      expect(onClose).not.toHaveBeenCalled();
+    });
+  });
+});
+
+describe('ErdContextMenu / a readonly reader', () => {
+  it('lists rows in the menus READING_MENU_TYPES names alone, which the ERD tab raises for it', async () => {
+    const flags = createTurningApp();
+    flags.readonly = true;
+
+    const listed: Array<{ type: ErdContextMenuType; rows: boolean }> = [];
+    for (const type of Object.values(ErdContextMenuType)) {
+      await mountMenu({ type });
+      listed.push({ type, rows: rootItems().length > 0 });
+      mounted?.unmount();
+      mounted = null;
+    }
+
+    expect(listed).toEqual(
+      Object.values(ErdContextMenuType).map(type => ({
+        type,
+        rows: READING_MENU_TYPES.has(type),
+      }))
+    );
+    expect([...READING_MENU_TYPES]).toEqual([
+      ErdContextMenuType.ERD,
+      ErdContextMenuType.table,
+    ]);
+  });
+});
+
+describe('ErdContextMenu / language', () => {
+  let teardown: (() => void) | null = null;
+
+  afterEach(() => {
+    teardown?.();
+    teardown = null;
+  });
+
+  /** The language the element would provide, English until a spec switches it. */
+  function provideLanguage() {
+    const i18n = createTestI18n('en');
+    const provider = provideI18n(document.body, i18n);
+    teardown = () => provider.destroy();
+
+    return async () => {
+      Object.assign(i18n, createI18n('ko-KR', pseudoMessages('ko')));
+      await flush();
+    };
+  }
+
+  it('names every canvas row in the language the element shows, following a switch', async () => {
+    const switchLanguage = provideLanguage();
+    await mountMenu();
+
+    expect(labelsOf(rootItems())[0]).toBe('New TableAlt + N');
+    await switchLanguage();
+
+    expect(labelsOf(rootItems())).toEqual([
+      'ko:New TableAlt + N',
+      'ko:New MemoAlt + M',
+      'ko:New Table GroupAlt + G',
+      'ko:Toggle ExplorerCtrl + F',
+      'ko:Relationship',
+      'ko:View Option',
+      'ko:Name View',
+      'ko:Database',
+      'ko:Import',
+      'ko:Import and Add',
+      'ko:Export',
+      'ko:Auto Layout',
+      'ko:Diff Viewer',
+    ]);
+  });
+
+  it('translates the submenus a shared list names, keeping vendors and formats as written', async () => {
+    const switchLanguage = provideLanguage();
+    await mountMenu();
+    await switchLanguage();
+
+    const labelsUnder = async (label: string) =>
+      labelsOf(itemsOf(await openSubMenu(findItem(rootItems(), label))));
+
+    expect(await labelsUnder('ko:Relationship')).toEqual([
+      'ko:Zero OneCtrl + Alt + 1',
+      'ko:Zero NCtrl + Alt + 2',
+      'ko:One OnlyCtrl + Alt + 3',
+      'ko:One NCtrl + Alt + 4',
+    ]);
+    expect((await labelsUnder('ko:View Option')).slice(0, 3)).toEqual([
+      'ko:Table Comment',
+      'ko:Column Comment',
+      'ko:DataType',
+    ]);
+    expect(await labelsUnder('ko:Name View')).toEqual([
+      'ko:Physical Names',
+      'ko:Logical Names',
+      'ko:Both Names',
+    ]);
+    expect(await labelsUnder('ko:Database')).toContain('PostgreSQL');
+    expect(await labelsUnder('ko:Import')).toEqual([
+      'json',
+      'ko:Schema SQL',
+      'GraphQL',
+      'DBML',
+      'AML',
+    ]);
+    expect(await labelsUnder('ko:Import and Add')).toContain('ko:Schema SQL');
+    expect(await labelsUnder('ko:Export')).toEqual([
+      'json',
+      'ko:Schema SQL',
+      'ko:Image',
+    ]);
+    expect(await labelsUnder('ko:Auto Layout')).toEqual([
+      'ko:Force',
+      'ko:Flow',
+      'ko:Tree - vertical',
+      'ko:Tree - horizontal',
+    ]);
+  });
+
+  it('names a table row and its Delete in the language the element shows', async () => {
+    const switchLanguage = provideLanguage();
+    app.store.dispatchSync(
+      addTableAction({ id: 'table-1', ui: { x: 0, y: 0, zIndex: 1 } }),
+      addColumnAction({ id: 'column-1', tableId: 'table-1' }),
+      addColumnAction({ id: 'column-2', tableId: 'table-1' }),
+      selectAction({ 'table-1': SelectType.table })
+    );
+    for (const [columnId, $mod] of [
+      ['column-1', false],
+      ['column-2', true],
+    ] as const) {
+      app.store.dispatchSync(
+        focusColumnAction({
+          tableId: 'table-1',
+          columnId,
+          focusType: FocusType.columnName,
+          $mod,
+          shiftKey: false,
+        })
+      );
+    }
+    await mountMenu({
+      type: ErdContextMenuType.table,
+      tableId: 'table-1',
+      columnId: 'column-1',
+    });
+    await switchLanguage();
+
+    expect(labelsOf(rootItems())).toEqual([
+      'ko:Primary Key on selected columnsAlt + K',
+      'ko:Table PropertiesAlt + Space',
+      'ko:Focus on this tableAlt + F',
+      'ko:Derive Physical Name Again',
+      'ko:Color',
+      'ko:Group selected tablesTG',
+      'ko:Delete columnsDelete',
+    ]);
+  });
+
+  it('names the rows over a colored selection of tables in the language the element shows', async () => {
+    const switchLanguage = provideLanguage();
+    app.store.dispatchSync(
+      addTableAction({ id: 'table-1', ui: { x: 0, y: 0, zIndex: 1 } }),
+      addTableAction({ id: 'table-2', ui: { x: 400, y: 0, zIndex: 2 } }),
+      changeTableColorAction({
+        id: 'table-1',
+        color: '#ff0000',
+        prevColor: '',
+      }),
+      selectAction({
+        'table-1': SelectType.table,
+        'table-2': SelectType.table,
+      })
+    );
+    await mountMenu({ type: ErdContextMenuType.table, tableId: 'table-1' });
+    await switchLanguage();
+
+    expect(labelsOf(rootItems())).toEqual([
+      'ko:Primary KeyAlt + K',
+      'ko:Table PropertiesAlt + Space',
+      'ko:Focus on selected tablesAlt + F',
+      'ko:Derive Physical Names Again',
+      'ko:Color',
+      'ko:Remove color',
+      'ko:Group selected tablesTG',
+      'ko:Delete selectedDelete',
+    ]);
+  });
+
+  it('names a memo row and a relationship row in the language the element shows', async () => {
+    const switchLanguage = provideLanguage();
+    app.store.dispatchSync(
+      addMemoAction({ id: 'memo-1', ui: { x: 0, y: 0, zIndex: 1 } }),
+      addRelationshipAction({
+        id: 'relationship-1',
+        relationshipType: RelationshipType.ZeroOne,
+        start: { tableId: 'table-a', columnIds: ['column-a'] },
+        end: { tableId: 'table-b', columnIds: ['column-b'] },
+      })
+    );
+    await switchLanguage();
+
+    await mountMenu({ type: ErdContextMenuType.memo, memoId: 'memo-1' });
+    expect(labelsOf(rootItems())).toEqual(['ko:Color', 'ko:DeleteDelete']);
+    mounted?.unmount();
+
+    await mountMenu({
+      type: ErdContextMenuType.relationship,
+      relationshipId: 'relationship-1',
+    });
+    expect(labelsOf(rootItems())).toEqual([
+      'ko:Relationship Type',
+      'ko:On Delete',
+      'ko:On Update',
+      'ko:Map Columns',
+      'ko:Delete',
+    ]);
+    expect(
+      labelsOf(
+        itemsOf(await openSubMenu(findItem(rootItems(), 'ko:On Delete')))
+      )[0]
+    ).toBe('ko:Not set');
   });
 });

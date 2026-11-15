@@ -2,9 +2,10 @@ import { describe, expect, it, vi } from 'vite-plus/test';
 
 import {
   addOperator,
+  createSchema,
+  isSettingLocked,
   migrateScrollToOrigin,
   parser,
-  parserV2,
   query,
   removeOperator,
   replaceOperator,
@@ -12,24 +13,56 @@ import {
   schemaV2Parser,
   SchemaV3Constants,
   schemaV3Parser,
+  setSettingLock,
+  toDocumentJson,
   toJson,
 } from '@/index';
 import { LWW } from '@/v3/schema/lww';
 
 describe('public entry point', () => {
   it('round trips a v3 document through parser and toJson', () => {
-    const schema = parser('{"version":"3.0.0","settings":{"width":4000}}');
+    const schema = parser(
+      '{"version":"3.0.0","settings":{"databaseName":"shop"}}'
+    );
 
-    expect(JSON.parse(toJson(schema)).settings.width).toBe(4000);
+    expect(JSON.parse(toJson(schema)).settings.databaseName).toBe('shop');
   });
 
-  it('exposes the v2 parser and the v2 downgrade', () => {
+  it('exposes the storage form a file holds', () => {
+    const schema = parser(
+      '{"version":"3.0.0","settings":{"databaseName":"shop"}}'
+    );
+    const json = toDocumentJson(schema);
+
+    expect(JSON.parse(json).settings.databaseName).toBe('shop');
+    expect(json.endsWith('}\n')).toBe(true);
+    expect(toDocumentJson(parser(json))).toBe(json);
+  });
+
+  it('exposes the v2 parser', () => {
     expect(schemaV2Parser({}).canvas.version).toBe('2.2.11');
-    expect(parserV2('{"canvas":{"width":3000}}').canvas.width).toBe(3000);
   });
 
   it('exposes the v3 parser', () => {
     expect(schemaV3Parser({}).version).toBe('3.0.0');
+  });
+
+  it('exposes the factory of a document created from nothing', () => {
+    const { lockSettings } = createSchema().settings;
+
+    expect(lockSettings).toBe(63);
+    expect(parser(toJson(createSchema())).settings.lockSettings).toBe(
+      lockSettings
+    );
+  });
+
+  it('exposes the lock reads, the name view bit read the other way round', () => {
+    const { lockSettings } = createSchema().settings;
+    const { language, unlockNameViewMode } = SchemaV3Constants.LockSettingType;
+
+    expect(isSettingLocked(lockSettings, language)).toBe(true);
+    expect(isSettingLocked(lockSettings, unlockNameViewMode)).toBe(true);
+    expect(setSettingLock(lockSettings, unlockNameViewMode, false)).toBe(127);
   });
 
   it('exposes the collections query factory', () => {
@@ -70,8 +103,13 @@ describe('public entry point', () => {
   it('exposes both constant bundles', () => {
     expect(SchemaV2Constants.CanvasType.ERD).toBe('ERD');
     expect(SchemaV3Constants.CanvasType.ERD).toBe('ERD');
-    expect(SchemaV3Constants.SaveSettingType.scroll).toBe(1);
+    expect(SchemaV3Constants.LockSettingType.viewport).toBe(1);
     expect(SchemaV3Constants.CANVAS_ZOOM_MAX).toBe(1.5);
+    expect(SchemaV3Constants.DDLScriptPosition.before).toBe('before');
+    expect(SchemaV3Constants.DDLScriptPositionList).toEqual([
+      'before',
+      'after',
+    ]);
   });
 
   it('opens the zoom ceiling in v3 alone, leaving the v2 read path at 1', () => {

@@ -1,9 +1,17 @@
 import { html } from '@dineug/r-html';
 import { afterEach, describe, expect, it } from 'vite-plus/test';
 
-import { flush, mountAndFlush, Mounted } from '@/__test-utils__/index';
+import {
+  createTestI18n,
+  flush,
+  mountAndFlush,
+  Mounted,
+  provideI18n,
+  pseudoMessages,
+} from '@/__test-utils__/index';
 import Shortcuts from '@/components/settings/shortcuts/Shortcuts';
 import * as styles from '@/components/settings/shortcuts/Shortcuts.styles';
+import { createI18n } from '@/i18n/translate';
 import { KeyBindingNameList } from '@/utils/keyboard-shortcut';
 
 let mounted: Mounted | null = null;
@@ -17,13 +25,17 @@ const EXPECTED_COMMANDS = [
   'Editing',
   'Stop',
   'Search',
+  'Toggle Explorer',
   'Undo',
   'Redo',
   'Add Table',
   'Add Column',
   'Add Memo',
+  'Add Table Group',
+  'Group Selected Tables',
   'Remove Table, Memo',
   'Remove Column',
+  'Delete Selection',
   'Primary Key',
   'Select All Table, Memo',
   'Select All Column',
@@ -110,6 +122,36 @@ describe('Shortcuts', () => {
     expect(stopRow.querySelector('.kbd')?.textContent?.trim()).toBe('ESC');
   });
 
+  it('shows Delete Selection on both of its chords', async () => {
+    await setup();
+
+    const kbds = rowByCommand('Delete Selection').querySelectorAll('.kbd');
+
+    expect(Array.from(kbds, kbd => kbd.textContent?.trim())).toEqual([
+      'Delete',
+      '⌫',
+    ]);
+  });
+
+  it('shows Toggle Explorer on $mod+F', async () => {
+    await setup();
+
+    const kbd = rowByCommand('Toggle Explorer').querySelector('.kbd');
+
+    expect(kbd?.textContent?.trim()).toBe('Ctrl + F');
+  });
+
+  it('shows Group Selected Tables as its two presses, T then G', async () => {
+    await setup();
+
+    const kbd = rowByCommand('Group Selected Tables').querySelector('.kbd');
+
+    expect(Array.from(kbd?.children ?? [], key => key.textContent)).toEqual([
+      'T',
+      'G',
+    ]);
+  });
+
   it('renders modifier combinations joined with +', async () => {
     await setup();
 
@@ -150,5 +192,30 @@ describe('Shortcuts', () => {
     expect(zoomInRow.querySelectorAll(`.${styles.shortcutGroup}`)).toHaveLength(
       0
     );
+  });
+
+  it('reads the headings and every command in the language provided, following a switch', async () => {
+    const i18n = createTestI18n('en');
+    const provider = provideI18n(document.body, i18n);
+
+    try {
+      await setup();
+      Object.assign(i18n, createI18n('ko-KR', pseudoMessages('ko')));
+      await flush();
+
+      expect(
+        Array.from(table().querySelectorAll('thead th'), th =>
+          th.textContent?.trim()
+        )
+      ).toEqual(['ko:Command', 'ko:Keybinding']);
+      expect(
+        rows().map(row => row.querySelector('td')?.textContent?.trim())
+      ).toEqual(EXPECTED_COMMANDS.map(command => `ko:${command}`));
+      expect(rows()[0].querySelector('.kbd')?.textContent?.trim()).toBe(
+        'Enter'
+      );
+    } finally {
+      provider.destroy();
+    }
   });
 });

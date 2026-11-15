@@ -1,5 +1,5 @@
 import { query } from '@dineug/erd-editor-schema';
-import { groupBy, head, last, pick } from 'es-toolkit';
+import { groupBy, head, isString, last, pick } from 'es-toolkit';
 
 import { PushStreamHistory, PushUndoHistory } from '@/engine/history.actions';
 
@@ -8,7 +8,10 @@ import {
   addTableAction,
   changeTableColorAction,
   changeTableCommentAction,
+  changeTableGroupAction,
+  changeTableLogicalNameAction,
   changeTableNameAction,
+  changeTableNameDerivedAction,
   moveTableAction,
   moveToTableAction,
   removeTableAction,
@@ -47,6 +50,36 @@ const changeTableName: PushUndoHistory = (
   undoActions.push(changeTableNameAction({ id, value: table.name }));
 };
 
+const changeTableLogicalName: PushUndoHistory = (
+  undoActions,
+  { payload: { id } }: ReturnType<typeof changeTableLogicalNameAction>,
+  { collections }
+) => {
+  const table = query(collections).collection('tableEntities').selectById(id);
+  if (!table) return;
+
+  undoActions.push(
+    changeTableLogicalNameAction({ id, value: table.logicalName })
+  );
+};
+
+/**
+ * Undoes with the flag the table held before the batch, not the flag's
+ * negation, so an undo of a write that changed nothing leaves it as it was.
+ */
+const changeTableNameDerived: PushUndoHistory = (
+  undoActions,
+  { payload: { id } }: ReturnType<typeof changeTableNameDerivedAction>,
+  { collections }
+) => {
+  const table = query(collections).collection('tableEntities').selectById(id);
+  if (!table) return;
+
+  undoActions.push(
+    changeTableNameDerivedAction({ id, value: table.nameDerived })
+  );
+};
+
 const changeTableComment: PushUndoHistory = (
   undoActions,
   { payload: { id } }: ReturnType<typeof changeTableCommentAction>,
@@ -56,6 +89,22 @@ const changeTableComment: PushUndoHistory = (
   if (!table) return;
 
   undoActions.push(changeTableCommentAction({ id, value: table.comment }));
+};
+
+const changeTableGroup: PushUndoHistory = (
+  undoActions,
+  { payload: { id, prevValue } }: ReturnType<typeof changeTableGroupAction>,
+  { collections }
+) => {
+  const table = query(collections).collection('tableEntities').selectById(id);
+  if (!table) return;
+
+  undoActions.push(
+    changeTableGroupAction({
+      id,
+      value: isString(prevValue) ? prevValue : table.groupId,
+    })
+  );
 };
 
 const moveToTable: PushUndoHistory = (
@@ -82,8 +131,11 @@ export const tablePushUndoHistoryMap = {
   [ActionType.removeTable]: removeTable,
   [ActionType.changeTableName]: changeTableName,
   [ActionType.changeTableComment]: changeTableComment,
+  [ActionType.changeTableGroup]: changeTableGroup,
   [ActionType.moveToTable]: moveToTable,
   [ActionType.sortTable]: sortTable,
+  [ActionType.changeTableLogicalName]: changeTableLogicalName,
+  [ActionType.changeTableNameDerived]: changeTableNameDerived,
 };
 
 const moveTable: PushStreamHistory = (undoActions, redoActions, actions) => {

@@ -47,6 +47,7 @@ import {
   nextSortEpoch,
   ROUTE_BBOX_REACH,
 } from '@/utils/draw-relationship';
+import { loopReach } from '@/utils/draw-relationship/loop';
 import { relationshipSort } from '@/utils/draw-relationship/sort';
 
 // A table with no columns and every show flag disabled is 134 x 30, which is
@@ -298,20 +299,6 @@ describe('the culling rect covers the screen it is inverted out of', () => {
     expect(origin).toEqual({ x: options.originX, y: options.originY });
     expect(rect.x + screenWidth).toBeCloseTo(-origin.x / options.zoomLevel);
     expect(rect.y + screenHeight).toBeCloseTo(-origin.y / options.zoomLevel);
-  });
-
-  it('is independent of the canvas box', () => {
-    const state = createState();
-    applyCase(state, DEFECT_CASES[0][1]);
-    state.settings.width = 8000;
-    state.settings.height = 8000;
-    const wide = getCullingRect(state);
-
-    state.settings.width = 2000;
-    state.settings.height = 2000;
-
-    expect(getCullingRect(state)).toEqual(wide);
-    expect(wide).toEqual(createCullingRect(DEFECT_CASES[0][1]));
   });
 });
 
@@ -705,7 +692,7 @@ describe('a relationship is kept for its whole reach (AC-G14)', () => {
   });
 
   it('keeps one whose routed points are all off screen while its anchor is on it', () => {
-    const rect: CullingRect = rectAt(76, 0, 70, 60);
+    const rect: CullingRect = rectAt(64, 0, 70, 60);
     const route = getRoute(relationship) ?? [];
 
     expect(intersects(rect, boxOf(route, PAD))).toBe(false);
@@ -755,13 +742,13 @@ describe('a relationship is kept for its whole reach (AC-G14)', () => {
     expect(isRelationshipVisible(strip, relationship)).toBe(true);
   });
 
-  it('falls back to the anchors and the longest stub for a self relationship', () => {
+  it('reaches as far as its curve can for a self relationship', () => {
     const self = addRelationship(state, 'self', 'A', 'A');
     relationshipSort(state);
 
     expect(getRoute(self)).toBeUndefined();
     expect(getRouteBBox(self)).toEqual(
-      boxOf([self.start, self.end], PAD + MAX_STUB)
+      boxOf([self.start, self.end], PAD + loopReach(self.start, self.end))
     );
   });
 

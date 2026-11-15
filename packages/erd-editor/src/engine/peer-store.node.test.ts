@@ -9,15 +9,40 @@ import {
   play,
   renameColumn,
   renameTable,
+  SEED_SCENARIOS,
 } from '@/__test-utils__/peerScenarios';
-import { createSeedValue, SEED } from '@/__test-utils__/peerSeed';
+import {
+  createSeedValue,
+  createUserStore,
+  SEED,
+  settle,
+} from '@/__test-utils__/peerSeed';
+import {
+  ColumnOption,
+  RelationshipType,
+  StartRelationshipType,
+} from '@/constants/schema';
+import {
+  addDictionaryAction,
+  updateDictionaryAction,
+} from '@/engine/modules/dictionary/atom.actions';
+import { setColumnLogicalNameAction$ } from '@/engine/modules/dictionary/generator.actions';
 import { FocusType } from '@/engine/modules/editor/state';
+import {
+  addRelationshipAction,
+  changeRelationshipColumnsAction,
+} from '@/engine/modules/relationship/atom.actions';
+import {
+  addColumnAction,
+  changeColumnPrimaryKeyAction,
+} from '@/engine/modules/table-column/atom.actions';
 import {
   createPeerStore,
   type PeerStore,
   PeerStoreError,
   PeerStoreErrorCode,
 } from '@/engine/peer-store';
+import { bHas } from '@/utils/bit';
 
 const peers: PeerStore[] = [];
 
@@ -87,6 +112,7 @@ describe('peer store in a realm with no DOM (AC-E2)', () => {
     const seed = JSON.parse(createSeedValue());
     seed.settings.originX = -4000;
     seed.settings.originY = -3000;
+    seed.settings.lockSettings = 0;
     const peer = peerOf();
 
     peer.setInitialValue(JSON.stringify(seed));
@@ -141,6 +167,90 @@ describe('peer store in a realm with no DOM (AC-E2)', () => {
     expect(report.label).toBeNull();
     expect(report.createdIds).toHaveLength(1);
     expect(peer.state.doc.tableIds).toContain(report.createdIds[0]);
+  });
+
+  it('hands back the id of a table group it created', () => {
+    const peer = peerOf({ presence: false });
+    peer.setInitialValue(createSeedValue());
+
+    const report = play(peer, SEED_SCENARIOS.addTableGroup());
+
+    expect(report.createdIds).toHaveLength(1);
+    expect(peer.state.doc.tableGroupIds).toContain(report.createdIds[0]);
+    expect(peer.state.collections.tableEntities[SEED.empty].groupId).toBe(
+      report.createdIds[0]
+    );
+  });
+
+  it('hands back the id of a dictionary row it added, and none of a row it changed', () => {
+    const peer = peerOf({ presence: false });
+    peer.setInitialValue(createSeedValue());
+
+    const added = peer.dispatch([
+      addDictionaryAction({ kind: 'term', id: 'term-1' }),
+    ]);
+    const changed = peer.dispatch([
+      updateDictionaryAction({
+        kind: 'term',
+        id: 'term-1',
+        values: { name: 'Member number' },
+      }),
+    ]);
+
+    expect(added.createdIds).toEqual(['term-1']);
+    expect(peer.state.doc.termIds).toEqual([SEED.term, 'term-1']);
+    expect(changed.createdIds).toEqual([]);
+  });
+
+  it('derives a physical name from the dictionaries as an element store does', () => {
+    const value = createSeedValue();
+    const peer = peerOf({ presence: false });
+    peer.setInitialValue(value);
+    const user = createUserStore(value);
+    const add = (id: string) => [addColumnAction({ id, tableId: SEED.empty })];
+    const derive = (id: string, logicalName: string) => [
+      setColumnLogicalNameAction$(SEED.empty, id, logicalName),
+    ];
+    const read = (state: PeerStore['state'], id: string) => {
+      const { name, domainId, dataType, options } =
+        state.collections.tableColumnEntities[id];
+      return {
+        name,
+        domainId,
+        dataType,
+        derived: bHas(options, ColumnOption.nameDerived),
+      };
+    };
+
+    try {
+      for (const [id, logicalName] of [
+        ['by_term', 'Member Name'],
+        ['by_words', 'Name Member'],
+      ]) {
+        peer.dispatch(add(id));
+        user.rxStore.dispatchSync(add(id));
+        peer.dispatch(derive(id, logicalName));
+        user.rxStore.dispatchSync(derive(id, logicalName));
+      }
+
+      expect(read(peer.state, 'by_term')).toEqual({
+        name: 'MBR_NM',
+        domainId: SEED.domain,
+        dataType: 'VARCHAR(255)',
+        derived: true,
+      });
+      expect(read(peer.state, 'by_words')).toEqual({
+        name: 'NM_MBR',
+        domainId: '',
+        dataType: '',
+        derived: true,
+      });
+      for (const id of ['by_term', 'by_words']) {
+        expect(read(user.rxStore.state, id)).toEqual(read(peer.state, id));
+      }
+    } finally {
+      user.destroy();
+    }
   });
 
   it('focuses the table or the column a dispatch names before its edit', () => {
@@ -231,7 +341,7 @@ describe('peer store reseed', () => {
 
     peer.setInitialValue('');
 
-    expect(JSON.parse(peer.value).doc.tableIds).toEqual([]);
+    expect(JSON.parse(peer.value).doc.tableIds ?? []).toEqual([]);
   });
 
   it('drops the focus the old document held', () => {
@@ -243,5 +353,91 @@ describe('peer store reseed', () => {
     peer.setInitialValue(createSeedValue());
 
     expect(peer.state.editor.focusTable).toBeNull();
+  });
+});
+
+describe('peer store values one scheduler turn after a batch', () => {
+  /** What a headless host waits before it reads the value it writes. */
+  const schedulerTurn = () =>
+    new Promise<void>(resolve => setImmediate(resolve));
+
+  /** The flags the runtime value carries, which no file saves. */
+  const heldFlags = (peer: PeerStore, id: string) => {
+    const { identification, startRelationshipType } = JSON.parse(
+      peer.runtimeValue
+    ).collections.relationshipEntities[id];
+    return { identification, startRelationshipType };
+  };
+
+  /** Whether the file form holds a column not null. */
+  const savedNotNull = (peer: PeerStore, id: string) =>
+    bHas(
+      JSON.parse(peer.value).collections.tableColumnEntities[id].options,
+      ColumnOption.notNull
+    );
+
+  /** The seed loaded, with what its load woke written. */
+  async function loadedPeer() {
+    const peer = peerOf({ presence: false });
+    peer.setInitialValue(createSeedValue());
+    await settle();
+    return peer;
+  }
+
+  it('carries the flags a link reads off the columns it ends on', async () => {
+    // A host reads a value one turn after a batch, so a flag derived later
+    // would reach it only with the next edit.
+    const peer = await loadedPeer();
+
+    peer.dispatch([
+      addRelationshipAction({
+        id: 'link',
+        relationshipType: RelationshipType.OneN,
+        start: { tableId: SEED.users, columnIds: [SEED.userId] },
+        end: { tableId: SEED.orders, columnIds: [SEED.orderId] },
+      }),
+    ]);
+    await schedulerTurn();
+
+    expect(heldFlags(peer, 'link')).toEqual({
+      identification: true,
+      startRelationshipType: StartRelationshipType.dash,
+    });
+  });
+
+  it('carries the not null a batch keying two end columns at once turns on', async () => {
+    // A key turns not null on in the microtask after its batch, so the start
+    // read before that one ringed a relationship whose columns all end up keyed.
+    const peer = await loadedPeer();
+    peer.dispatch([
+      changeRelationshipColumnsAction({
+        id: SEED.relationship,
+        start: { tableId: SEED.users, columnIds: [SEED.userId, SEED.userName] },
+        end: {
+          tableId: SEED.orders,
+          columnIds: [SEED.orderUser, SEED.orderNote],
+        },
+      }),
+    ]);
+    await schedulerTurn();
+    expect(heldFlags(peer, SEED.relationship)).toEqual({
+      identification: false,
+      startRelationshipType: StartRelationshipType.ring,
+    });
+
+    peer.dispatch(
+      [SEED.orderUser, SEED.orderNote].map(id =>
+        changeColumnPrimaryKeyAction({ id, tableId: SEED.orders, value: true })
+      )
+    );
+    await schedulerTurn();
+
+    expect(heldFlags(peer, SEED.relationship)).toEqual({
+      identification: true,
+      startRelationshipType: StartRelationshipType.dash,
+    });
+    expect(
+      [SEED.orderUser, SEED.orderNote].map(id => savedNotNull(peer, id))
+    ).toEqual([true, true]);
   });
 });

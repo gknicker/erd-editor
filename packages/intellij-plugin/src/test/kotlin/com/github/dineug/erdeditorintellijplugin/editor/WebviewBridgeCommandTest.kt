@@ -1,6 +1,7 @@
 package com.github.dineug.erdeditorintellijplugin.editor
 
 import com.fasterxml.jackson.databind.JsonNode
+import com.github.dineug.erdeditorintellijplugin.settings.ErdEditorAppSettings
 import com.intellij.openapi.diagnostic.Logger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -100,6 +101,18 @@ class WebviewBridgeCommandTest {
         )
         assertTrue(save is HostBridgeCommand.SaveValue)
         assertEquals("{}", (save as HostBridgeCommand.SaveValue).payload.value)
+        // A page from before the flag sent none, and every save it sent was a change.
+        assertTrue(save.payload.changed)
+        // Nor a runtime value, so the mirror seeds the file's other pages and agents.
+        assertEquals(null, save.payload.runtimeValue)
+
+        val unchanged = mapper.readValue(
+            """{"type":"hostSaveValueCommand","payload":{"value":"{}","changed":false,"runtimeValue":"{\"r\":1}"}}""",
+            HostBridgeCommand::class.java
+        ) as HostBridgeCommand.SaveValue
+        assertFalse(unchanged.payload.changed)
+        assertEquals("{}", unchanged.payload.value)
+        assertEquals("{\"r\":1}", unchanged.payload.runtimeValue)
 
         val export = mapper.readValue(
             """{"type":"hostExportFileCommand","payload":{"value":"AA==","fileName":"a.png"}}""",
@@ -107,6 +120,39 @@ class WebviewBridgeCommandTest {
         )
         assertTrue(export is HostBridgeCommand.ExportFile)
         assertEquals("a.png", (export as HostBridgeCommand.ExportFile).payload.fileName)
+    }
+
+    @Test
+    fun `an import request carries the mode Import and Add names, and none for a replace`() {
+        val append = mapper.readValue(
+            """{"type":"hostImportFileCommand","payload":""" +
+                """{"type":"sql","op":"set","accept":".sql","mode":"append"}}""",
+            HostBridgeCommand::class.java
+        ) as HostBridgeCommand.ImportFile
+        assertEquals("append", append.payload.mode)
+
+        val replace = mapper.readValue(
+            """{"type":"hostImportFileCommand","payload":{"type":"sql","op":"set","accept":".sql"}}""",
+            HostBridgeCommand::class.java
+        ) as HostBridgeCommand.ImportFile
+        assertEquals(null, replace.payload.mode)
+    }
+
+    @Test
+    fun `an imported file goes back with its mode, and with no mode key for a replace`() {
+        val append = mapper.readTree(
+            mapper.writeValueAsString(
+                WebviewBridgeCommand.ImportFile(WebviewImportFileCommandPayload("json", "set", "{}", "append"))
+            )
+        ).get("payload")
+        assertEquals("append", append.get("mode").asText())
+
+        val replace = mapper.readTree(
+            mapper.writeValueAsString(
+                WebviewBridgeCommand.ImportFile(WebviewImportFileCommandPayload("json", "set", "{}"))
+            )
+        ).get("payload")
+        assertFalse(replace.has("mode"))
     }
 
     @Test
@@ -217,6 +263,10 @@ class WebviewBridgeCommandTest {
             "webviewImportFileCommand",
             typeOf(WebviewBridgeCommand.ImportFile(WebviewImportFileCommandPayload("json", "import", "{}")))
         )
+        assertEquals(
+            "webviewUpdateLocaleCommand",
+            typeOf(WebviewBridgeCommand.UpdateLocale(WebviewUpdateLocaleCommandPayload("auto", "en")))
+        )
     }
 
     @Test
@@ -272,5 +322,102 @@ class WebviewBridgeCommandTest {
         assertTrue(payload.has("accentColor"))
         assertTrue("NON_NULL inclusion must drop absent fields", !payload.has("appearance"))
         assertTrue(!payload.has("grayColor"))
+        assertTrue(!payload.has("systemAppearance"))
+    }
+
+    @Test
+    fun `a page is sent the stored theme with the light or dark the IDE shows now`() {
+        var ideDark = false
+        val settings = ErdEditorAppSettings({ ideDark }, { "en" }) {}
+
+        assertEquals(
+            WebviewUpdateThemeCommandPayload("auto", "slate", "indigo", "light"),
+            WebviewBridgeCommand.UpdateTheme.of(settings).payload
+        )
+
+        settings.updateTheme { it.copy(appearance = "dark") }
+        ideDark = true
+        assertEquals(
+            WebviewUpdateThemeCommandPayload("dark", "slate", "indigo", "dark"),
+            WebviewBridgeCommand.UpdateTheme.of(settings).payload
+        )
+    }
+
+    @Test
+    fun `a theme update carries auto with the light or dark it shows`() {
+        val payload = mapper.readTree(
+            mapper.writeValueAsString(
+                WebviewBridgeCommand.UpdateTheme(
+                    WebviewUpdateThemeCommandPayload("auto", "slate", "indigo", "light")
+                )
+            )
+        ).get("payload")
+
+        assertEquals("auto", payload.get("appearance").asText())
+        assertEquals("light", payload.get("systemAppearance").asText())
+    }
+
+    @Test
+    fun `a page's language pick deserializes with its locale as sent`() {
+        val auto = mapper.readValue(
+            """{"type":"hostSaveLocaleCommand","payload":{"locale":"auto"}}""",
+            HostBridgeCommand::class.java
+        )
+        assertEquals(HostBridgeCommand.SaveLocale(HostSaveLocaleCommandPayload("auto")), auto)
+
+        val korean = mapper.readValue(
+            """{"type":"hostSaveLocaleCommand","payload":{"locale":"ko-KR"}}""",
+            HostBridgeCommand::class.java
+        ) as HostBridgeCommand.SaveLocale
+        assertEquals("ko-KR", korean.payload.locale)
+    }
+
+    @Test
+    fun `a language pick with no locale and the outgoing update are not host commands`() {
+        val missing = runCatching {
+            mapper.readValue("""{"type":"hostSaveLocaleCommand","payload":{}}""", HostBridgeCommand::class.java)
+        }
+        assertTrue("a pick must name its locale", missing.isFailure)
+
+        val outgoing = runCatching {
+            mapper.readValue(
+                """{"type":"webviewUpdateLocaleCommand","payload":{"locale":"auto"}}""",
+                HostBridgeCommand::class.java
+            )
+        }
+        assertTrue("only a page's pick comes in", outgoing.isFailure)
+    }
+
+    @Test
+    fun `a page is sent the stored display language with the language the IDE shows now`() {
+        var ideLanguage = "ja"
+        val settings = ErdEditorAppSettings({ false }, { ideLanguage }) {}
+
+        assertEquals(
+            WebviewUpdateLocaleCommandPayload("auto", "ja"),
+            WebviewBridgeCommand.UpdateLocale.of(settings).payload
+        )
+
+        settings.updateLocale("pt-PT")
+        ideLanguage = "pt-BR"
+        assertEquals(
+            WebviewUpdateLocaleCommandPayload("pt-PT", "pt-BR"),
+            WebviewBridgeCommand.UpdateLocale.of(settings).payload
+        )
+    }
+
+    @Test
+    fun `a display language update carries auto with the language it follows, and none left out`() {
+        val payload = mapper.readTree(
+            mapper.writeValueAsString(WebviewBridgeCommand.UpdateLocale(WebviewUpdateLocaleCommandPayload("auto", "ko")))
+        ).get("payload")
+        assertEquals("auto", payload.get("locale").asText())
+        assertEquals("ko", payload.get("systemLocale").asText())
+
+        val named = mapper.readTree(
+            mapper.writeValueAsString(WebviewBridgeCommand.UpdateLocale(WebviewUpdateLocaleCommandPayload("ar-SA")))
+        ).get("payload")
+        assertEquals("ar-SA", named.get("locale").asText())
+        assertFalse("NON_NULL inclusion must drop an absent systemLocale", named.has("systemLocale"))
     }
 }
