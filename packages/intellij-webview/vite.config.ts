@@ -2,6 +2,8 @@ import { join } from 'node:path';
 
 import { defineConfig, type Plugin } from 'vite-plus';
 
+import { erdEditorInlineTwins } from '../../tools/vite/inline-twin.ts';
+
 /**
  * Strips crossorigin from the tags Vite injects. The IDE serves these assets
  * through a custom CEF scheme handler that returns a body and a MIME type and
@@ -22,7 +24,7 @@ export default defineConfig({
   // The IDE serves this bundle and every worker file from one https origin
   // through its scheme handler, so the dependency workers load from their
   // urls here and nothing is inlined, unlike vscode-webview.
-  plugins: [stripCrossorigin()],
+  plugins: [erdEditorInlineTwins(), stripCrossorigin()],
   // index.html is the entry and sits at the package root; there is no static
   // asset directory to copy.
   publicDir: false,
@@ -103,6 +105,7 @@ export default defineConfig({
             'index.html',
             'tsconfig.json',
             { pattern: 'tsconfig.app.json', base: 'workspace' },
+            { pattern: 'tools/vite/inline-twin.ts', base: 'workspace' },
             {
               pattern: 'packages/webview-client/dist/**/*.d.ts',
               base: 'workspace',

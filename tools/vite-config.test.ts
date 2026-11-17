@@ -7,6 +7,10 @@ import type { PluginOption } from 'vite-plus';
 
 import { BROWSER_TARGET } from '../build-target.ts';
 import {
+  ERD_EDITOR_INLINE_TWINS,
+  erdEditorInlineTwins,
+} from './vite/inline-twin.ts';
+import {
   assertInlineWorkersEncoded,
   base64UrlLength,
   MAX_URL_LENGTH,
@@ -609,4 +613,65 @@ test('the rewrite plugins fail a build where their shape stopped matching', () =
     /survived into a host/
   );
   assert.doesNotThrow(() => assertNoUrlWorkers('bundle.js', 'new W(o)'));
+});
+
+test('a one-file host swaps each erd-editor module that ships an inline twin', async () => {
+  const dist = '/repo/packages/erd-editor/dist';
+  const importer = `${dist}/components/generator-code/GeneratorCode.js`;
+  const files = new Set([
+    `${dist}/components/generator-code/loadGenerators.js`,
+    `${dist}/components/generator-code/loadGenerators.inline.js`,
+    `${dist}/components/generator-code/languageSettings.js`,
+    '/repo/packages/app/src/components/generator-code/loadGenerators.js',
+  ]);
+  const errors: string[] = [];
+  const context = {
+    resolve: async (source: string, from: string) => {
+      const id = source.startsWith('/')
+        ? source
+        : join(from, '..', source).replaceAll('\\', '/');
+      return files.has(id) ? { id, external: false } : null;
+    },
+    error: (message: string) => {
+      errors.push(message);
+      throw new Error(message);
+    },
+  };
+  const plugin = erdEditorInlineTwins();
+  const resolveId = plugin.resolveId as (
+    this: typeof context,
+    source: string,
+    importer: string | undefined,
+    options: object
+  ) => Promise<{ id: string } | null>;
+  const run = (source: string, from: string | undefined) =>
+    resolveId.call(context, source, from, {});
+
+  assert.deepEqual(ERD_EDITOR_INLINE_TWINS, [
+    'components/generator-code/loadGenerators',
+  ]);
+  assert.equal(
+    (await run('./loadGenerators.js', importer))?.id,
+    `${dist}/components/generator-code/loadGenerators.inline.js`
+  );
+  assert.equal(
+    (await run('./languageSettings.js', importer))?.id,
+    `${dist}/components/generator-code/languageSettings.js`
+  );
+  assert.equal(
+    await run(
+      './loadGenerators.js',
+      '/repo/packages/app/src/components/generator-code/X.ts'
+    ),
+    null,
+    'a module outside erd-editor dist is left to the other resolvers'
+  );
+  assert.equal(await run('@dineug/erd-editor', importer), null);
+
+  files.delete(`${dist}/components/generator-code/loadGenerators.inline.js`);
+  await assert.rejects(
+    run('./loadGenerators.js', importer),
+    /ships no inline twin/
+  );
+  assert.equal(errors.length, 1);
 });

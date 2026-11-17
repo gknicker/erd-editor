@@ -7,6 +7,7 @@ import { builtinModules } from 'node:module';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
+import { ERD_EDITOR_INLINE_TWINS } from '../tools/vite/inline-twin.ts';
 import { edgesOf } from './check-peer-graph.mjs';
 import { evaluateInHappyDom } from './happy-dom-realm.mjs';
 import {
@@ -475,6 +476,36 @@ function checkLayout() {
   check(`file-level layout (${modules} modules of ${scripts.length} scripts)`, problems);
 }
 
+/** The names a module of dist/ exports, read from its one closing export list. */
+const exportNames = file =>
+  [...read(file).matchAll(/^export \{([^}]*)\};$/gm)]
+    .flatMap(([, list]) => list.split(','))
+    .map(entry => entry.trim().split(/\s+as\s+/).pop())
+    .filter(Boolean)
+    .sort();
+
+/**
+ * Each module the one-file hosts swap for its inline twin ships the twin, with
+ * the same exports, since tools/vite/inline-twin.ts fails a host build without it.
+ */
+function checkInlineTwins() {
+  const problems = [];
+  for (const twin of ERD_EDITOR_INLINE_TWINS) {
+    const lazy = path.join(distDir, `${twin}.js`);
+    const inline = path.join(distDir, `${twin}.inline.js`);
+    if (!fs.existsSync(inline)) {
+      problems.push(`dist/${twin}.inline.js is missing`);
+      continue;
+    }
+    const want = JSON.stringify(exportNames(lazy));
+    const got = JSON.stringify(exportNames(inline));
+    if (want === '[]' || got !== want) {
+      problems.push(`dist/${twin}.inline.js exports ${got}, where ${twin}.js exports ${want}`);
+    }
+  }
+  check(`inline twins (${ERD_EDITOR_INLINE_TWINS.length})`, problems);
+}
+
 /** The dictionaries but English that dist/ holds, as the module paths the boundary file names. */
 const builtDictionaryModules = () =>
   fs
@@ -698,6 +729,7 @@ async function main(argv) {
   }
 
   checkLayout();
+  checkInlineTwins();
   checkDeclarations();
   await checkUmd();
   checkStubs();

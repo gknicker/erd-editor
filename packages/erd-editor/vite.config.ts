@@ -42,6 +42,10 @@ export default defineConfig({
         'erd-viewer': './src/erd-viewer.ts',
         'engine/index': './src/engine/index.ts',
         'peer/index': './src/peer/index.ts',
+        // Imported by nothing here: the hosts that bundle one page swap it in
+        // for loadGenerators.js, through tools/vite/inline-twin.ts.
+        'components/generator-code/loadGenerators.inline':
+          './src/components/generator-code/loadGenerators.inline.ts',
       },
       formats: ['es'],
     },

@@ -2,6 +2,7 @@ import { join } from 'node:path';
 
 import { defineConfig, type Plugin } from 'vite-plus';
 
+import { erdEditorInlineTwins } from '../../tools/vite/inline-twin.ts';
 import { sameOriginDependencyWorkers } from '../../tools/vite/same-origin-worker.ts';
 
 /**
@@ -22,6 +23,7 @@ function stripCrossorigin(): Plugin {
 export default defineConfig({
   base: './',
   plugins: [
+    erdEditorInlineTwins(),
     sameOriginDependencyWorkers({
       runtime: join(import.meta.dirname, 'src/workerSources.ts'),
     }),
@@ -102,6 +104,7 @@ export default defineConfig({
             'vite.config.ts',
             'tsconfig.json',
             { pattern: 'tsconfig.app.json', base: 'workspace' },
+            { pattern: 'tools/vite/inline-twin.ts', base: 'workspace' },
             { pattern: 'tools/vite/same-origin-worker.ts', base: 'workspace' },
             {
               pattern: 'packages/webview-bridge/dist/**/*.d.ts',

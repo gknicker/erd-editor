@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path';
 
 import { defineConfig, type Plugin } from 'vite-plus';
 
+import { erdEditorInlineTwins } from '../../tools/vite/inline-twin.ts';
 import { base64InlineWorkers } from '../../tools/vite/inline-worker.ts';
 
 /** The dist files of the workspace packages that construct a worker from a url. */
@@ -173,6 +174,7 @@ export default defineConfig({
   // manifest.json and styles.css are emitted by pluginFiles; nothing else is static.
   publicDir: false,
   plugins: [
+    erdEditorInlineTwins(),
     inlineUrlWorkers(),
     base64InlineWorkers(),
     pluginFiles(),
@@ -228,6 +230,7 @@ export default defineConfig({
             ...typeInputs,
             'manifest.json',
             'styles.css',
+            { pattern: 'tools/vite/inline-twin.ts', base: 'workspace' },
             { pattern: 'tools/vite/inline-worker.ts', base: 'workspace' },
             '!dist/**',
           ],
